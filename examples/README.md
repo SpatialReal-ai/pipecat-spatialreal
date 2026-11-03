@@ -4,13 +4,13 @@ Written for Pipecat v1.15.0.
 
 | Path | What it is |
 |---|---|
-| `bot.py` | The bot: Pipecat's `06-voice-agent` shape (Deepgram, OpenAI, Cartesia) with `SpatialRealAvatarProcessor` after the TTS. One file, run by Pipecat's development runner on Daily or LiveKit. |
+| `bot.py` | The bot: Pipecat's `06-voice-agent` shape (Deepgram, Gemini, Cartesia) with `SpatialRealAvatarProcessor` after the TTS. One file, run by Pipecat's development runner on Daily or LiveKit. |
 | `client/` | The web page: `pipecat-client-js` plus the SpatialReal web SDK. See [client/README.md](client/README.md). |
 | `probe/` | A silent receiver that measures how the envelope and the bot's audio line up in a Daily room. A developer tool for this package. See [probe/README.md](probe/README.md). |
 
 ## Run it
 
-You need keys for SpatialReal, Deepgram, Cartesia and OpenAI, and for Daily or LiveKit.
+You need keys for SpatialReal, Deepgram, Cartesia and Gemini (Google AI Studio), and for Daily or LiveKit.
 
 ```bash
 uv sync --extra example
@@ -36,7 +36,7 @@ All of them come from the environment or `.env`.
 |---|---|
 | `SPATIALREAL_API_KEY`, `SPATIALREAL_APP_ID`, `SPATIALREAL_AVATAR_ID` | The avatar. The API key stays on the server. |
 | `SPATIALREAL_CONSOLE_ENDPOINT`, `SPATIALREAL_INGRESS_ENDPOINT` | Optional: another SpatialReal deployment than production (`us-west`). |
-| `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `OPENAI_API_KEY` | Speech to text, text to speech and the language model. `CARTESIA_VOICE_ID` picks another voice. |
+| `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `GEMINI_API_KEY` | Speech to text, text to speech and the language model (Gemini). `CARTESIA_VOICE_ID` picks another voice. |
 | `DAILY_API_KEY` | `-t daily`: the runner creates a room per session. `DAILY_ROOM_URL` reuses one room instead. |
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | `-t livekit`. |
 
