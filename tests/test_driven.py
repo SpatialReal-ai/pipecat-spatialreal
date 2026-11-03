@@ -251,6 +251,33 @@ async def test_a_failed_interrupt_is_a_loss_and_not_an_error(fake, monkeypatch):
     assert not d.connected and len(downs) == 1
 
 
+async def test_a_raising_on_down_cannot_change_what_send_and_interrupt_do(fake, monkeypatch):
+    failure = spatialreal.AvatarSDKError(
+        spatialreal.AvatarSDKErrorCode.connectionClosed, "boom", phase="websocket_send"
+    )
+
+    def on_down(reason):
+        raise KeyError("a bug in the callback")
+
+    async def broken_send(audio, end=False):
+        raise failure
+
+    async def broken_interrupt():
+        raise failure
+
+    d = make(fake, on_down=on_down)
+    await d.connect()
+    monkeypatch.setattr(d._link.session, "send_audio", broken_send)
+    with pytest.raises(RuntimeError, match="driveningress not connected") as raised:
+        await d.send(pcm_ms(40, 24000))
+    assert raised.value.__cause__ is failure and not d.connected
+
+    await d.connect()
+    await d.send(pcm_ms(40, 24000))
+    monkeypatch.setattr(d._link.session, "interrupt", broken_interrupt)
+    assert await d.interrupt() is None and not d.connected
+
+
 async def test_nothing_to_interrupt_before_audio_or_without_a_link(fake):
     d = make(fake)
     assert await d.interrupt() is None  # never connected
@@ -328,7 +355,7 @@ async def test_connect_replaces_a_live_session(fake):
     assert {s.req_id for s in got} == {req}
 
 
-async def test_close_while_connecting_leaves_no_session(fake):
+async def test_close_during_the_token_exchange_opens_no_socket(fake):
     downs = []
     d = make(fake, on_down=downs.append)
     fake.token_gate = asyncio.Event()
@@ -338,8 +365,35 @@ async def test_close_while_connecting_leaves_no_session(fake):
     fake.token_gate.set()
     with pytest.raises(RuntimeError, match="closed while connecting"):
         await connecting
-    await until(lambda: fake.connections == 1 and fake.open_connections == 0)
+    assert fake.connections == 0  # the session was dropped before it opened a socket (it bills)
     assert not d.connected and downs == []
+
+
+async def test_close_during_the_handshake_fails_connect_and_leaves_no_socket(fake):
+    fake.confirm_gate = asyncio.Event()
+    d = make(fake)
+    connecting = asyncio.create_task(d.connect())
+    await until(lambda: fake.open_connections == 1)  # the socket is open, the handshake is not done
+    await d.close()
+    with pytest.raises(spatialreal.AvatarSDKError):  # the handshake failed under its closed socket
+        await connecting
+    await until(lambda: fake.open_connections == 0)
+    assert not d.connected
+
+
+async def test_close_during_the_socket_upgrade_closes_the_socket(fake, monkeypatch):
+    d = make(fake)
+    start = spatialreal.AvatarSession.start
+
+    async def close_then_start(session):
+        await d.close()  # a close() that lands while start() has not opened its socket yet
+        return await start(session)
+
+    monkeypatch.setattr(spatialreal.AvatarSession, "start", close_then_start)
+    with pytest.raises(RuntimeError, match="closed while connecting"):
+        await d.connect()
+    await until(lambda: fake.connections == 1 and fake.open_connections == 0)
+    assert not d.connected
 
 
 async def test_cancelling_connect_closes_the_half_open_session(fake):

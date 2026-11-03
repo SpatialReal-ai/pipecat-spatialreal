@@ -5,8 +5,9 @@ The processor streams the bot's speech to driveningress and gets the facial anim
 module narrows it to what the processor needs.
 
 * Animation returns over the same WebSocket, which is what the SDK does when no egress is
-  configured. Each server message reaches the caller as a :class:`Segment` whose ``wire`` is the
-  SDK's bytes, untouched, so the processor can forward them without serializing anything.
+  configured. Each animation message from the server reaches the caller as a :class:`Segment`
+  whose ``wire`` is the SDK's bytes, untouched, so the processor can forward them without
+  serializing anything.
 * A session that ends is reported once, through ``on_down``, with a short readable reason.
   The SDK has no reconnect and a session object cannot be reused, so this layer has none either:
   to come back, call :meth:`DrivenIngress.connect` again, which builds a new SDK session. When
@@ -31,14 +32,20 @@ from spatialreal.proto.generated import message_pb2
 class Segment:
     """One animation message from driveningress.
 
-    The server answers a request's audio with one message per inference segment, the keyframes
-    for a stretch of that audio, and one last message when the request ends.
+    The server answers a request's audio with one message per inference segment, each carrying
+    the keyframes for a stretch of that audio.
 
     Attributes:
         req_id: The request the animation belongs to: the id :meth:`DrivenIngress.send` returned
             for its audio.
         wire: The complete serialized ``driveningress.v2.Message``, exactly as received.
-        end: True on the request's last message, the one that answers ``end=True``.
+        end: True on the last message the server sends for the request. That message is an
+            ordinary segment, usually with animation, not a marker of its own, and the server
+            may send none. It sends none when the end arrives with nothing left to infer (no
+            audio was sent, or the audio already filled its last segment exactly, and the
+            client sends the 16 kHz the inference runs at, so no resampler tail remains) or
+            when the last inference fails. A consumer must not wait for ``end`` alone to close
+            a turn.
     """
 
     req_id: str
@@ -142,7 +149,9 @@ class DrivenIngress:
             spatialreal.AvatarSDKError: The token exchange or the handshake failed; its ``code``
                 says why, and ``retryable`` whether trying again can help.
             ValueError: ``api_key``, ``app_id`` or ``avatar_id`` is empty.
-            RuntimeError: :meth:`close` ran while this call was waiting.
+            RuntimeError: :meth:`close` ran while this call was waiting and the call gave up.
+                A close that cuts the handshake short raises ``AvatarSDKError`` instead. Either
+                way no socket is left open.
         """
         await self.close()
         link = _Link()
@@ -157,7 +166,9 @@ class DrivenIngress:
         self._link = link  # close() can reach the session from here on
         try:
             await link.session.init()
-            await link.session.start()
+            # A close() during the token exchange must not be followed by a socket: it bills.
+            if link.state is _State.CONNECTING:
+                await link.session.start()
         except BaseException:  # also a cancellation: the half-open session must not outlive it
             link.state = _State.DOWN
             if self._link is link:
@@ -165,7 +176,7 @@ class DrivenIngress:
             await link.session.close()
             raise
         if link.state is _State.DOWN:  # close() ran while this call waited
-            await link.session.close()
+            await link.session.close()  # closes the socket too, if start() opened one
             raise RuntimeError("driveningress closed while connecting")
         link.state = _State.UP
 
@@ -177,7 +188,8 @@ class DrivenIngress:
 
         Args:
             pcm: PCM16 little-endian mono audio at ``sample_rate``; may be empty.
-            end: True on the request's last chunk.
+            end: True on the request's last chunk. The server's reply to it is not guaranteed to
+                be a :class:`Segment` with ``end`` set; see there.
 
         Returns:
             The id of the request the audio went into.
@@ -252,7 +264,12 @@ class DrivenIngress:
         if link.state is not _State.UP:
             return
         link.state = _State.DOWN
-        self._on_down(reason)
+        try:
+            self._on_down(reason)
+        except Exception:  # noqa: BLE001
+            # The callback is the caller's. Its bug must not reach the call that found the loss:
+            # send() promises RuntimeError and interrupt() promises not to raise.
+            logger.exception("on_down callback raised")
 
 
 def _describe(exc: Exception) -> str:
