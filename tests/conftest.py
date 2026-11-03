@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import pytest
 from fake_driveningress import FakeDriveningress
+from loguru import logger
 from pipecat.frames.frames import EndFrame, InterruptionFrame, TTSAudioRawFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker
@@ -102,6 +103,27 @@ async def fake():
         yield backend
         while _clients:
             await _clients.pop().close()
+
+
+@pytest.fixture
+def pipecat_log():
+    """Fail a test whose pipeline reported an error or left a task running.
+
+    Pipecat logs, rather than raises, what goes wrong inside a processor's tasks: an exception
+    in a background task, an error pushed by ``process_frame``, a task still running at teardown.
+    The one error every test expects is the setup notice that RTVI is off, which ``run_test``
+    does on purpose. The records are the test's to inspect, and to drop an error it expected.
+    """
+    records = []
+    sink = logger.add(lambda message: records.append(message.record), level="WARNING")
+    yield records
+    logger.remove(sink)
+    errors = [
+        r["message"]
+        for r in records
+        if (r["level"].no >= 40 and "RTVI" not in r["message"]) or "dangling" in r["message"]
+    ]
+    assert errors == []
 
 
 # --- Waiting for the pipeline instead of for a time
