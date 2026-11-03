@@ -28,8 +28,9 @@ opens a pull request that moves this line when they pass on a newer one.
   (`turn_abort`) and stops its inference.
 * If SpatialReal cannot be reached, or answers too slowly (`hold_cap_s`), the audio still plays,
   unanimated. The browser is told (`STATUS_DEGRADED`) and the processor keeps reconnecting.
-* The processor opens one SpatialReal connection for the whole bot session, when the pipeline
-  starts. Billing is per connection, not per viewer.
+* The processor connects to SpatialReal when the pipeline starts and holds one connection for the
+  bot session, opening a new one whenever it is lost or the server ends it at the plan's maximum
+  session duration (see [Limitations](#limitations)). Billing is per connection, not per viewer.
 
 ## Installation
 
@@ -171,8 +172,17 @@ measures how the avatar lines up with the bot's audio in a Daily room.
 * **Transcripts run ahead.** Held frames keep the presentation time the TTS stamped on them, which is
   already past when they are released. Word-timestamped text and the assistant aggregator therefore
   run up to `lead_ms` ahead of the speech they report.
-* **One connection per bot session.** The processor opens one SpatialReal connection, however many
-  viewers watch.
+* **One connection at a time.** The processor holds one SpatialReal connection per bot session,
+  however many viewers watch.
+* **The plan's maximum session duration.** On a SpatialReal plan with a maximum session duration,
+  the server closes the connection when it reaches that duration (close code 4002,
+  `session_timeout`; the duration depends on the plan). The processor reconnects at once. The turn
+  being spoken plays on without animation, as does a turn that starts before the new connection is
+  up: the browser gets `STATUS_DEGRADED`, then `STATUS_OK` once the processor is connected again,
+  and the turns that start after that are animated. In a longer bot session this repeats each time
+  the current connection reaches the limit, since every new connection gets the full duration. An
+  account whose plan has no maximum session duration is not affected. Reconnecting between turns
+  ahead of the limit, so that no turn is cut, is not implemented.
 * **Python 3.11 or newer.**
 
 ## Development
