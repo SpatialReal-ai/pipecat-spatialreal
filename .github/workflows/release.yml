@@ -27,6 +27,18 @@ jobs:
       - name: Build sdist and wheel
         run: uv build
 
+      # The release tag names the version PyPI will show forever; refuse a tag that does not
+      # match the version the package was built with (src/pipecat_spatialreal/version.py).
+      - name: Check the release tag against the built version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          for whl in dist/*.whl; do
+            built=$(basename "$whl" | sed -E 's/^pipecat_spatialreal-([^-]+)-.*/\1/')
+          done
+          echo "tag=$TAG built=$built"
+          test "$TAG" = "v$built" || { echo "release tag $TAG does not match the built version $built"; exit 1; }
+
       # The generated protobuf module is what a broken build drops silently, and the package
       # imports it at load time. Install the built wheel, not the source tree, into a fresh
       # environment and import it from outside the checkout.

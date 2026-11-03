@@ -47,6 +47,9 @@ on Daily and LiveKit rooms is still to be done.
   gets its token from the console the processor uses, and the example page hands the web SDK only
   the bot's audio track, can be stopped while the bot starts, and serves the probe at `/probe/`.
   The example bot uses Gemini (`GEMINI_API_KEY`) as its language model.
+- A release workflow: publishing a GitHub Release builds the package, checks the tag against the
+  built version, smoke-tests the wheel in a fresh environment and publishes to PyPI through
+  trusted publishing.
 - CI: every job has a timeout and a hung test ends after 120 s; a second job tests the lowest
   versions `pyproject.toml` declares; a smoke test sends the avatar messages through RTVI and
   Pipecat's eval transport. The weekly compatibility job runs read-only and a separate job opens

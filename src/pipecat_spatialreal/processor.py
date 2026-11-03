@@ -301,14 +301,15 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 not change it on its own.
             min_silence_ms: Shortest silence, in ms, after which the next sound is a new onset.
                 Must equal the web SDK's value, which is fixed at 150; the web SDK takes no
-                setting for it, so do not change it on its own. A turn that does not follow the previous
-                one back to back starts at least this long after the last audio before it, so
-                that the web SDK can find its onset; one that would have started sooner waits
-                until this long plus one ``silence_chunk_ms`` have passed.
+                setting for it, so do not change it on its own. A turn that does not follow
+                the previous one back to back starts at least this long after the last audio
+                before it, so that the web SDK can find its onset; one that would have started
+                sooner waits until this long plus one ``silence_chunk_ms`` have passed.
             lead_ms: How far ahead of real time the audio is released.
             hold_cap_s: Longest time a turn's audio is held for its first animation, counted
-                from the turn's first audio; after it, the turn plays without animation. Also the longest wait, once a turn's audio has
-                played, for the last segment of its animation.
+                from the turn's first audio; after it, the turn plays without animation. Also
+                the longest wait, once a turn's audio has played, for the last segment of its
+                animation.
             silence_chunk_ms: Length of each chunk of silence played while the TTS is behind. A
                 multiple of ``output_chunk_ms``.
             output_chunk_ms: Length of the audio chunks released downstream, which every turn

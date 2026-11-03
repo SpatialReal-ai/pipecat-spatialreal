@@ -1936,7 +1936,7 @@ async def test_a_turn_after_a_degraded_turn_is_not_chained(fake):
     announced = turn_start_time(pushed, second["turn_id"])
     assert announced - end1 >= GAP_S - GAP_SLACK_S  # announced at its release, after the quiet
     assert t2 - end1 >= GAP_S - GAP_SLACK_S and type(second_audio) is TTSAudioRawFrame
-    assert 0 <= t2 - announced < 0.2
+    assert 0 <= t2 - announced < LATE_S
     assert_turn_lifecycle(down)
 
 
