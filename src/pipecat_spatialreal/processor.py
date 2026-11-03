@@ -214,6 +214,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
 
         self._out_rate = 24000
         self._silence = b""
+        self._stall_ahead_s = 0.0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._driven: DrivenIngress | None = None
         self._link_task: asyncio.Task | None = None
@@ -254,6 +255,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         self._loop = asyncio.get_running_loop()
         self._out_rate = setup.audio_out_sample_rate
         self._silence = bytes(2 * (self._out_rate * self._silence_chunk_ms // 1000))
+        # A stall is bridged one chunk ahead, not the lead ahead: the audio that ends it must not
+        # queue behind more silence than keeps the transport fed. Never more than the lead.
+        self._stall_ahead_s = min(self._lead_s, len(self._silence) / (2 * self._out_rate))
         if not _rtvi_enabled(setup.pipeline_worker):
             logger.error(
                 f"{self}: RTVI is disabled in this pipeline, so no animation can reach the "
@@ -668,7 +672,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 return  # it holds everything behind it until it is announced
             while turn.hold or not turn.finished:
                 if not turn.hold:  # the TTS is behind playback: play silence meanwhile
-                    due = self._next_release()
+                    due = self._next_release(self._stall_ahead_s)
                     if due is not None:
                         deadlines.append(due)
                         return
@@ -681,7 +685,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                     turn.playout_end = max(self._playout_end, self._now())
                     continue
                 if _plays(item):
-                    due = self._next_release()
+                    due = self._next_release(self._lead_s)
                     if due is not None:
                         deadlines.append(due)
                         return
@@ -690,9 +694,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 await self.push_frame(item)
             turn.drained = True  # the next turn may start at once
 
-    def _next_release(self) -> float | None:
-        """None when more audio may be released now, else the loop time it may be."""
-        due = self._playout_end - self._lead_s
+    def _next_release(self, ahead: float) -> float | None:
+        """None when audio may go now, ``ahead`` s of playout at most, else the loop time it may."""
+        due = self._playout_end - ahead
         return None if due <= self._now() + _TOLERANCE_S else due
 
     async def _play_silence(self, turn: _Turn) -> None:

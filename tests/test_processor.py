@@ -66,6 +66,21 @@ def messages(frames, member):
     ]
 
 
+def record_pushes(proc):
+    """Every frame ``proc`` pushes, with the loop time it pushed it at, in order.
+
+    Unlike the sink, this also sees what is pushed after a ``CancelFrame``, which the processors
+    downstream drop.
+    """
+    pushed = []
+
+    @proc.event_handler("on_after_push_frame")
+    async def _record(processor, frame):
+        pushed.append((asyncio.get_running_loop().time(), frame))
+
+    return pushed
+
+
 @pytest.fixture(autouse=True)
 def pipecat_log():
     """Fail a test whose pipeline reported an error or left a task running.
@@ -137,6 +152,31 @@ async def test_stall_mirrors_silence(fake):
     sil = [f for f in down if type(f) is OutputAudioRawFrame]
     assert 4 <= len(sil) <= 10 and all(set(f.audio) == {0} for f in sil)
     assert fake.received_audio_ms(req_of(down)) == 500 + 40 * len(sil)
+
+
+async def test_a_stall_is_not_stretched_by_the_lead(fake):
+    proc = make_proc(fake)  # lead_ms 200, silence_chunk_ms 40
+    pushed = record_pushes(proc)
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(300),
+            SleepFrame(0.6),  # the TTS falls ~300 ms behind the room
+            tone_frame(500),
+            TTSStoppedFrame(),
+            SleepFrame(1.2),
+        ],
+    )
+    (first, _), (second, _) = [(t, f) for t, f in pushed if isinstance(f, TTSAudioRawFrame)]
+    silence = [f for t, f in pushed if type(f) is OutputAudioRawFrame and first <= t <= second]
+    stall = second - (first + 0.3)  # how long the room waited for the TTS
+    inserted = len(silence) * 0.04
+    assert stall > 0.2
+    # The silence bridges the stall and the one chunk kept queued so the transport never runs
+    # dry, within one chunk; the 200 ms lead is not added on top.
+    assert -0.01 <= inserted - stall - 0.04 <= 0.04 + 0.01
+    assert fake.received_audio_ms(req_of(down)) == 800 + 40 * len(silence)
 
 
 async def test_interruption_before_first_segment(fake):
