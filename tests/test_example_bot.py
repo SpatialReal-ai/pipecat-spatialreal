@@ -47,7 +47,7 @@ KEYS = {
     "SPATIALREAL_AVATAR_ID": "avatar-1",
     "DEEPGRAM_API_KEY": "dg-key",
     "CARTESIA_API_KEY": "ca-key",
-    "OPENAI_API_KEY": "oa-key",
+    "GEMINI_API_KEY": "gm-key",
 }
 
 
