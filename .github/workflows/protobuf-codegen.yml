@@ -15,7 +15,8 @@ name: Protobuf Codegen
 # every secret it names when the job starts. Three jobs, in order:
 #
 #   contract  reads the contract from shared-proto with a token that can only read that repository,
-#             and hands the .proto files on. It runs GitHub's own actions and git, nothing else.
+#             and hands pipecat/v1/avatar.proto on. It runs GitHub's own actions and git, nothing
+#             else.
 #   generate  installs the dev extra (freshly resolved third-party packages), generates the code and
 #             runs the gates. It names no secret, holds a read-only token and keeps none of it in
 #             the checkout, and hands the two generated files on.
@@ -64,10 +65,13 @@ jobs:
         id: ref
         run: echo "short_sha=$(git -C proto-src rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
+      # Only the file this package is generated from: the rest of shared-proto stays out of the job
+      # that runs third-party code. Should avatar.proto ever import another file, protoc names it
+      # and it is added here.
       - uses: actions/upload-artifact@v7
         with:
           name: contract
-          path: proto-src/**/*.proto
+          path: proto-src/pipecat/v1/avatar.proto
           if-no-files-found: error
           retention-days: 1
 
@@ -84,7 +88,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: contract
-          path: proto-src
+          path: proto-src/pipecat/v1
 
       # No pip cache: what a third-party package left in it would come back in later runs.
       - uses: actions/setup-python@v5
