@@ -103,18 +103,39 @@ test('a good session: three turns pass, nothing else flagged', () => {
   assert.equal(a.end.pcmMs, 3000); assert.equal(a.end.segments, 2)
 })
 
-test('the segment bytes are the chunks joined in chunk_index order', () => {
+/** A session in which turn A's segment 0 arrives as chunks 2, 0, 1. */
+function segment0ArrivingOutOfOrder() {
   const s = goodSession()
-  // deliver A's chunks out of order: reassembly must still give the original 5120 bytes
-  const chunks = s.log.filter(r => r.data.frames && r.data.frames.segment_seq === 0 && r.data.frames.turn_id === A)
-  const [c0, c1, c2] = chunks
-  const t = [c0.t, c1.t, c2.t]
-  s.log.splice(s.log.indexOf(c0), 3, { ...c2, t: t[0] }, { ...c0, t: t[1] }, { ...c1, t: t[2] })
-  const r = analyze(s)
-  assert.deepEqual(plain(r.problems), [])
-  const expected = Uint8Array.from({ length: 5120 }, (_, i) => i % 256)
-  const seg = api.reassemble({ count: 3, chunks: new Map(chunks.map(c => [c.data.frames.chunk_index, api.decodeBase64(c.data.frames.data)])) })
-  assert.deepEqual(Buffer.from(seg), Buffer.from(expected))
+  const ofSegment0 = r => r.data.frames && r.data.frames.turn_id === A && r.data.frames.segment_seq === 0
+  const [c0, c1, c2] = s.log.filter(ofSegment0)
+  assert.deepEqual([c0, c1, c2].map(c => c.data.frames.chunk_index), [0, 1, 2])
+  // Each chunk keeps its chunk_index; only the order of arrival changes.
+  const times = [c0.t, c1.t, c2.t]
+  s.log.splice(s.log.indexOf(c0), 3, { ...c2, t: times[0] }, { ...c0, t: times[1] }, { ...c1, t: times[2] })
+  const arrival = s.log.filter(ofSegment0)
+  assert.deepEqual(arrival.map(c => c.data.frames.chunk_index), [2, 0, 1])
+  return { s, arrival }
+}
+const SEGMENT0 = Buffer.from(Uint8Array.from({ length: 5120 }, (_, i) => i % 256))   // E.A_seg0's bytes
+
+test('analyze() joins a segment\'s chunks in chunk_index order, not in the order they arrive', () => {
+  const { s } = segment0ArrivingOutOfOrder()
+  const result = analyze(s)
+  assert.deepEqual(plain(result.problems), [])
+  const [segment0, segment1] = result.turns[0].segments
+  assert.equal(segment0.complete, true)
+  assert.deepEqual(Buffer.from(segment0.wire), SEGMENT0)
+  assert.deepEqual(plain([segment0.seq, segment0.chunks, segment0.count, segment0.bytes, segment0.end]), [0, 3, 3, 5120, false])
+  assert.deepEqual(plain([segment1.seq, segment1.chunks, segment1.count, segment1.bytes, segment1.end]), [1, 1, 1, 1000, true])
+})
+
+test('reassemble() joins by chunk_index from a Map filled in arrival order, and not before every chunk is there', () => {
+  const { arrival } = segment0ArrivingOutOfOrder()
+  const filled = new Map(arrival.map(c => [c.data.frames.chunk_index, api.decodeBase64(c.data.frames.data)]))
+  assert.deepEqual([...filled.keys()], [2, 0, 1])               // insertion order is arrival order
+  assert.deepEqual(Buffer.from(api.reassemble({ count: 3, chunks: filled })), SEGMENT0)
+  filled.delete(1)
+  assert.equal(api.reassemble({ count: 3, chunks: filled }), null)
 })
 
 test('bad numbers are called out', () => {
@@ -217,6 +238,25 @@ test('contract: segment numbering and the end flag', () => {
   const text = analyze(s).problems.map(p => p.text).join('\n')
   assert(/segment_seq runs 0, 1, 3/.test(text), text)
   assert(/turn_end counts 2 segments, 3 arrived/.test(text), text)
+  // the clone keeps end=true, so now segments 1 and 3 both carry it
+  assert(/aaaaaaaa: end is set on segments 1, 3; only the last carries it/.test(text), text)
+})
+
+test('contract: a segment that follows the one carrying end', () => {
+  const s = goodSession()
+  const after = clone(E.A_seg1[0]); after.frames.segment_seq = 2; after.frames.end = false   // 0, 1 (end), 2
+  s.log.push({ t: s.T0 + 1150, tap: 0, size: 3000, data: after })
+  const text = analyze(s).problems.map(p => p.text).join('\n')
+  assert(/aaaaaaaa: segment 2 follows the end segment 1/.test(text), text)
+  assert(!/end is set on segments/.test(text), text)          // one end flag only: the other rule stays quiet
+})
+
+test('contract: chunk_count must not change inside a segment', () => {
+  const s = goodSession()
+  const chunks = s.log.filter(r => r.data.frames && r.data.frames.turn_id === A && r.data.frames.segment_seq === 0)
+  chunks[2].data.frames.chunk_count = 4                       // chunks 0 and 1 said 3
+  const text = analyze(s).problems.map(p => p.text).join('\n')
+  assert(/aaaaaaaa segment 0: chunk_count changes from 3 to 4/.test(text), text)
 })
 
 test('turn_onsets add to the announced onsets and are paired', () => {

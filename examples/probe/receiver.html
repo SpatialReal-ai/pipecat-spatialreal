@@ -362,6 +362,10 @@ function analyze({ log, onsets, markers, rate }) {
   // 4. One row per turn.
   for (const turn of list) {
     const row = (turn.row = { id: turn.id, short: short(turn.id), fails: [], notes: [], laterErrs: [] })
+    // Each segment as reassembled (wire is the joined driveningress message, or null while a chunk is missing).
+    row.segments = [...turn.segments.values()]
+      .sort((a, b) => a.seq - b.seq)
+      .map(({ seq, chunks, count, bytes, end, complete, wire }) => ({ seq, chunks: chunks.size, count, bytes, end, complete, wire }))
     if (!turn.start) {
       row.fails.push('no turn_start')
       continue
