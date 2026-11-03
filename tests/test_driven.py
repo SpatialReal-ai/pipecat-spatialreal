@@ -593,17 +593,20 @@ async def test_close_on_a_half_open_link_returns_within_the_wire_timeout(fake):
     await until(lambda: connection.state is State.CLOSED)
 
 
-async def test_connect_after_a_timed_out_send_does_not_wait_for_the_old_socket(fake):
-    """The socket was aborted at the timeout, so the reconnect's close of it is instant."""
-    d = make(fake, wire_timeout_s=WIRE_TIMEOUT_S)
+async def test_closing_after_a_timed_out_send_does_not_wait_for_the_old_socket(fake):
+    """The socket was aborted at the timeout, so closing the lost session, which every
+    reconnect does first, is instant: it does not wait the timeout out a second time."""
+    timeout = 1.0  # long enough that a close that did wait it out is unmistakable
+    d = make(fake, wire_timeout_s=timeout)
     await d.connect()
     await d.send(pcm_ms(40, 24000))
     half_open(fake, d)
     with pytest.raises(RuntimeError):
-        await bounded(d.send(pcm_ms(40, 24000)))
+        await asyncio.wait_for(d.send(pcm_ms(40, 24000)), timeout + LATE_S + 1.0)
     started = time.monotonic()
-    await bounded(d.connect())
-    assert time.monotonic() - started < WIRE_TIMEOUT_S  # no second wait of the timeout's length
+    await asyncio.wait_for(d.close(), timeout + LATE_S + 1.0)
+    assert time.monotonic() - started < timeout / 2
+    await d.connect()  # and a new session opens on top of it
     assert d.connected and fake.connections == 2
 
 
