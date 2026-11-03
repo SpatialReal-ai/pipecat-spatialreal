@@ -34,9 +34,26 @@ import { PipecatClient } from 'https://esm.sh/@pipecat-ai/client-js@1.16.0'
 import { DailyTransport } from 'https://esm.sh/@pipecat-ai/daily-transport@1.7.2?deps=@pipecat-ai/client-js@1.16.0'
 
 const $ = id => document.getElementById(id)
-const params = new URLSearchParams(location.search)
-const RUNNER = (params.get('runner') || '').replace(/\/$/, '')        // the bot's web server; default: this origin
-const TRANSPORT = params.get('transport') === 'livekit' ? 'livekit' : 'daily'  // must match the bot's -t
+const TRANSPORT = new URLSearchParams(location.search).get('transport') === 'livekit' ? 'livekit' : 'daily'  // must match the bot's -t
+
+// How long Start waits for each step before it gives up and says so. A bot that fails while it
+// starts (a missing key, say) never becomes ready, and its terminal says why.
+const REQUEST_TIMEOUT_MS = 15000
+const READY_TIMEOUT_MS = 30000
+
+// The bot's participant, as Pipecat's development runner names it: "Pipecat Bot" on Daily, and on
+// LiveKit the identity "Pipecat Agent-" and the first 8 characters of the session id /start
+// returns. Only that participant's audio goes to the SDK: handed another participant's track, the
+// SDK would play it in place of the bot's voice. The page expects one bot per room.
+const DAILY_BOT_NAME = 'Pipecat Bot'
+
+/** A test for the bot's participant, from what /start returned. */
+function botParticipant(started) {
+  if (TRANSPORT === 'daily') return participant => participant?.name === DAILY_BOT_NAME
+  if (!started.sessionId) throw new Error('/start returned no sessionId: the bot cannot be told from other participants')
+  const identity = `Pipecat Agent-${String(started.sessionId).slice(0, 8)}`
+  return participant => participant?.id === identity
+}
 
 const say = text => {
   $('status').textContent = text
@@ -53,12 +70,27 @@ try {
   say(`vendor/spatialreal-web-sdk.js could not be loaded (${e.message}); see examples/client/README.md`)
 }
 
-let session = null
-let client = null
-let audioContext = null // one per run: made in the click, closed by stop()
+// The run that Start began and Stop ends: what it has made so far, and the signal Stop aborts.
+let run = null
 
-async function request(path, init) {
-  const response = await fetch(`${RUNNER}${path}`, init)
+/** Wait for `promise`, but no longer than `ms` (then fail with `late`), and not past Stop. */
+function within(promise, ms, signal, late) {
+  let timer, onStop
+  const bounds = new Promise((_, reject) => {
+    if (signal.aborted) return reject(signal.reason)
+    timer = setTimeout(() => reject(new Error(late)), ms)
+    onStop = () => reject(signal.reason)
+    signal.addEventListener('abort', onStop, { once: true })
+  })
+  return Promise.race([promise, bounds]).finally(() => {
+    clearTimeout(timer)
+    signal.removeEventListener('abort', onStop)
+  })
+}
+
+async function request(path, init, signal) {
+  const response = await within(fetch(path, { ...init, signal }), REQUEST_TIMEOUT_MS, signal,
+    `${path} did not answer within ${REQUEST_TIMEOUT_MS / 1000} s`)
   if (!response.ok) {
     const detail = await response.json().then(body => body.detail, () => '')
     throw new Error(`${path} answered ${response.status}${detail ? `: ${detail}` : ''}`)
@@ -75,62 +107,87 @@ async function makeTransport() {
 }
 
 $('start').onclick = async () => {
+  const current = { stop: new AbortController(), client: null, session: null, audioContext: null }
+  const { signal } = current.stop
+  run = current
   $('start').disabled = true
+  $('stop').disabled = false // Stop works while the bot starts, too
   try {
     // Inside the click, before any await: the browser lets this context play. session.start()
     // runs after the requests below, which is too late for some browsers to unlock audio.
-    audioContext ??= sdk.createUnlockedAudioContext()
+    current.audioContext = sdk.createUnlockedAudioContext()
 
     // 1. The browser gets a session token from our own backend; the API key never leaves it.
     say('getting a session token')
-    const { session_token, avatar_id, app_id } = await request('/spatialreal-token')
+    const { session_token, avatar_id, app_id, endpoints } = await request('/spatialreal-token', {}, signal)
 
-    // 2. The avatar session loads the avatar into #avatar. For a SpatialReal deployment other
-    //    than production, also pass `endpoints` here.
-    const sr = new sdk.SpatialReal({ appId: app_id })
-    session = await sr.createSession({
-      avatarId: avatar_id, credential: session_token, container: $('avatar'), pipecat: {}, audioContext,
+    // 2. The avatar session loads the avatar into #avatar. `endpoints` is empty for production and
+    //    names the bot's SpatialReal deployment otherwise, so the avatar comes from the deployment
+    //    that issued the token.
+    const sr = new sdk.SpatialReal({ appId: app_id, endpoints })
+    const session = current.session = await sr.createSession({
+      avatarId: avatar_id, credential: session_token, container: $('avatar'), pipecat: {}, audioContext: current.audioContext, signal,
     })
     session.on('turn', e => say(`turn ${e.phase} ${e.turnId.slice(0, 8)}`))
     session.on('degraded', e => say(`avatar degraded to plain audio: ${e.reason}${e.turnId ? ` (turn ${e.turnId.slice(0, 8)})` : ''}`))
     session.on('error', e => say(`avatar error: ${e.error.message}`))
     await session.start() // starts playback; opens no connection of its own
+    signal.throwIfAborted()
 
     // 3. The bot, over Pipecat's own client.
-    client = new PipecatClient({
-      transport: await makeTransport(),
+    say('starting the bot')
+    const body = TRANSPORT === 'livekit' ? { transport: 'livekit' } : { transport: 'daily', createDailyRoom: true }
+    const started = await request('/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, signal)
+    const room = TRANSPORT === 'livekit' ? { url: started?.url, token: started?.token } : { url: started?.dailyRoom, token: started?.dailyToken }
+    if (!room.url) throw new Error(`/start returned no room: is the bot running with -t ${TRANSPORT}?`)
+    const isBot = botParticipant(started)
+    const transport = await makeTransport()
+    signal.throwIfAborted()
+    const client = current.client = new PipecatClient({
+      transport,
       enableMic: true,
       callbacks: {
-        // The SDK plays the bot's voice itself, lined up with the face. Hand it the track and
+        // The SDK plays the bot's voice itself, lined up with the face. Hand it the bot's track and
         // never attach the track to an <audio> element (nor use PipecatClientAudio): a second
         // player would double the voice.
         onTrackStarted: (track, participant) => {
-          if (!participant?.local && track.kind === 'audio') session?.setBotAudioTrack(track)
+          if (track.kind === 'audio' && !participant?.local && isBot(participant)) current.session?.setBotAudioTrack(track)
         },
         // Every RTVI server message goes to the SDK; it takes the avatar's and ignores the rest.
-        onServerMessage: data => session?.handleServerMessage(data),
+        onServerMessage: data => current.session?.handleServerMessage(data),
         onBotReady: () => say('the bot is ready: say something'),
-        onDisconnected: () => { if (client) say('disconnected'); stop() },
+        // The bot left, or the connection dropped. When Stop disconnects, the run is over already.
+        onDisconnected: () => { if (run === current) { say('disconnected'); stop() } },
         onError: message => say(`bot error: ${JSON.stringify(message?.data ?? message)}`),
       },
     })
-    say('starting the bot')
-    const body = TRANSPORT === 'livekit' ? { transport: 'livekit' } : { transport: 'daily', createDailyRoom: true }
-    const started = await request('/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    await client.connect(TRANSPORT === 'livekit' ? { url: started.url, token: started.token } : { url: started.dailyRoom, token: started.dailyToken })
-    $('stop').disabled = false
+    say('waiting for the bot')
+    await within(client.connect(room), READY_TIMEOUT_MS, signal,
+      `the bot was not ready within ${READY_TIMEOUT_MS / 1000} s; the bot's terminal says why`)
   } catch (e) {
+    if (signal.aborted) return release(current) // Stop ended the run and said so
     say(`failed: ${e.message || e}`)
     await stop()
   }
 }
 
-async function stop() {
-  const [c, s, a] = [client, session, audioContext]
-  client = session = audioContext = null
+/** Let go of what a run has made. Each piece is let go once, whoever asks first. */
+async function release(r) {
+  const [c, s, a] = [r.client, r.session, r.audioContext]
+  r.client = r.session = r.audioContext = null
   if (c) await c.disconnect().catch(() => {}) // the bot sees its client leave and ends the session
   if (s) await s.dispose().catch(() => {})
   if (a) await a.close().catch(() => {}) // the SDK plays through it but never closes it; browsers cap live contexts
+}
+
+/** End the run, at any point of it: what is still starting gives up, and what is made is let go. */
+async function stop() {
+  const r = run
+  run = null
+  if (r) {
+    r.stop.abort(new Error('stopped'))
+    await release(r)
+  }
   $('start').disabled = !sdk
   $('stop').disabled = true
 }
