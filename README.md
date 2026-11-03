@@ -93,8 +93,8 @@ All of them are keyword arguments. The first three are required and must not be 
 | `app_id` | | SpatialReal app id. |
 | `avatar_id` | | The avatar to animate. |
 | `environment` | `"us-west"` | The SpatialReal deployment to use when the two URLs are not given. |
-| `console_endpoint_url` | `""` | Origin of the console API that issues session tokens. Empty takes it from `environment`. |
-| `ingress_endpoint_url` | `""` | Origin of SpatialReal's inference ingress. Empty takes it from `environment`. |
+| `console_endpoint_url` | `""` | Root URL of the console API that issues session tokens, as in `https://<host>`; the token path is added to it. The older form ending in `/v1/console` is accepted too. Empty takes it from `environment`. |
+| `ingress_endpoint_url` | `""` | URL of SpatialReal's inference ingress with its path, as in `https://<host>/v2/driveningress`. A bare origin, `https://<host>`, is accepted too and gets that path. Empty takes it from `environment`. |
 | `threshold` | `328` | Largest absolute sample value that still counts as silence when finding the audible onsets the browser anchors the animation to. The web SDK must use the same value. |
 | `min_silence_ms` | `150` | Shortest silence, in ms, after which the next sound is a new onset. The web SDK must use the same value. A turn that does not follow the previous one back to back starts at least this long after the last audio before it, so that the web SDK can find its onset; one that would have started sooner waits until this long plus one `silence_chunk_ms` have passed. |
 | `lead_ms` | `200` | How far ahead of real time the audio is released. |
@@ -114,7 +114,7 @@ from the environment or a `.env` file (`env.example` lists them all):
 | Variable | Used for |
 |---|---|
 | `SPATIALREAL_API_KEY`, `SPATIALREAL_APP_ID`, `SPATIALREAL_AVATAR_ID` | The avatar. |
-| `SPATIALREAL_CONSOLE_ENDPOINT`, `SPATIALREAL_INGRESS_ENDPOINT` | Optional: another SpatialReal deployment than production (`us-west`). |
+| `SPATIALREAL_CONSOLE_ENDPOINT`, `SPATIALREAL_INGRESS_ENDPOINT` | Optional: another SpatialReal deployment than production (`us-west`). The bot passes them to the processor as `console_endpoint_url` and `ingress_endpoint_url`, so they take the same values. |
 | `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `OPENAI_API_KEY` | The example's speech to text, text to speech and language model. `CARTESIA_VOICE_ID` picks another voice. |
 | `DAILY_API_KEY` | `-t daily`. `DAILY_ROOM_URL` reuses one room instead of creating one per session. |
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | `-t livekit`. |
