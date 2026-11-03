@@ -40,20 +40,25 @@ def audio(req_id: str, ms: int, *, end: bool = False, fill: bytes = b"", rate: i
     return msg.SerializeToString()
 
 
-async def replies(ws, count: int) -> list[Message]:
+async def replies(ws, count: int) -> list[bytes]:
     """Read exactly ``count`` server messages, then check that no more follows."""
-    got = [Message.FromString(await asyncio.wait_for(ws.recv(), 2)) for _ in range(count)]
+    got = [await asyncio.wait_for(ws.recv(), 2) for _ in range(count)]
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(ws.recv(), 0.05)
     return got
 
 
-def shape(messages: list[Message]) -> list[tuple[bool, int]]:
-    """Reduce animation replies to ``(end, animation size)``."""
+def parse(frames: list[bytes]) -> list[Message]:
+    messages = [Message.FromString(frame) for frame in frames]
     assert all(m.type == MESSAGE_SERVER_RESPONSE_ANIMATION for m in messages)
+    return messages
+
+
+def shape(frames: list[bytes]) -> list[tuple[bool, int]]:
+    """Reduce animation replies to ``(end, animation size)``."""
     return [
         (m.server_response_animation.end, len(m.server_response_animation.animation))
-        for m in messages
+        for m in parse(frames)
     ]
 
 
@@ -106,6 +111,14 @@ async def test_segments_do_not_depend_on_how_the_audio_is_cut():
     assert outcomes == [[(False, 4)] * 3 + [(True, 4)]] * 3
 
 
+async def test_animation_frames_records_the_bytes_on_the_wire(fake):
+    async with websockets.connect(ws_url(fake)) as ws:
+        await handshake(ws)
+        await ws.send(audio("r1", 300, end=True))
+        frames = await replies(ws, 2)
+    assert fake.animation_frames == frames
+
+
 async def test_segment_size_follows_the_sessions_sample_rate(fake):
     async with websockets.connect(ws_url(fake)) as ws:
         await handshake(ws, 16000)
@@ -139,7 +152,7 @@ async def test_each_request_counts_for_itself(fake):
         await ws.send(audio("r1", 150))
         await ws.send(audio("r2", 150))  # neither request reaches 200 ms
         await ws.send(audio("r1", 50))  # r1 does
-        got = await replies(ws, 1)
+        got = parse(await replies(ws, 1))
         assert got[0].server_response_animation.req_id == "r1"
 
 
@@ -195,3 +208,16 @@ async def test_the_token_route_can_be_held_back(fake):
     assert not call.done()
     fake.token_gate.set()
     assert await asyncio.wait_for(call, 2) == 200
+
+
+async def test_the_handshake_can_be_held_back(fake):
+    fake.confirm_gate = asyncio.Event()
+    async with websockets.connect(ws_url(fake)) as ws:
+        hello = Message(type=MESSAGE_CLIENT_CONFIGURE_SESSION)
+        hello.client_configure_session.sample_rate = RATE
+        await ws.send(hello.SerializeToString())
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(ws.recv(), 0.1)
+        fake.confirm_gate.set()
+        confirm = Message.FromString(await asyncio.wait_for(ws.recv(), 2))
+        assert confirm.type == MESSAGE_SERVER_CONFIRM_SESSION

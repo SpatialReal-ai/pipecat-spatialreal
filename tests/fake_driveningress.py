@@ -63,8 +63,12 @@ class FakeDriveningress:
         ws_path: Path and query of the latest connection's request.
         received: Every message the clients sent after their handshake, in arrival order and
             across connections. The ``ClientConfigureSession`` is in ``configure`` instead.
+        animation_frames: Every animation message the fake sent, as the exact bytes it put on the
+            wire, across connections.
         token_requests: One ``(api_key, json_body)`` per call to the token route.
         token_gate: When set, the token route waits for this event before it answers.
+        confirm_gate: When set, the WebSocket waits for this event, or for the client to go away,
+            before it confirms a session.
         connections: Connections accepted so far.
         open_connections: Connections currently open.
     """
@@ -92,8 +96,10 @@ class FakeDriveningress:
         self.ws_headers: dict[str, str] = {}
         self.ws_path = ""
         self.received: list[message_pb2.Message] = []
+        self.animation_frames: list[bytes] = []
         self.token_requests: list[tuple[str, dict[str, Any]]] = []
         self.token_gate: asyncio.Event | None = None
+        self.confirm_gate: asyncio.Event | None = None
         self.connections = 0
         self.open_connections = 0
         self._current: Any = None  # the latest connection's server-side socket
@@ -122,8 +128,15 @@ class FakeDriveningress:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        """Stop both servers; connections still open are closed with 1001."""
+        """Stop both servers; connections still open are closed with 1001.
+
+        A gate still shut is opened first: a handler waiting on it would never finish, and the
+        WebSocket server waits for its handlers.
+        """
         assert self._stack is not None
+        for gate in (self.token_gate, self.confirm_gate):
+            if gate is not None:
+                gate.set()
         await self._stack.aclose()
 
     # --- what a test can ask of it
@@ -204,6 +217,7 @@ class FakeDriveningress:
             hello = message_pb2.Message.FromString(await ws.recv())
             assert hello.type == message_pb2.MESSAGE_CLIENT_CONFIGURE_SESSION
             self.configure = hello.client_configure_session
+            await self._held(self.confirm_gate, ws)
             confirm = message_pb2.Message(type=message_pb2.MESSAGE_SERVER_CONFIRM_SESSION)
             confirm.server_confirm_session.connection_id = connection_id
             await ws.send(confirm.SerializeToString())
@@ -220,6 +234,19 @@ class FakeDriveningress:
             pass  # the client went away, or the test closed the socket
         finally:
             self.open_connections -= 1
+
+    @staticmethod
+    async def _held(gate: asyncio.Event | None, ws: Any) -> None:
+        """Wait while ``gate`` is shut, or until the client goes away."""
+        if gate is None:
+            return
+        opened = asyncio.ensure_future(gate.wait())
+        gone = asyncio.ensure_future(ws.wait_closed())
+        try:
+            await asyncio.wait({opened, gone}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            opened.cancel()
+            gone.cancel()
 
     async def _audio(
         self,
@@ -256,4 +283,6 @@ class FakeDriveningress:
         animation.end = end
         if with_animation:
             animation.animation = b"\x01" * self.animation_bytes
-        await ws.send(message.SerializeToString())
+        frame = message.SerializeToString()
+        self.animation_frames.append(frame)
+        await ws.send(frame)
