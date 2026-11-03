@@ -169,6 +169,11 @@ session, which is not on npm yet.
 has the steps, the LiveKit variant and the settings, and describes the probe, a developer tool that
 measures how the avatar lines up with the bot's audio in a Daily room.
 
+The page gets its session token from the bot's `GET /spatialreal-token` route. That route has no
+login and is same-origin only: it refuses a request from a page of any other origin, which is why
+the bot serves the page itself. A token route of your own needs a login as well as that same-origin
+rule, because a session token can open SpatialReal sessions billed to your account.
+
 ## Limitations
 
 * **RTVI must be enabled.** It is Pipecat's default for `PipelineWorker`, but not for a bridged
