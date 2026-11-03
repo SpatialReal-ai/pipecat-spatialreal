@@ -1,0 +1,63 @@
+name: Release
+
+# Publishing a GitHub Release triggers this; pushing the tag alone does not. `published` is the
+# type that fires for a release made in the GitHub UI (`created` is skipped for a draft that is
+# published later). Publishing uses PyPI trusted publishing (OIDC), so there is no API token:
+# PyPI holds a publisher for SpatialReal-ai/pipecat-spatialreal, workflow `release.yml`,
+# environment `pypi`. Those three must stay as they are, or the upload is refused.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.11"
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      # The generated protobuf module is what a broken build drops silently, and the package
+      # imports it at load time. Install the built wheel, not the source tree, into a fresh
+      # environment and import it from outside the checkout.
+      - name: Smoke-test the built wheel in a fresh environment
+        run: |
+          uv venv "$RUNNER_TEMP/wheel-venv"
+          uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -c "import pipecat_spatialreal, pipecat_spatialreal.proto.generated.avatar_pb2; print(pipecat_spatialreal.__file__)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      # id-token for PyPI trusted publishing; contents because naming any permission drops the
+      # defaults for the rest.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
