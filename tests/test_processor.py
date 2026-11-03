@@ -502,6 +502,115 @@ async def test_turns_never_interleave(fake):
     assert_turn_lifecycle(down)
 
 
+# A turn is chained only when it follows the previous one back to back; any other waits until the
+# room has been quiet for min_silence_ms (150) and one chunk (40), so the browser finds its onset.
+GAP_S = (150 + 40) / 1000
+
+
+def audio_pushes(pushed):
+    """``(time, frame)`` of every audio frame pushed, stall silence included."""
+    return [(t, f) for t, f in pushed if isinstance(f, OutputAudioRawFrame)]
+
+
+async def test_a_turn_after_a_short_gap_is_not_chained_and_waits_for_a_findable_onset(fake):
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            SleepFrame(0.2),  # connected: turn 1 plays as soon as its animation is in
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(0.38),  # turn 2's TTS starts ~80 ms after turn 1 has played out
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(1.0),
+        ],
+    )
+    (t1, _), (t2, second_audio) = audio_pushes(pushed)
+    end1 = t1 + 0.3  # turn 1's playout end
+    announced = [
+        t for t, f in pushed if isinstance(f, RTVIServerMessageFrame) and "turn_start" in f.data
+    ]
+    assert 0 < announced[1] - end1 < 0.15  # ready inside the gap the browser could not see
+    _, second = messages(down, "turn_start")
+    assert second["prev_turn_id"] == "" and second["prev_turn_pcm_ms"] == 0
+    assert t2 - end1 >= GAP_S - 0.002
+    assert type(second_audio) is TTSAudioRawFrame  # no silence was pushed for the gap
+    # Its inference stream starts at its own first sample, as for any turn.
+    assert fake.received_audio_ms(second["turn_id"]) == 300
+    assert second["onsets_ms"] == [1000 / 24000]
+    assert_turn_lifecycle(down)
+
+
+async def test_a_turn_ready_only_after_the_previous_one_played_out_is_not_chained(
+    fake, monkeypatch
+):
+    animate = fake._animate
+
+    async def slow(ws, connection_id, req_id, *, end, with_animation):
+        await asyncio.sleep(0.15)  # inference takes time
+        await animate(ws, connection_id, req_id, end=end, with_animation=with_animation)
+
+    monkeypatch.setattr(fake, "_animate", slow)
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            SleepFrame(0.2),
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(0.36),  # turn 2's TTS starts before turn 1 has played out...
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(1.5),
+        ],
+    )
+    (t1, _), (t2, second_audio) = audio_pushes(pushed)
+    end1 = t1 + 0.3
+    announced = [
+        t for t, f in pushed if isinstance(f, RTVIServerMessageFrame) and "turn_start" in f.data
+    ]
+    assert 0 < announced[1] - end1 < 0.15  # ...but its animation only comes back after
+    _, second = messages(down, "turn_start")
+    assert second["prev_turn_id"] == "" and second["prev_turn_pcm_ms"] == 0
+    assert t2 - end1 >= GAP_S - 0.002 and type(second_audio) is TTSAudioRawFrame
+    assert_turn_lifecycle(down)
+
+
+async def test_audio_between_two_turns_breaks_the_chain(fake):
+    chime = OutputAudioRawFrame(
+        audio=pcm16(sine(100, 24000, 880)), sample_rate=24000, num_channels=1
+    )
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            chime,  # after turn 1 and before turn 2, part of neither
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(1.5),
+        ],
+    )
+    first, second = messages(down, "turn_start")
+    assert second["prev_turn_id"] == ""  # the previous turn's length no longer places it
+    (t1, _), (_, played), (t2, _) = audio_pushes(pushed)
+    assert played is chime
+    assert t2 - (t1 + 0.3 + 0.1) >= GAP_S - 0.002  # quiet long enough after the chime
+    assert fake.received_audio_ms(first["turn_id"]) == 300  # the chime is in neither turn
+    assert_turn_lifecycle(down)
+
+
 async def test_end_frame_waits_for_the_open_turn(fake):
     # No sleep after the turn: run_test's EndFrame arrives while the audio is still held.
     down, _ = await run_test(

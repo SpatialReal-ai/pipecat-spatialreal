@@ -97,6 +97,8 @@ class _Turn:
         self.sent = False  # it has a request on the current session
         self.degraded = not sends  # no animation is expected for it, or no more of it
         self.announced = False  # turn_start pushed, or released without one (silent)
+        self.chained = False  # its turn_start names the turn it follows back to back
+        self.release_at: float | None = None  # loop time its release may start, once decided
         self.silent = False  # it stopped without audio: released, never announced
         self.stopped = False  # its audio is complete: _END_OF_AUDIO is in the hold
         self.finished = False  # its last sample has been released
@@ -123,6 +125,16 @@ class _Turn:
     def on_track(self, frame: Frame | _EndOfAudio) -> bool:
         """Whether ``frame`` is audio on the turn's own track, the one the browser animates."""
         return _plays(frame) and frame.transport_destination == self.started.transport_destination
+
+    def holds_audio_after_its_end(self) -> bool:
+        """Whether audio on its track still waits in its hold behind its own last sample."""
+        after = self.finished
+        for item in self.hold:
+            if item is _END_OF_AUDIO:
+                after = True
+            elif after and self.on_track(item):
+                return True
+        return False
 
 
 class SpatialRealAvatarProcessor(FrameProcessor):
@@ -177,7 +189,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 the audible onsets the browser anchors the animation to. The web SDK must use
                 the same value.
             min_silence_ms: Shortest silence, in ms, after which the next sound is a new onset.
-                The web SDK must use the same value.
+                The web SDK must use the same value. A turn that does not follow the previous
+                one back to back starts at least this long, plus one ``silence_chunk_ms``, after
+                the last audio before it, so that the web SDK can find its onset.
             lead_ms: How far ahead of real time the audio is released.
             hold_cap_s: Longest time a turn's audio is held for its first animation; after it,
                 the turn plays without animation. Also the longest wait, once a turn's audio has
@@ -716,6 +730,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         if not turn.turn_id:
             turn.turn_id = spatialreal.generate_log_id()  # it never reached driveningress
         prev_turn_id, prev_turn_pcm_ms = self._follows()
+        turn.chained = bool(prev_turn_id)
         turn.onsets_sent = len(turn.onsets)
         self._chain = turn
         await self._push_message(
@@ -730,16 +745,47 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         )
 
     def _follows(self) -> tuple[str, float]:
-        """The turn a turn announced now follows without a silence gap, and its PCM length."""
+        """The turn a turn announced now follows back to back, and that turn's exact PCM length.
+
+        A turn is chained to the previous one only when its first sample will play right after
+        the previous turn's last: either the previous turn is still releasing, so this one
+        starts the moment it drains, or the room is still playing the previous turn's audio.
+        The browser then has no silence to find the onset in, and places the turn from the
+        previous turn's length instead, which is exact only with no gap at all.
+
+        Any gap, or other audio between the two, would make that placement wrong by its
+        length, and it cannot be corrected: the gap is only known once the turn is released,
+        and by then its audio has long gone to inference at TTS speed, so no silence can be put
+        in front of it there. A turn that does not follow back to back is therefore announced
+        unchained, and its release waits until the room has been quiet for ``min_silence_ms``
+        and one chunk (see ``_release_start``), which lets the browser find its onset itself.
+
+        Returns:
+            ``(prev_turn_id, prev_turn_pcm_ms)``, or ``("", 0.0)`` when the turn is not chained.
+        """
         prev = self._chain
-        if prev is None:
+        if prev is None or prev.holds_audio_after_its_end():
             return "", 0.0
-        if not prev.drained:  # still releasing: the next turn's audio comes right after it
-            return prev.turn_id, prev.pcm_ms
-        gap = max(self._playout_end, self._now()) - prev.playout_end
-        if gap * 1000 <= self._min_silence_ms:
-            return prev.turn_id, prev.pcm_ms
-        return "", 0.0
+        if prev.finished and self._playout_end > prev.playout_end + _TOLERANCE_S:
+            return "", 0.0  # audio that is not the previous turn's played after it
+        if prev.drained and self._now() > prev.playout_end + _TOLERANCE_S:
+            return "", 0.0  # the room has gone quiet: this turn would start after a gap
+        return prev.turn_id, prev.pcm_ms
+
+    def _release_start(self, turn: _Turn) -> float:
+        """The loop time ``turn`` may start releasing at; see ``_follows``.
+
+        A turn that is chained, or that plays without animation, starts as soon as it can. Any
+        other starts once the last audio released before it has been followed by
+        ``min_silence_ms`` and one chunk of quiet. The room's transport fills that gap; nothing
+        is sent to inference for it.
+        """
+        if turn.chained or turn.degraded or turn.silent:
+            return 0.0
+        quiet_since = self._playout_end
+        if self._now() - quiet_since >= self._min_silence_ms / 1000:
+            return 0.0
+        return quiet_since + (self._min_silence_ms + self._silence_chunk_ms) / 1000
 
     async def _forward_segments(self, turn: _Turn) -> None:
         while turn.segments:
@@ -761,6 +807,11 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 continue
             if not turn.announced:
                 return  # it holds everything behind it until it is announced
+            if turn.release_at is None:  # its turn to release has come: decide when it starts
+                turn.release_at = self._release_start(turn)
+            if turn.release_at > self._now() + _TOLERANCE_S:
+                deadlines.append(turn.release_at)  # no silence for the gap: the room plays it
+                return
             while turn.hold or not turn.finished:
                 if not turn.hold:  # the TTS is behind playback: play silence meanwhile
                     due = self._next_release(self._stall_ahead_s)
