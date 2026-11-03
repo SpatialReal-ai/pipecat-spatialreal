@@ -143,14 +143,18 @@ the Pipecat kind, and hands it the bot's audio track and the bot's RTVI server m
 draws the avatar and plays the bot's voice in step with it; the page must not play the bot's track
 itself.
 
-That session kind is in [web-sdk#28](https://github.com/SpatialReal-ai/web-sdk/pull/28) and is not
-released on npm yet. [`examples/client`](https://github.com/SpatialReal-ai/pipecat-spatialreal/tree/main/examples/client)
+That session kind is not released on npm yet. It is added by
+[web-sdk#28](https://github.com/SpatialReal-ai/web-sdk/pull/28), a pull request in SpatialReal's web
+SDK repository, which is not public yet.
+[`examples/client`](https://github.com/SpatialReal-ai/pipecat-spatialreal/tree/main/examples/client)
 is a page that uses it, and its README says how to wire the session in until the release.
 
-The messages between the processor and the browser are defined in
-[`pipecat/v1/avatar.proto`](https://github.com/SpatialReal-ai/shared-proto/blob/main/pipecat/v1/avatar.proto)
-in the shared contract repository. The generated code in `src/pipecat_spatialreal/proto/` comes from
-it.
+The messages between the processor and the browser (`turn_start`, `turn_onsets`, `frames`,
+`turn_end`, `turn_abort` and `state`) are defined in
+[`pipecat/v1/avatar.proto`](https://github.com/SpatialReal-ai/shared-proto/blob/main/pipecat/v1/avatar.proto),
+a file in SpatialReal's shared contract repository, which is not public yet either. The generated
+code in `src/pipecat_spatialreal/proto/` comes from it, and `src/pipecat_spatialreal/envelope.py`
+builds each message and describes the JSON it is sent as.
 
 ## Run the example
 
@@ -164,7 +168,8 @@ uv run python examples/bot.py -t daily
 ```
 
 Then open <http://localhost:7860/avatar/> and press Start. The page needs the web SDK's Pipecat
-session, which is not on npm yet.
+session, which is not on npm yet: until it is, setting the page up needs access to SpatialReal's
+web SDK repository.
 [`examples/README.md`](https://github.com/SpatialReal-ai/pipecat-spatialreal/blob/main/examples/README.md)
 has the steps, the LiveKit variant and the settings, and describes the probe, a developer tool that
 measures how the avatar lines up with the bot's audio in a Daily room.
