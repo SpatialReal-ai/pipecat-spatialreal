@@ -61,12 +61,25 @@ late only changes its own row.
 
 Above the table a line counts the turns that pass, fail, are unverified or are pending, the `state`
 messages that say `STATUS_DEGRADED`, the contract problems and the audible onsets no turn accounts
-for; it is green only when every finished turn passed and nothing else is wrong. Below it,
-**Contract problems** lists every message that breaks `pipecat/v1/avatar.proto`: a missing key,
-1-based or out-of-range `chunk_index`, `chunk_count` below 1, `chunk_count` or `end` changing
-inside a segment, a gap in `segment_seq`, `end` anywhere but the last segment, frames after
-`turn_end` or `turn_abort`, an empty `turn_onsets`, a message over Daily's 4 KB limit, and the
-like. **Timeline** puts every message, tapped onset and conversation marker in order.
+for; it is green only when every finished turn passed and nothing else is wrong. A run in which the
+receiver missed a `turn_start` (it joined late, or a message was lost) therefore stays red to the
+end: that turn shows `no turn_start`, its other messages are contract problems and its sound is a
+stray onset. Reload the page and run again. Below the table, **Contract problems** lists every
+message that breaks `pipecat/v1/avatar.proto`: a missing key, 1-based or out-of-range
+`chunk_index`, `chunk_count` below 1, `chunk_count` or `end` changing inside a segment, a gap in
+`segment_seq`, `end` anywhere but the last segment, frames after `turn_end` or `turn_abort`, an
+empty `turn_onsets`, a message over Daily's 4 KB limit, and the like. **Timeline** puts every
+message, tapped onset and conversation marker in order.
+
+### What `lead` means
+
+A chained turn is announced as soon as its animation is in hand, well ahead of its audio, so its
+`lead` is large. An unchained turn is not: the processor sends its `turn_start` and first segments
+in the step that releases the turn's first audio, never before, because a sound the room plays
+between an earlier `turn_start` and the turn's own audio could be taken for the turn's onset. Its
+`lead` is then only how far the message channel runs ahead of the audio channel: 120 to 160 ms
+measured on a Daily room. That is not a margin the processor adds, and whether it always clears the
+100 ms the table asks for is for the live run to confirm.
 
 ### What the receiver cannot see
 
@@ -81,24 +94,27 @@ processor announces an onset only once it has found an audible sample, and a deg
 announce none. A turn without announced onsets has nothing to compare, and `onsets_ms[0]` and
 `skew` show `-`.
 
-**An unchained turn always has an onset to hear.** The processor releases a turn that has animation
-and does not follow the previous one back to back only once the room has been quiet for
-`min_silence_ms` (it waits one `silence_chunk_ms` more as margin: 150 + 40 ms by default), so the
-receiver's detector always finds that turn's first onset itself, and a missing one is a failure. A
-degraded turn, which plays without animation, is not held. An unchained turn's `turn_start` can
-arrive before the previous turn's `turn_end`, when another sound sits between the two; the probe
-pairs onsets by position and by time windows, not by message order. A sound that belongs to no turn
-cannot be told from a turn's first onset: it is reported as a stray when no turn is waiting for an
-onset, and otherwise taken for that turn's, whose own onset then shows up as a stray. Mixing other
-audio into the bot's track is not supported.
+**An unchained turn always has an onset to hear.** The processor does not start a turn that has
+animation and does not follow the previous one back to back until the room has been quiet for
+`min_silence_ms`, so the receiver's detector finds that turn's first onset itself, and a missing one
+is a failure. It holds such a turn only when it would start less than `min_silence_ms` (150 ms by
+default) after the last sound the room was given: the turn then waits until that quiet has lasted
+`min_silence_ms` plus one `silence_chunk_ms` as margin (150 + 40 ms), at most 190 ms of extra
+silence. A turn that comes after a longer quiet starts as soon as it is ready. A degraded turn,
+which plays without animation, is not held. An unchained turn's `turn_start` can arrive before the
+previous turn's `turn_end`, which waits for that turn's last segment while the next turn needs only
+the quiet; the probe pairs onsets by position and by time windows, not by message order. A sound
+that belongs to no turn cannot be told from a turn's first onset: it is reported as a stray when no
+turn is waiting for an onset, and otherwise taken for that turn's, whose own onset then shows up as
+a stray. Mixing other audio into the bot's track is not supported.
 
 **A chained turn can have no onset to hear.** A turn with `prev_turn_id` plays right after the
 previous turn's last sample: no pause, nothing in between. (A turn that would start after any gap
-is released later and announced unchained.) The processor starts a fresh onset tracker for every
-turn and counts a turn's leading silence from the turn's own first sample, while the receiver's
-detector runs on across the join and needs `min_silence_ms` (150 ms) of quiet before it finds a
-sound. When the previous turn's trailing quiet and the new turn's own leading silence add up to
-less, the receiver has no onset there to find, and nothing is wrong. The probe does not fail such a
+is unchained.) The processor starts a fresh onset tracker for every turn and counts a turn's
+leading silence from the turn's own first sample, while the receiver's detector runs on across the
+join and needs `min_silence_ms` (150 ms) of quiet before it finds a sound. When the previous turn's
+trailing quiet and the new turn's own leading silence add up to less, the receiver has no onset
+there to find, and nothing is wrong. The probe does not fail such a
 turn for it. It places the turn's first onset where the end of the previous turn puts it: the
 previous turn's first onset minus its `onsets_ms[0]`, plus `prev_turn_pcm_ms`, plus the turn's own
 `onsets_ms[0]`. That position is exact, with no slack, because there is no gap in between, and it
@@ -115,7 +131,10 @@ time window alone could give it a later turn's. It cannot be placed when it anno
 when the turn it follows was never announced or announced none, or when that turn cannot be placed
 either (it was not heard, or it is chained and has the same trouble). If it ended, it fails, and
 the failure names which: `it announced no onsets`, `it follows aaaaaaaa, which was not heard`, and
-the like.
+the like. The onset such a turn has in the audio, if the receiver hears one, belongs to no turn as
+far as the probe can tell, so it is treated like any other sound that belongs to no turn (see
+above): a stray, or the first onset of a later unchained turn that is still waiting for one, whose
+own onset then shows up as a stray. Read the chained turn's failure first.
 
 `abort Δ` counts from Pipecat's `user-started-speaking` message, which the bot sends once its VAD
 confirms speech (`start_secs`, 0.2 s by default). It times the processor's reaction, not the sound
@@ -142,12 +161,15 @@ the page started tapping.
 
 ## The live run
 
-Needs the SpatialReal, Deepgram, Cartesia, OpenAI and Daily keys in `.env`.
+Needs the SpatialReal, Deepgram, Cartesia, OpenAI and Daily keys in `.env`. It has not been done
+yet: the values below are what the design expects, not measurements, and the first run decides
+whether they hold.
 
 1. `uv run python examples/bot.py -t daily`, then open the probe with `?mic=1` and press Start.
 2. Talk to the bot for ten turns. Interrupt it mid-sentence once.
 3. A good run shows, on every turn:
-   * `turn_start` arriving at least 100 ms before the audible onset of its speech;
+   * `turn_start` arriving at least 100 ms before the audible onset of its speech (for an unchained
+     turn that is the message channel's lead over the audio channel, see above);
    * every chunk of the turn's first segment arrived before that onset;
    * the onsets the processor announces and the onsets found in the audio the browser receives
      within 40 ms of each other (the section above says what the probe can compare);
