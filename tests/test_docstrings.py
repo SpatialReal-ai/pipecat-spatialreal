@@ -5,16 +5,19 @@ Google-style sections in them (``Args:``, ``Returns:``, ``Raises:``) are where t
 call is written down. A name that is public but undocumented is a gap in that contract.
 
 What counts as public: a name that does not start with an underscore (``__init__`` aside), in a
-module of the package that does not, defined in that module rather than imported into it. The
-generated protobuf module is excluded: it is not written here.
+module of the package, or of a subpackage at any depth, that does not either, defined in that
+module rather than imported into it. The generated protobuf code is excluded: it is not written
+here.
 """
 
 import dataclasses
 import importlib
 import inspect
 import pkgutil
+import sys
 import types
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -94,12 +97,24 @@ def missing_docstrings(module: types.ModuleType) -> list[str]:
     return found
 
 
-def public_modules() -> list[types.ModuleType]:
-    """The package and its hand-written modules, imported."""
-    modules = [pipecat_spatialreal]
-    for info in pkgutil.iter_modules(pipecat_spatialreal.__path__):
-        if not info.name.startswith("_") and info.name not in GENERATED:
-            modules.append(importlib.import_module(f"{pipecat_spatialreal.__name__}.{info.name}"))
+def public_modules(package: types.ModuleType = pipecat_spatialreal) -> list[types.ModuleType]:
+    """``package`` and every hand-written module below it, subpackages at any depth, imported.
+
+    A name that starts with an underscore, and the generated subpackages, are left out together
+    with everything below them.
+
+    Args:
+        package: The package to walk.
+
+    Returns:
+        The package first, then its modules and subpackages.
+    """
+    modules = [package]
+    prefix = f"{package.__name__}."
+    for info in pkgutil.walk_packages(package.__path__, prefix):
+        parts = info.name.removeprefix(prefix).split(".")
+        if not any(part.startswith("_") or part in GENERATED for part in parts):
+            modules.append(importlib.import_module(info.name))
     return modules
 
 
@@ -108,17 +123,62 @@ def test_every_public_name_has_a_docstring(module):
     assert missing_docstrings(module) == []
 
 
-def test_the_check_covers_the_package_and_leaves_out_the_generated_code():
-    names = {module.__name__ for module in public_modules()}
-    assert names >= {
-        "pipecat_spatialreal",
-        "pipecat_spatialreal.driven",
-        "pipecat_spatialreal.envelope",
-        "pipecat_spatialreal.onset",
-        "pipecat_spatialreal.processor",
-        "pipecat_spatialreal.version",
+def test_the_walk_reaches_every_hand_written_module():
+    root = Path(pipecat_spatialreal.__file__).parent
+    on_disk = {pipecat_spatialreal.__name__}
+    for path in root.rglob("*.py"):
+        parts = list(path.relative_to(root).with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts.pop()
+        if not any(part.startswith("_") or part in GENERATED for part in parts):
+            on_disk.add(".".join([pipecat_spatialreal.__name__, *parts]))
+    walked = {module.__name__ for module in public_modules()}
+    assert walked == on_disk  # a module the walk misses, or one it invents, is named here
+    assert "pipecat_spatialreal.processor" in walked  # and the walk is not empty
+
+
+def test_the_walk_goes_down_subpackages_but_not_into_generated_or_private_ones(
+    tmp_path, monkeypatch
+):
+    layout = {
+        "__init__.py": '"""Doc."""',
+        "top.py": '"""Doc."""',
+        "sub/__init__.py": '"""Doc."""',
+        "sub/deep.py": "def undocumented(): ...",
+        "sub/inner/__init__.py": '"""Doc."""',
+        "sub/inner/leaf.py": '"""Doc."""',
+        "sub/_hidden/__init__.py": "",
+        "proto/__init__.py": "",
+        "proto/generated.py": "def undocumented(): ...",
+        "_private.py": "",
     }
-    assert not [name for name in names if ".proto" in name]
+    for relative, text in layout.items():
+        path = tmp_path / "walkcontrol" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text + "\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        walked = public_modules(importlib.import_module("walkcontrol"))
+        assert {module.__name__ for module in walked} == {
+            "walkcontrol",
+            "walkcontrol.top",
+            "walkcontrol.sub",
+            "walkcontrol.sub.deep",
+            "walkcontrol.sub.inner",
+            "walkcontrol.sub.inner.leaf",
+        }
+        assert walked[0].__name__ == "walkcontrol"
+        # The two gaps are two levels down, and only the hand-written one is reported.
+        assert sorted(name for module in walked for name in missing_docstrings(module)) == [
+            "walkcontrol.sub.deep",
+            "walkcontrol.sub.deep.undocumented",
+        ]
+    finally:
+        for name in [n for n in sys.modules if n == "walkcontrol" or n.startswith("walkcontrol.")]:
+            del sys.modules[name]
+
+
+def test_the_check_looks_at_the_processors_constructor_and_overrides():
     processor = importlib.import_module("pipecat_spatialreal.processor")
     members = dict(_members(processor.SpatialRealAvatarProcessor))
     assert {"__init__", "setup", "cleanup", "process_frame"} <= members.keys()
@@ -167,4 +227,30 @@ def test_the_check_finds_what_is_missing():
     assert undocumented("Documented", Documented) == []
     assert undocumented("Constructed", Constructed) == ["Constructed.__init__"]
     assert undocumented("function", function) == ["function"]
-    assert missing_docstrings(types.ModuleType("scratch")) == ["scratch"]
+
+
+def test_the_check_finds_what_is_missing_in_a_module():
+    scratch = types.ModuleType("scratch")
+    scratch.__doc__ = "A module."
+
+    class Bare: ...
+
+    def bare(): ...
+
+    class Documented:
+        """Has one."""
+
+    def documented():
+        """Has one."""
+
+    def _private(): ...
+
+    def elsewhere(): ...  # defined in this module, so it is imported as far as scratch is concerned
+
+    for obj in (Bare, bare, Documented, documented, _private):
+        obj.__module__ = scratch.__name__
+        setattr(scratch, obj.__name__, obj)
+    scratch.elsewhere = elsewhere
+
+    assert missing_docstrings(scratch) == ["scratch.Bare", "scratch.bare"]
+    assert missing_docstrings(types.ModuleType("bare_module")) == ["bare_module"]
