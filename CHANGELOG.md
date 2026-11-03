@@ -9,8 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.0] - 2026-11-03
 
-First release. Tested with Pipecat v1.15.0 against a fake SpatialReal backend; the first live run
-on Daily and LiveKit rooms is still to be done.
+First release. Tested with Pipecat v1.15.0 against a fake SpatialReal backend and run live on Daily
+and LiveKit rooms on 2026-11-03 (eleven turns each with the SpatialReal test deployment; the Daily
+capture is in `examples/probe/`).
 
 ### Added
 

@@ -10,6 +10,9 @@ Written for Pipecat v1.15.0.
 
 ## Run it
 
+> Python from python.org on macOS ships without the system's CA store: if the runner cannot reach
+> `api.daily.co` with a certificate error, set `SSL_CERT_FILE=$(uv run python -m certifi)`.
+
 You need keys for SpatialReal, Deepgram, Cartesia and Gemini (Google AI Studio), and for Daily or LiveKit.
 
 ```bash
