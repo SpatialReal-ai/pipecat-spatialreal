@@ -35,8 +35,11 @@ dependencies = [
 # to import under an older protobuf runtime. That version must stay <= the `protobuf>=` floor in
 # `dependencies` (pipecat-ai and spatialreal both allow 6.x), so bump the two together.
 dev = [
-    "pytest>=8",
-    "pytest-asyncio>=1.0",
+    # pytest-asyncio 1.1 is the first to cancel the tasks a test leaves running when its loop ends;
+    # under 1.0 they are finalised inside a later test, whose teardown then fails. It needs pytest
+    # 8.2 or newer.
+    "pytest>=8.2",
+    "pytest-asyncio>=1.1",
     "pytest-aiohttp",
     "aiohttp>=3.9",
     "websockets>=12",
