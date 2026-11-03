@@ -1,6 +1,6 @@
 """A Pipecat voice bot with a SpatialReal avatar: the runner-based example.
 
-The bot has the shape of Pipecat's own ``06-voice-agent`` example (Deepgram, OpenAI and Cartesia)
+The bot has the shape of Pipecat's own ``06-voice-agent`` example (Deepgram, Gemini and Cartesia)
 with one processor, ``SpatialRealAvatarProcessor``, added after the TTS. Run it with Pipecat's
 development runner, on Daily or LiveKit::
 
@@ -50,7 +50,7 @@ from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.base_transport import BaseTransport
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.livekit.transport import LiveKitParams
@@ -302,9 +302,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
             voice=os.getenv("CARTESIA_VOICE_ID") or DEFAULT_VOICE_ID
         ),
     )
-    llm = OpenAILLMService(
-        api_key=_require_env("OPENAI_API_KEY"),
-        settings=OpenAILLMService.Settings(system_instruction=SYSTEM_INSTRUCTION),
+    llm = GoogleLLMService(
+        api_key=_require_env("GEMINI_API_KEY"),
+        settings=GoogleLLMService.Settings(system_instruction=SYSTEM_INSTRUCTION),
     )
 
     context = LLMContext()

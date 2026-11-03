@@ -54,7 +54,7 @@ dev = [
     "pipecat-ai[websocket]>=1.15.0,<2",
 ]
 example = [
-    "pipecat-ai[daily,livekit,runner,silero,deepgram,cartesia,openai]>=1.15.0",
+    "pipecat-ai[daily,livekit,runner,silero,deepgram,cartesia,google]>=1.15.0",
     "python-dotenv>=1.0",
 ]
 

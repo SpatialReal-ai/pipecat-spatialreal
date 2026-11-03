@@ -132,7 +132,7 @@ from the environment or a `.env` file (`env.example` lists them all):
 |---|---|
 | `SPATIALREAL_API_KEY`, `SPATIALREAL_APP_ID`, `SPATIALREAL_AVATAR_ID` | The avatar. |
 | `SPATIALREAL_CONSOLE_ENDPOINT`, `SPATIALREAL_INGRESS_ENDPOINT` | Optional: another SpatialReal deployment than production (`us-west`). The bot passes them to the processor as `console_endpoint_url` and `ingress_endpoint_url`, so they take the same values. |
-| `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `OPENAI_API_KEY` | The example's speech to text, text to speech and language model. `CARTESIA_VOICE_ID` picks another voice. |
+| `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `GEMINI_API_KEY` | The example's speech to text, text to speech and language model (Gemini). `CARTESIA_VOICE_ID` picks another voice. |
 | `DAILY_API_KEY` | `-t daily`. `DAILY_ROOM_URL` reuses one room instead of creating one per session. |
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | `-t livekit`. |
 
@@ -158,7 +158,7 @@ builds each message and describes the JSON it is sent as.
 
 ## Run the example
 
-`examples/bot.py` is a complete voice bot (Deepgram, OpenAI, Cartesia) with the avatar processor
+`examples/bot.py` is a complete voice bot (Deepgram, Gemini, Cartesia) with the avatar processor
 after the TTS, run by Pipecat's development runner on Daily or LiveKit:
 
 ```bash

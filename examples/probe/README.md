@@ -176,7 +176,7 @@ the page started tapping.
 
 ## The live run
 
-Needs the SpatialReal, Deepgram, Cartesia, OpenAI and Daily keys in `.env`. It has not been done
+Needs the SpatialReal, Deepgram, Cartesia, Gemini and Daily keys in `.env`. It has not been done
 yet: the values below are what the design expects, not measurements, and the first run decides
 whether they hold.
 
