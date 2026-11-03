@@ -211,8 +211,13 @@ async def test_a_server_error_that_leaves_the_connection_open_is_not_a_loss(fake
     ids=["transport error", "session already closed"],
 )
 async def test_a_failed_send_is_a_loss(fake, monkeypatch, failure):
-    downs = []
-    d = make(fake, on_down=downs.append)
+    downs, seen = [], []
+
+    def on_down(reason):
+        downs.append(reason)
+        seen.append(d.connected)
+
+    d = make(fake, on_down=on_down)
     await d.connect()
 
     attempts = []
@@ -226,18 +231,47 @@ async def test_a_failed_send_is_a_loss(fake, monkeypatch, failure):
         await d.send(pcm_ms(40, 24000))
     assert raised.value.__cause__ is failure
     assert not d.connected and len(downs) == 1
+    assert seen == [False]  # inside on_down the link already counts as lost
     with pytest.raises(RuntimeError, match="driveningress not connected"):
         await d.send(pcm_ms(40, 24000))
     assert len(attempts) == 1 and len(downs) == 1  # a known loss does not try the wire again
-    # The socket is in fact still open. When the server later closes it, that is not a second loss.
-    await fake.close_with(4001)
+
+    # The lost session's socket is in fact still open. connect() closes it with the session, so
+    # that the new socket is the only one, and close() closes that.
+    assert fake.open_connections == 1
+    await d.connect()
+    await until(lambda: fake.open_connections == 1 and fake.connections == 2)
+    assert d.connected and len(downs) == 1
+    await d.close()
+    await until(lambda: fake.open_connections == 0)
+    assert len(downs) == 1
+
+
+async def test_a_server_close_after_a_failed_send_is_not_a_second_loss(fake, monkeypatch):
+    downs = []
+    d = make(fake, on_down=downs.append)
+    await d.connect()
+
+    async def broken(audio, end=False):
+        raise ValueError("WebSocket connection is not established")
+
+    monkeypatch.setattr(d._link.session, "send_audio", broken)
+    with pytest.raises(RuntimeError):
+        await d.send(pcm_ms(40, 24000))
+    assert len(downs) == 1
+    await fake.close_with(4001)  # the socket was still open; now the server closes it
     await asyncio.sleep(0.2)
     assert len(downs) == 1
 
 
 async def test_a_failed_interrupt_is_a_loss_and_not_an_error(fake, monkeypatch):
-    downs = []
-    d = make(fake, on_down=downs.append)
+    downs, seen = [], []
+
+    def on_down(reason):
+        downs.append(reason)
+        seen.append(d.connected)
+
+    d = make(fake, on_down=on_down)
     await d.connect()
     await d.send(pcm_ms(40, 24000))
 
@@ -248,7 +282,13 @@ async def test_a_failed_interrupt_is_a_loss_and_not_an_error(fake, monkeypatch):
 
     monkeypatch.setattr(d._link.session, "interrupt", broken)
     assert await d.interrupt() is None
-    assert not d.connected and len(downs) == 1
+    assert not d.connected and len(downs) == 1 and seen == [False]
+
+    # The socket is still open, and connect() closes it with the lost session.
+    assert fake.open_connections == 1
+    await d.connect()
+    await until(lambda: fake.open_connections == 1 and fake.connections == 2)
+    assert d.connected and len(downs) == 1
 
 
 async def test_a_raising_on_down_cannot_change_what_send_and_interrupt_do(fake, monkeypatch):
@@ -303,6 +343,18 @@ async def test_nothing_to_interrupt_once_the_link_is_lost(fake, monkeypatch):
     monkeypatch.setattr(d._link.session, "interrupt", interrupt)
     assert await d.interrupt() is None
     assert attempts == []  # a known loss does not try the wire
+
+
+async def test_a_request_id_is_not_reused_after_end_or_an_interrupt(fake):
+    d = make(fake)
+    await d.connect()
+    first = await d.send(pcm_ms(40, 24000))
+    assert await d.send(pcm_ms(40, 24000)) == first  # one request until it ends
+    assert await d.send(b"", end=True) == first
+    second = await d.send(pcm_ms(40, 24000))  # the server drops a connection that reuses an id
+    assert await d.interrupt() == second
+    third = await d.send(pcm_ms(40, 24000))
+    assert len({first, second, third}) == 3
 
 
 async def test_close_is_quiet_and_idempotent(fake):
