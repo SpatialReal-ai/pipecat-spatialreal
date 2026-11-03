@@ -357,6 +357,31 @@ async def test_a_request_id_is_not_reused_after_end_or_an_interrupt(fake):
     assert len({first, second, third}) == 3
 
 
+async def test_a_first_send_cancelled_before_it_returned_is_still_interrupted(fake, monkeypatch):
+    d = make(fake)
+    await d.connect()
+    connection = d._link.session._connection
+    write = connection.send
+
+    async def congested(message):
+        await write(message)  # the audio is on the wire...
+        await asyncio.Event().wait()  # ...but the write does not return, as on a full socket
+
+    monkeypatch.setattr(connection, "send", congested)
+    sending = asyncio.create_task(d.send(pcm_ms(40, 24000)))
+    await until(lambda: fake.received)
+    sending.cancel()  # an interruption cancels the frame being processed
+    with pytest.raises(asyncio.CancelledError):
+        await sending
+    monkeypatch.undo()
+
+    first = fake.received[0].client_audio_input.req_id
+    assert await d.interrupt() == first
+    await until(lambda: len(fake.received) == 2)
+    assert fake.received[1].client_interrupt.req_id == first
+    assert await d.send(pcm_ms(40, 24000)) != first  # the next audio does not join it
+
+
 async def test_close_is_quiet_and_idempotent(fake):
     downs = []
     d = make(fake, on_down=downs.append)

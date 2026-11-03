@@ -72,7 +72,6 @@ class _Link:
 
     def __init__(self) -> None:
         self.state = _State.CONNECTING
-        self.last_req_id: str | None = None  # the request an interrupt would target
         self.error: Exception | None = None  # the last error the session reported
 
 
@@ -203,30 +202,35 @@ class DrivenIngress:
         if link is None or link.state is not _State.UP:
             raise RuntimeError("driveningress not connected")
         try:
-            req_id = await link.session.send_audio(pcm, end=end)
+            return await link.session.send_audio(pcm, end=end)
         except (spatialreal.AvatarSDKError, ValueError) as exc:
             self._lose(link, _describe(exc))
             raise RuntimeError("driveningress not connected") from exc
-        link.last_req_id = req_id
-        return req_id
 
     async def interrupt(self) -> str | None:
         """Tell the server to drop the audio it still holds for the latest request.
 
-        The next :meth:`send` starts a new request. This never raises for a missing or broken
-        session: there is then nothing left to interrupt, and the caller is usually in the
-        middle of something more urgent.
+        The next :meth:`send` starts a new request. The latest request is the SDK's: it takes the
+        id when a send starts, before the audio is written, so a send that was cancelled before
+        it returned (on a congested socket, say) is interrupted too, and the audio after the
+        interrupt cannot join it. This never raises for a missing or broken session: there is
+        then nothing left to interrupt, and the caller is usually in the middle of something
+        more urgent.
 
         Returns:
             The id of the request interrupted, or None when nothing was sent on this session or
             the session is not up.
         """
         link = self._link
-        if link is None or link.state is not _State.UP or link.last_req_id is None:
+        if link is None or link.state is not _State.UP:
             return None
         try:
             return await link.session.interrupt()
-        except (spatialreal.AvatarSDKError, ValueError) as exc:
+        except ValueError:
+            # Nothing was sent on this session yet. (The SDK says the same when its socket is
+            # already gone; the session's close reports that loss.)
+            return None
+        except spatialreal.AvatarSDKError as exc:
             self._lose(link, _describe(exc))
             return None
 
