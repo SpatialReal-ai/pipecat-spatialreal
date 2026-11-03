@@ -8,10 +8,10 @@ SpatialReal web SDK, so the pipeline never carries video frames.
 
 Built and maintained by [SpatialReal](https://www.spatialreal.ai/).
 
-Tested with Pipecat v1.15.0. CI runs the tests against that declared floor and against the newest
-Pipecat release the package allows (`pipecat-ai>=1.15.0,<2`), with a fake SpatialReal backend; the
-first live run on Daily and LiveKit rooms is still to be done. A weekly job runs the tests against
-the newest release and opens a pull request that moves this line when they pass on a newer one.
+Tested with Pipecat v1.15.0 and run live on Daily and LiveKit on 2026-11-03. CI runs the tests
+against that declared floor and against the newest Pipecat release the package allows
+(`pipecat-ai>=1.15.0,<2`), with a fake SpatialReal backend. A weekly job runs the tests against the
+newest release and opens a pull request that moves this line when they pass on a newer one.
 
 ## How it works
 
