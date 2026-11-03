@@ -40,6 +40,7 @@ dev = [
     # 8.2 or newer.
     "pytest>=8.2",
     "pytest-asyncio>=1.1",
+    "pytest-timeout>=2.3",
     "pytest-aiohttp",
     "aiohttp>=3.9",
     "websockets>=12",
@@ -70,6 +71,12 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# A test that hangs (a pipeline whose EndFrame never gets through, say) ends the run after two
+# minutes instead of holding CI until the job's timeout; the slowest test takes a few seconds.
+# The thread method dumps every stack and stops the run. The signal method cannot end such a test:
+# it fails it, and the teardown then waits forever on the pipeline's tasks.
+timeout = 120
+timeout_method = "thread"
 filterwarnings = [
     # pipecat-ai imports the stdlib audioop, deprecated on Python 3.11 and 3.12 (it uses
     # audioop-lts from 3.13 on). Not ours to fix; nothing else is ignored.
