@@ -50,17 +50,18 @@ late only changes its own row.
 | Column | Meaning | Passes when |
 |---|---|---|
 | `turn` | First 8 characters of `turn_id`. | |
-| `lead ms` | The detected audible onset minus the arrival of `turn_start`. A `~` marks a chained turn with no onset of its own, placed from the previous turn (see below). | at least 100 |
-| `segment 0` | Chunks arrived of `chunk_count`, the segment's bytes once joined in `chunk_index` order, and how long before the onset the last chunk arrived. | whole, and before the onset |
-| `onsets_ms[0]` | The processor's first onset for the turn. | |
-| `skew ms` | `lead` minus `onsets_ms[0]`: how much slower the audio path is than the message path. | steady from turn to turn |
-| `onset Δ ms` | Tapped minus announced spacing: each later onset against the first, and for a chained turn (`prev_turn_id`) the first onset against where the previous turn's exact length puts it. | within 40 |
+| `lead ms` | The detected audible onset minus the arrival of `turn_start`. A `~` marks a chained turn with no onset of its own, measured against the position the turn before it gives (see below). | at least 100 |
+| `segment 0` | Chunks arrived of `chunk_count`, the segment's bytes once joined in `chunk_index` order, and how long before the onset the last chunk arrived (`~` again for a placed turn). | whole, and before the onset |
+| `onsets_ms[0]` | The processor's first onset for the turn; `-` when it announced none. | |
+| `skew ms` | `lead` minus `onsets_ms[0]`: how much slower the audio path is than the message path. `-` for a placed turn. | steady from turn to turn |
+| `onset Δ ms` | Tapped minus announced spacing: each later onset against the first, and for a chained turn (`prev_turn_id`) the first onset against where the end of the turn before it puts it (`chain +N`). | within 40 |
 | `end` | `turn_end` (or `turn_abort`) time since `turn_start`, `pcm_ms` and the segment count. | |
 | `abort Δ ms` | `turn_abort` minus Pipecat's `user-started-speaking` message. | at most 300 |
-| `result` | `pass`, `fail` with the reasons, or `pending`. | |
+| `result` | `pass`, `fail` with the reasons, `unverified` (a placed chained turn, see below) or `pending`. | |
 
-Above the table a line counts the turns that pass or fail, the `state` messages that say
-`STATUS_DEGRADED`, the contract problems and the audible onsets no turn accounts for. Below it,
+Above the table a line counts the turns that pass, fail, are unverified or are pending, the `state`
+messages that say `STATUS_DEGRADED`, the contract problems and the audible onsets no turn accounts
+for; it is green only when every finished turn passed and nothing else is wrong. Below it,
 **Contract problems** lists every message that breaks `pipecat/v1/avatar.proto`: a missing key,
 1-based or out-of-range `chunk_index`, `chunk_count` below 1, `chunk_count` or `end` changing
 inside a segment, a gap in `segment_seq`, `end` anywhere but the last segment, frames after
@@ -72,24 +73,49 @@ like. **Timeline** puts every message, tapped onset and conversation marker in o
 The first sample of a turn is not marked in the room's audio: between turns the track is silence,
 and a turn that opens with silence of its own (`onsets_ms[0]` > 0) starts somewhere in it. So the
 probe cannot subtract `onsets_ms[0]` from a measured position and compare. It compares what does
-not depend on where the turn starts: the spacing of onsets inside a turn, and the first onset of a
-chained turn, which the previous turn fixes. A turn with a single onset is checked on `lead`,
-`segment 0` and `skew` only; `skew` is `lead` minus `onsets_ms[0]`, so an onset found early or late
-shows as skew that moves between turns.
+not depend on where the turn starts: the spacing of onsets inside a turn and, for a chained turn,
+its first onset against where the end of the turn before it puts it. A turn with a single onset is
+checked on `lead`, `segment 0` and `skew` only; `skew` is `lead` minus `onsets_ms[0]`, so an onset
+found early or late shows as skew that moves between turns. `onsets_ms` can also be empty: the
+processor announces an onset only once it has found an audible sample, and a degraded turn may
+announce none. A turn without announced onsets has nothing to compare, and `onsets_ms[0]` and
+`skew` show `-`.
 
-**A chained turn can have no onset to hear.** A turn with `prev_turn_id` follows the previous one
-without a pause longer than `min_silence_ms`. The processor starts a fresh onset tracker for every
-turn and counts a turn's leading silence from the turn's own first sample, so it always announces
-`onsets_ms[0]`. The receiver's detector runs on across the join and needs `min_silence_ms` (150 ms)
-of quiet before it finds a sound: when the end of the previous turn, any gap and the new turn's own
-leading silence add up to less, there is nothing to find, and nothing is wrong. The probe does not
-fail such a turn for it. It places the turn's first onset where the previous turn's exact length
-puts it, which is what the web SDK does, marks `lead` with `~`, and checks what that position
-allows: `lead`, segment 0 and the spacing of later onsets. It cannot confirm that the audio is
-there, because there is no onset to confirm it with. When the join is quiet enough for an onset to
-be found, that onset is compared with the chain's position instead (`onset Δ` shows `chain +N`,
-within 40 ms). A chained turn whose predecessor was not measured cannot be placed, so a missing
-onset is a failure there.
+**An unchained turn always has an onset to hear.** The processor releases a turn that has animation
+and does not follow the previous one back to back only once the room has been quiet for
+`min_silence_ms` (it waits one `silence_chunk_ms` more as margin: 150 + 40 ms by default), so the
+receiver's detector always finds that turn's first onset itself, and a missing one is a failure. A
+degraded turn, which plays without animation, is not held. An unchained turn's `turn_start` can
+arrive before the previous turn's `turn_end`, when another sound sits between the two; the probe
+pairs onsets by position and by time windows, not by message order. A sound that belongs to no turn
+cannot be told from a turn's first onset: it is reported as a stray when no turn is waiting for an
+onset, and otherwise taken for that turn's, whose own onset then shows up as a stray. Mixing other
+audio into the bot's track is not supported.
+
+**A chained turn can have no onset to hear.** A turn with `prev_turn_id` plays right after the
+previous turn's last sample: no pause, nothing in between. (A turn that would start after any gap
+is released later and announced unchained.) The processor starts a fresh onset tracker for every
+turn and counts a turn's leading silence from the turn's own first sample, while the receiver's
+detector runs on across the join and needs `min_silence_ms` (150 ms) of quiet before it finds a
+sound. When the previous turn's trailing quiet and the new turn's own leading silence add up to
+less, the receiver has no onset there to find, and nothing is wrong. The probe does not fail such a
+turn for it. It places the turn's first onset where the end of the previous turn puts it: the
+previous turn's first onset minus its `onsets_ms[0]`, plus `prev_turn_pcm_ms`, plus the turn's own
+`onsets_ms[0]`. That position is exact, with no slack, because there is no gap in between, and it
+is the one the web SDK uses. The turn shows `~` on `lead` and on the `segment 0` margin (both are
+measured against the placed position), an empty `skew`, and the spacing of its later onsets. Its
+result is **unverified**, neither pass nor fail, because nothing in the audio confirms the
+placement. When the join is quiet enough for the receiver to hear the turn's first onset, that
+onset is compared with the chain's position instead (`onset Δ` shows `chain +N`, within 40 ms). A
+heard onset within 200 ms (`CHAIN_TOL_MS`) of the chain's position is taken for the chained turn's
+first onset, so that a miss shows as a chain error; one further away is a stray.
+
+A chained turn that cannot be placed takes no onset: with no position to tell its onset by, the
+time window alone could give it a later turn's. It cannot be placed when it announced no onsets,
+when the turn it follows was never announced or announced none, or when that turn cannot be placed
+either (it was not heard, or it is chained and has the same trouble). If it ended, it fails, and
+the failure names which: `it announced no onsets`, `it follows aaaaaaaa, which was not heard`, and
+the like.
 
 `abort Δ` counts from Pipecat's `user-started-speaking` message, which the bot sends once its VAD
 confirms speech (`start_secs`, 0.2 s by default). It times the processor's reaction, not the sound
@@ -120,10 +146,20 @@ Needs the SpatialReal, Deepgram, Cartesia, OpenAI and Daily keys in `.env`.
 
 1. `uv run python examples/bot.py -t daily`, then open the probe with `?mic=1` and press Start.
 2. Talk to the bot for ten turns. Interrupt it mid-sentence once.
-3. Expect every turn to pass, and the summary line to end in `state degraded: 0. contract problems:
-   0. stray onsets: 0.` If the onsets disagree by more than 40 ms, adjust `threshold` (and
-   `min_silence_ms`) in the processor and in the URL until ten turns pass, make that the constructor
-   default, and record it in the README.
+3. A good run shows, on every turn:
+   * `turn_start` arriving at least 100 ms before the audible onset of its speech;
+   * every chunk of the turn's first segment arrived before that onset;
+   * the onsets the processor announces and the onsets found in the audio the browser receives
+     within 40 ms of each other (the section above says what the probe can compare);
+   * no `state` message with `STATUS_DEGRADED`;
+   * after an interruption, `turn_abort` within 300 ms of Pipecat's `user-started-speaking` message,
+     which arrives about 0.2 s (the VAD's `start_secs`) after the user's first sound.
+
+   The summary line should end in `state degraded: 0. contract problems: 0. stray onsets: 0.`
+   The turns that count are the ones marked `pass`; an `unverified` turn is not one of the ten. If
+   the onsets disagree by more than 40 ms, adjust `threshold` (and `min_silence_ms`) in the
+   processor and in the URL until ten turns pass, make that the constructor default, and record it
+   in the README.
 4. Download both capture files, move them into this directory, and commit them: they are the offline
    test material for the web SDK's Pipecat session.
 

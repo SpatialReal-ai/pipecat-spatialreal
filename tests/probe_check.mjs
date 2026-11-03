@@ -11,8 +11,8 @@ const match = html.match(/<script id="analysis">([\s\S]*?)<\/script>/)
 assert(match, 'the analysis script is not in the page')
 const sandbox = { atob: globalThis.atob }
 vm.createContext(sandbox)
-const api = vm.runInContext(match[1] + '\n;({ analyze, OnsetDetector, toPcm16, reassemble, decodeBase64 })', sandbox)
-const { analyze, OnsetDetector, toPcm16 } = api
+const api = vm.runInContext(match[1] + '\n;({ analyze, summarize, OnsetDetector, toPcm16, reassemble, decodeBase64 })', sandbox)
+const { analyze, summarize, OnsetDetector, toPcm16 } = api
 
 const FIXTURE = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'))
 const E = FIXTURE.envelopes
@@ -277,13 +277,16 @@ test('no onset ever heard: ended turns fail, an aborted one does not', () => {
   const rows = analyze(s).turns
   assert.equal(rows[0].status, 'fail')       // A already ended without ever being heard
   assert.equal(rows[1].status, 'fail')       // B is chained to A, which was not heard either: nothing places it
-  assert(rows[1].fails.some(f => /cannot be placed/.test(f)), rows[1].fails.join('|'))
+  assert(rows[1].fails.some(f => /no onset was matched to it, and it cannot be placed: it follows aaaaaaaa, which was not heard/.test(f)), rows[1].fails.join('|'))
   assert.equal(rows[2].status, 'pass')       // C was cut off by a barge-in before anything was heard
 })
 
-// --- Chained turns. The processor starts a fresh onset tracker for every turn and so announces
-// onsets_ms[0] for a turn that begins inside the previous one's sound; the tap runs on across the
-// join and finds an onset only after min_silence_ms of quiet, so there may be none to hear.
+// --- Chained turns. The processor chains a turn (prev_turn_id) only when its first sample plays right
+// after the previous turn's last one: no pause, nothing in between. Any other turn is announced
+// unchained and released after min_silence_ms of quiet. A fresh onset tracker starts with every turn,
+// so a chained turn that begins inside the previous one's sound announces onsets_ms[0], while the tap
+// runs on across the join and finds an onset only after min_silence_ms of quiet: there may be none to
+// hear. The end of the previous turn then places the turn, exactly, and nothing confirms the place.
 
 /** goodSession() in which the tap hears no onset at the join with turn B (its own is not found). */
 function sessionWithoutBsOnset() {
@@ -293,21 +296,45 @@ function sessionWithoutBsOnset() {
   return s
 }
 const turnStart = (s, id) => s.log.find(r => r.data.turn_start && r.data.turn_start.turn_id === id).data.turn_start
+const D = 'dddddddd-4444-4444-8444-444444444444'
+/** Add turn D (not chained, onsets_ms [100]) to a session: turn_start at 5100, its onset heard at 5400. */
+function addTurnD(s) {
+  const start = clone(E.C_start); start.turn_start.turn_id = D; start.turn_start.onsets_ms = [100]
+  const seg = clone(E.C_seg0[0]); seg.frames.turn_id = D; seg.frames.chunk_count = 1
+  s.log.push({ t: s.T0 + 5100, tap: 0, size: 3000, data: start }, { t: s.T0 + 5102, tap: 0, size: 3000, data: seg })
+  s.log.sort((a, b) => a.t - b.t)
+  s.onsets.splice(2, 0, { pos: 480000 + 300000, wall: s.T0 + 5400, level: 0.2 })
+}
 
-test('a chained turn with no onset of its own is placed from the previous turn, not failed', () => {
+test('a chained turn with no onset of its own is placed exactly from the end of the turn before it, and unverified', () => {
   const r = analyze(sessionWithoutBsOnset())
   const b = r.turns[1]
-  assert.equal(b.status, 'pass', b.fails.join('; '))
+  assert.equal(b.status, 'unverified', b.fails.join('; '))       // not a pass: nothing in the audio confirms the place
+  assert.deepEqual(plain(b.fails), [])
   assert.equal(b.placed, true)
-  assert.equal(Math.round(b.lead), 850)            // turn_start at 3150, where A's length puts the onset: 4000
+  // A's first onset is at 1180 ms and A starts 180 ms earlier and is 3000 ms long, so B's first sample is at 4000 ms
+  // and B's onsets_ms[0] is 0: exactly 4000 ms. There is no pause between the turns, so there is no slack.
+  assert.equal(b.lead, 850)                        // turn_start at 3150
+  assert.equal(b.seg0.margin, 848)                 // its last chunk at 3152
   assert.equal(b.skew, null)
-  assert(b.notes.some(n => /placed from the previous turn/.test(n)), b.notes.join('|'))
+  assert(b.notes.some(n => /placed from the end of the turn before it/.test(n)), b.notes.join('|'))
   assert.equal(b.seg0.complete, true)
-  assert(b.seg0.margin > 0)
   assert.equal(r.strays.length, 0)
   assert.deepEqual(plain(r.problems), [])
-  assert(r.events.some(e => /\[bbbbbbbb\] first onset placed from the previous turn's length, 850 ms after turn_start/.test(e.text)))
+  assert(r.events.some(e => /\[bbbbbbbb\] first onset placed from the end of the turn before it, 850 ms after turn_start/.test(e.text)))
   assert.equal(r.turns[2].lead, 300)               // C keeps its own onset
+})
+
+test('the summary counts a placed turn as unverified, not as a pass, and is not green for it', () => {
+  const clean = summarize(analyze(goodSession()))
+  assert.equal(clean.text, '3 turns: 3 pass, 0 fail, 0 unverified, 0 pending. state degraded: 0. contract problems: 0. stray onsets: 0.')
+  assert.equal(clean.tone, 'ok')
+  const placed = summarize(analyze(sessionWithoutBsOnset()))
+  assert.equal(placed.text, '3 turns: 2 pass, 0 fail, 1 unverified, 0 pending. state degraded: 0. contract problems: 0. stray onsets: 0.')
+  assert.equal(placed.tone, 'muted')               // neither green nor red
+  const s = sessionWithoutBsOnset()
+  s.onsets.push({ pos: 9_999_999, wall: s.T0 + 20000, level: 0.5 })   // a stray makes it bad whatever else is true
+  assert.equal(summarize(analyze(s)).tone, 'bad')
 })
 
 test('a placed chained turn keeps its later onsets: they are not taken for its first', () => {
@@ -318,27 +345,118 @@ test('a placed chained turn keeps its later onsets: they are not taken for its f
   const b = r.turns[1]
   assert.equal(b.placed, true)
   assert.deepEqual(plain(b.laterErrs.map(Math.round)), [0])
-  assert.equal(b.status, 'pass', b.fails.join('; '))
+  assert.equal(b.status, 'unverified', b.fails.join('; '))   // still: its first onset was not heard
   assert.equal(r.strays.length, 0)
   assert.equal(r.turns[2].lead, 300)
 })
 
 test('a placed turn takes an onset near its place only, not the next turn\'s', () => {
   const s = sessionWithoutBsOnset()
-  // Turn D starts 100 ms after B's turn_end and its onset comes 300 ms after that: inside B's window,
-  // but 3.4 s away from where A's length puts B's onset.
-  const D = 'dddddddd-4444-4444-8444-444444444444'
-  const start = clone(E.C_start); start.turn_start.turn_id = D; start.turn_start.onsets_ms = [100]
-  const seg = clone(E.C_seg0[0]); seg.frames.turn_id = D; seg.frames.chunk_count = 1
-  s.log.push({ t: s.T0 + 5100, tap: 0, size: 3000, data: start }, { t: s.T0 + 5102, tap: 0, size: 3000, data: seg })
-  s.log.sort((a, b) => a.t - b.t)
-  s.onsets.splice(2, 0, { pos: 480000 + 300000, wall: s.T0 + 5400, level: 0.2 })
+  addTurnD(s)                                      // D's onset is inside B's time window, 3.4 s from B's place
   const r = analyze(s)
-  const [, b, , d] = [r.turns[0], r.turns[1], r.turns[2], r.turns.find(t => t.id === D)]
+  const b = r.turns[1]
+  const d = r.turns.find(t => t.id === D)
   assert.equal(b.placed, true)
   assert.equal(d.lead, 300)
-  assert.equal(d.placed, false)                   // D's own onset, heard
+  assert.equal(d.placed, false)                    // D's own onset, heard
   assert.equal(r.strays.length, 0)
+})
+
+test('a chained turn that cannot be placed takes no onset: a later turn keeps its own', () => {
+  const s = sessionWithoutBsOnset()
+  turnStart(s, B).onsets_ms = []                   // B announced no onsets: nothing to place it by
+  addTurnD(s)                                      // D's onset lies inside B's time window
+  const r = analyze(s)
+  const d = r.turns.find(t => t.id === D)
+  assert.equal(d.lead, 300)                        // D got it; the time window alone would have given it to B
+  assert.deepEqual(plain(d.fails), [])
+  assert.equal(d.status, 'pending')                // D has not ended yet
+  assert.equal(r.turns[1].status, 'fail')
+  assert.equal(r.strays.length, 0)
+})
+
+test('a chained turn that cannot be placed fails with the real reason, not that a turn was not measured', () => {
+  const reasonOf = (s, i = 1) => { const row = analyze(s).turns[i]; assert.equal(row.status, 'fail', row.fails.join('; ')); return row.fails.join('; ') }
+  const prefix = 'no onset was matched to it, and it cannot be placed: it '
+
+  const noOnsets = sessionWithoutBsOnset()
+  turnStart(noOnsets, B).onsets_ms = []
+  assert.equal(reasonOf(noOnsets), prefix + 'announced no onsets')
+
+  const unknown = sessionWithoutBsOnset()
+  turnStart(unknown, B).prev_turn_id = 'ffffffff-6666-4666-8666-666666666666'
+  assert.equal(reasonOf(unknown), prefix + 'follows ffffffff, which was never announced')
+
+  const prevNoOnsets = sessionWithoutBsOnset()
+  turnStart(prevNoOnsets, A).onsets_ms = []        // A announced none (and its two onsets are not accounted for)
+  assert.equal(reasonOf(prevNoOnsets), prefix + 'follows aaaaaaaa, which announced no onsets')
+
+  const notHeard = goodSession()
+  notHeard.onsets.length = 0                       // nothing is heard at all
+  assert.equal(reasonOf(notHeard), prefix + 'follows aaaaaaaa, which was not heard')
+
+  // C ends and is chained to B, which is chained to A, which was not heard: the reason runs back along the chain
+  const deep = goodSession()
+  deep.onsets.length = 0
+  deep.log.splice(deep.log.findIndex(r => r.data.turn_abort), 1)
+  deep.log.push({ t: deep.T0 + 9000, tap: 0, size: 100, data: { tag: 'spatialreal-avatar', turn_end: { turn_id: C, pcm_ms: 2000.0, segment_count: 1 } } })
+  turnStart(deep, C).prev_turn_id = B
+  turnStart(deep, C).prev_turn_pcm_ms = 1500.0
+  assert.equal(reasonOf(deep, 2), prefix + 'follows bbbbbbbb, which follows aaaaaaaa, which was not heard')
+
+  for (const s of [noOnsets, unknown, prevNoOnsets, notHeard, deep]) {
+    assert(!analyze(s).turns.some(row => row.fails.some(f => /not measured/.test(f))))
+  }
+})
+
+test('a turn that was never announced is a failed row, and the summary counts it', () => {
+  const s = goodSession()
+  const ghost = 'eeeeeeee-5555-4555-8555-555555555555'
+  s.log.push({ t: s.T0 + 12000, tap: 0, size: 100, data: { tag: 'spatialreal-avatar', turn_abort: { turn_id: ghost } } })
+  const r = analyze(s)
+  const row = r.turns.find(t => t.id === ghost)
+  assert.equal(row.status, 'fail')
+  assert.deepEqual(plain(row.fails), ['no turn_start'])
+  assert.deepEqual(plain(summarize(r).counts), { pass: 3, fail: 1, unverified: 0, pending: 0 })
+  assert.equal(summarize(r).counts.pass + summarize(r).counts.fail, r.turns.length)   // every row is counted somewhere
+})
+
+test('an unchained turn that was not heard says whether it announced onsets', () => {
+  const silent = goodSession()
+  silent.onsets.length = 0
+  turnStart(silent, A).onsets_ms = []              // A announced none and none was heard
+  const a = analyze(silent).turns[0]
+  assert.equal(a.status, 'fail')
+  assert(a.fails.includes('no audible onset was heard (it announced none either)'), a.fails.join('|'))
+
+  const deaf = goodSession()
+  deaf.onsets.length = 0                           // A announced onsets and none was heard
+  const heardNothing = analyze(deaf).turns[0]
+  assert(heardNothing.fails.includes('no audible onset was heard'), heardNothing.fails.join('|'))
+})
+
+test('an unchained turn announced before the previous turn has ended is paired by its own onset', () => {
+  // When another sound sits between two turns the second is not chained, and its turn_start can arrive
+  // before the first turn's turn_end: the processor holds its release until the room has been quiet.
+  const s = goodSession()
+  const b = turnStart(s, B)
+  b.prev_turn_id = ''
+  b.prev_turn_pcm_ms = 0
+  s.log.find(r => r.data.turn_start && r.data.turn_start.turn_id === B).t = s.T0 + 2900
+  s.log.sort((x, y) => x.t - y.t)
+  const startOf = id => s.log.find(r => r.data.turn_start && r.data.turn_start.turn_id === id).t
+  const endOf = id => s.log.find(r => r.data.turn_end && r.data.turn_end.turn_id === id).t
+  assert(startOf(B) < endOf(A))                    // the premise: B was announced while A had not yet ended
+  const r = analyze(s)
+  assert.deepEqual(plain(r.problems), [])
+  assert.equal(r.strays.length, 0)
+  const [a, bRow] = r.turns
+  assert.equal(a.status, 'pass', a.fails.join('; '))
+  assert.equal(bRow.status, 'pass', bRow.fails.join('; '))
+  assert.equal(bRow.lead, 1100)                    // its own onset at 4000, its turn_start at 2900
+  assert.equal(bRow.placed, false)
+  assert.equal(bRow.chainErr, undefined)           // not chained: nothing to compare with
+  assert.deepEqual(plain(a.laterErrs.map(Math.round)), [0])   // A's later onset still belongs to A
 })
 
 test('a chained onset that is heard but off its place is paired and failed; far off it is a stray', () => {
@@ -351,7 +469,7 @@ test('a chained onset that is heard but off its place is paired and failed; far 
     assert.equal(Math.round(r.turns[1].chainErr), off)
     assert(r.turns[1].fails.some(f => new RegExp(`chained onset is ${off} ms off`).test(f)), `${off} ms: ${r.turns[1].fails}`)
   }
-  const far = goodSession()
+  const far = goodSession()                        // 260 ms is beyond CHAIN_TOL_MS (200): not B's onset at all
   far.onsets[2].pos += samples(260)
   far.onsets[2].wall += 260
   const r = analyze(far)
@@ -359,13 +477,15 @@ test('a chained onset that is heard but off its place is paired and failed; far 
   assert.equal(r.turns[1].placed, true)
 })
 
-test('a chain that points at itself or loops does not hang the analysis', () => {
-  const s = sessionWithoutBsOnset()
-  turnStart(s, A).prev_turn_id = A                // itself
-  turnStart(s, B).prev_turn_id = C                // B -> C -> B
+test('a chain that points at itself or loops does not hang the analysis, and the reason says so', () => {
+  const s = goodSession()
+  s.onsets.splice(2)                               // only A's two onsets are heard, B and C are not
+  turnStart(s, A).prev_turn_id = A                 // A follows itself (A is heard, so nothing recurses)
+  turnStart(s, B).prev_turn_id = C                 // B follows C and C follows B: neither is heard
   turnStart(s, C).prev_turn_id = B
   const r = analyze(s)
   assert.equal(r.turns.length, 3)
+  assert(r.turns[1].fails.some(f => /follows cccccccc, which follows bbbbbbbb, which is part of a loop of chained turns/.test(f)), r.turns[1].fails.join('|'))
 })
 
 test('the page\'s own notes are on the timeline', () => {

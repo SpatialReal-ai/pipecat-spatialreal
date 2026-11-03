@@ -80,7 +80,7 @@ const APP_MESSAGE_MAX = 4096 // Daily's cap on one app message, in bytes
 const LATE_START_MS = 1500  // an onset may precede the arrival of its turn_start by this much
 const AFTER_CLOSE_MS = 800  // ... or follow its turn_end / turn_abort (audio trails the messages)
 const LATER_TOL_MS = 120    // how far from its announced place a later onset is still looked for
-const CHAIN_TOL_MS = 200    // ... and a chained turn's first onset from where the previous turn puts it
+const CHAIN_TOL_MS = 200    // ... and a chained turn's first onset from where the end of the turn before it puts it
 
 // Every key of a payload member is present (avatar.proto, JSON rules); a missing key is a bug.
 const PAYLOAD_KEYS = {
@@ -329,44 +329,62 @@ function analyze({ log, onsets, markers, rate, notes = [] }) {
   //    a turn that is already placed (it falls where onsets_ms says one should), else the first
   //    onset of the oldest turn that can still own it, else a stray.
   //
-  //    A turn is placed by its first onset heard in the tap. A chained turn (prev_turn_id: it
-  //    follows the previous one without a pause) can have none. The processor counts a turn's
-  //    leading silence from the turn's own first sample, so it always announces onsets_ms[0]; the
-  //    tap runs on across the join and needs min_silence_ms of quiet before it finds a sound, so
-  //    when the end of the previous turn, any gap and the new turn's own silence add up to less,
-  //    there is nothing to find and nothing is wrong. Such a turn is placed where the previous
-  //    turn's exact length puts it, as the web SDK does.
+  //    A turn is placed by its first onset heard in the tap. A chained turn (prev_turn_id) plays
+  //    right after the last sample of the turn before it, with no pause and nothing in between;
+  //    the processor releases any other turn only after min_silence_ms of quiet, so that the tap
+  //    finds that turn's onset itself. A chained turn can have none to find: the processor counts
+  //    its leading silence from its own first sample, the tap runs on across the join and needs
+  //    min_silence_ms of quiet before it finds a sound, so when the trailing quiet of the turn
+  //    before and its own leading silence add up to less there is nothing to hear, and nothing is
+  //    wrong. Such a turn is placed where the end of the turn before it puts it, exactly, as the
+  //    web SDK places it. It stays unverified: nothing in the audio confirms the position.
+  //
+  //    placeOf() and chainPlace() answer { place } or, when they cannot, { why }: a clause about
+  //    the turn that the failure text and the notes complete ("it announced no onsets").
+
+  /** Where the end of the turn a chained turn follows puts its first onset: { place } or { why }. */
   function chainPlace(turn, seen = new Set()) {
-    if (!turn.start) return null
     const start = turn.startBody
-    if (!start.prev_turn_id || !turn.onsetsMs.length || seen.has(turn.id)) return null
+    if (!turn.onsetsMs.length) return { why: 'announced no onsets' }
+    if (seen.has(turn.id)) return { why: 'is part of a loop of chained turns' }
     seen.add(turn.id)
     const prev = turns.get(start.prev_turn_id)
-    const from = prev && prev.onsetsMs.length ? placeOf(prev, seen) : null
-    if (!from || !Number.isFinite(start.prev_turn_pcm_ms)) return null
+    const behind = `follows ${short(start.prev_turn_id)}, which`
+    if (!prev || !prev.start) return { why: `${behind} was never announced` }
+    if (!Number.isFinite(start.prev_turn_pcm_ms)) return { why: 'has a prev_turn_pcm_ms that is not a number' }
+    if (!prev.onsetsMs.length) return { why: `${behind} announced no onsets` }
+    const from = placeOf(prev, seen)
+    if (!from.place) return { why: `${behind} ${from.why}` }
+    // The turn's first sample is the previous turn's first sample plus its exact length, and its
+    // first onset is its own onsets_ms[0] later: no gap and no slack.
     const shift = toSamples(start.prev_turn_pcm_ms + turn.onsetsMs[0] - prev.onsetsMs[0])
-    return { pos: from.pos + shift, wall: from.wall + toMs(shift) }
+    return { place: { pos: from.place.pos + shift, wall: from.place.wall + toMs(shift) } }
   }
-  /** Where the turn's first onset is in the tap: the onset heard, else where the chain puts it, else null. */
+  /** Where the turn's first onset is in the tap: { place } (heard, or from the chain) or { why } not. */
   function placeOf(turn, seen = new Set()) {
-    if (turn.primary) return { pos: turn.primary.pos, wall: turn.primary.wall, heard: true }
-    const place = chainPlace(turn, seen)
-    return place && { ...place, heard: false }
+    if (turn.primary) return { place: { pos: turn.primary.pos, wall: turn.primary.wall, heard: true } }
+    if (!turn.start) return { why: 'was never announced' }
+    if (!turn.startBody.prev_turn_id) return { why: 'was not heard' }
+    const chain = chainPlace(turn, seen)
+    return chain.place ? { place: { ...chain.place, heard: false } } : chain
   }
   const strays = []
   const canOwn = (turn, onset) => {
     if (!turn.start) return false
     const closed = turn.end ? turn.end.t : turn.abort ? turn.abort.t : Infinity
     if (onset.wall < turn.start.t - LATE_START_MS || onset.wall > closed + AFTER_CLOSE_MS) return false
-    // A turn whose place is known takes an onset near it only, so it cannot take a later turn's.
-    const place = placeOf(turn)
-    return !place || Math.abs(onset.pos - place.pos) <= toSamples(CHAIN_TOL_MS)
+    if (!turn.startBody.prev_turn_id) return true
+    // A chained turn's first onset is told from a later turn's by its position alone: where the end
+    // of the turn before it puts it. With no position the time window cannot tell them apart, so
+    // the turn takes no onset (and cannot take a later turn's).
+    const { place } = placeOf(turn)
+    return !!place && Math.abs(onset.pos - place.pos) <= toSamples(CHAIN_TOL_MS)
   }
   const owner = new Map()
   for (const onset of onsets) {
     let claimed = false
     for (const turn of list) {
-      const place = placeOf(turn)
+      const { place } = placeOf(turn)
       if (!place) continue
       for (let k = 1; k < turn.onsetsMs.length && !claimed; k++) {
         if (turn.later[k]) continue
@@ -399,17 +417,18 @@ function analyze({ log, onsets, markers, rate, notes = [] }) {
       .map(({ seq, chunks, count, bytes, end, complete, wire }) => ({ seq, chunks: chunks.size, count, bytes, end, complete, wire }))
     if (!turn.start) {
       row.fails.push('no turn_start')
+      row.status = 'fail'
       continue
     }
     const start = turn.startBody
     row.degraded = !!start.degraded
     row.o0 = turn.onsetsMs.length ? turn.onsetsMs[0] : null
     if (start.degraded) row.fails.push('turn_start.degraded')
-    const place = placeOf(turn)
+    const { place, why } = placeOf(turn)
     if (place) {
-      // placed: no onset of its own was heard, the previous turn's length gives the position
+      // placed: no onset of its own was heard, the end of the turn before it gives the position
       row.placed = !place.heard
-      if (row.placed) row.notes.push('chained: no onset of its own to hear, placed from the previous turn')
+      if (row.placed) row.notes.push('chained: no onset of its own heard, placed from the end of the turn before it')
       row.lead = place.wall - turn.start.t
       if (row.lead < LEAD_MIN_MS) row.fails.push(`turn_start only ${Math.round(row.lead)} ms ahead of the onset`)
       row.skew = row.placed || row.o0 == null ? null : row.lead - row.o0
@@ -431,18 +450,20 @@ function analyze({ log, onsets, markers, rate, notes = [] }) {
         }
       }
       if (start.prev_turn_id && place.heard) {
-        // A chained turn begins where the previous one's audio ends, which fixes its first onset.
+        // A chained turn plays right after the turn before it: where that ends is where its first
+        // onset belongs. (A chained turn that cannot be placed owns no onset, so one that owns an
+        // onset can always be compared.)
         const chain = chainPlace(turn)
-        if (chain) {
-          row.chainErr = toMs(turn.primary.pos - chain.pos)
+        if (chain.place) {
+          row.chainErr = toMs(turn.primary.pos - chain.place.pos)
           if (Math.abs(row.chainErr) > ONSET_TOL_MS) row.fails.push(`chained onset is ${Math.round(row.chainErr)} ms off`)
-        } else {
-          row.notes.push('chained to a turn that was not measured')
         }
       }
     } else if (turn.end) {
-      // Nothing explains the missing onset: a chained turn is excused only where the chain can place it.
-      row.fails.push(start.prev_turn_id ? 'no onset was heard, and the previous turn it follows was not measured, so it cannot be placed' : 'no audible onset was heard')
+      // Nothing explains the missing onset: a chained turn is excused only where its place is known.
+      row.fails.push(start.prev_turn_id
+        ? `no onset was matched to it, and it cannot be placed: it ${why}`
+        : `no audible onset was heard${turn.onsetsMs.length ? '' : ' (it announced none either)'}`)
     }
     if (turn.end) row.end = { at: turn.end.t - turn.start.t, pcmMs: turn.endBody.pcm_ms, segments: turn.endBody.segment_count }
     if (turn.abort) {
@@ -455,7 +476,8 @@ function analyze({ log, onsets, markers, rate, notes = [] }) {
         row.notes.push('no user-started-speaking message to time the abort against')
       }
     }
-    row.status = row.fails.length ? 'fail' : turn.end || turn.abort ? 'pass' : 'pending'
+    // A placed turn is never a pass: its position is an inference, nothing in the audio confirms it.
+    row.status = row.fails.length ? 'fail' : turn.end || turn.abort ? (row.placed ? 'unverified' : 'pass') : 'pending'
   }
 
   // 5. The timeline.
@@ -481,14 +503,29 @@ function analyze({ log, onsets, markers, rate, notes = [] }) {
     events.push({ t: onset.wall, text: `tap onset at sample ${onset.pos}, level ${onset.level.toFixed(3)}: ${where}` })
   }
   for (const turn of list) {
-    const place = turn.start && !turn.primary ? placeOf(turn) : null
-    if (place) events.push({ t: place.wall, text: `[${short(turn.id)}] first onset placed from the previous turn's length, ${Math.round(place.wall - turn.start.t)} ms after turn_start (none heard)` })
+    const { place } = turn.start && !turn.primary ? placeOf(turn) : {}
+    if (place) events.push({ t: place.wall, text: `[${short(turn.id)}] first onset placed from the end of the turn before it, ${Math.round(place.wall - turn.start.t)} ms after turn_start (none heard)` })
   }
   for (const m of markers) events.push({ t: m.t, text: `rtvi ${m.type}` })
   for (const n of notes) events.push({ t: n.t, text: `page: ${n.text}` })
   events.sort((a, b) => a.t - b.t)
 
   return { turns: list.map(turn => turn.row), problems, states, strays, events }
+}
+
+/** The summary line of an analysis, and its tone: 'ok' only when every finished turn passed and nothing else is wrong. */
+function summarize({ turns, states, problems, strays }) {
+  const count = status => turns.filter(r => r.status === status).length
+  const counts = { pass: count('pass'), fail: count('fail'), unverified: count('unverified'), pending: count('pending') }
+  const degraded = states.filter(s => s.status === 'STATUS_DEGRADED').length
+  const wrong = counts.fail || degraded || problems.length || strays.length
+  return {
+    counts,
+    degraded,
+    text: `${turns.length} turns: ${counts.pass} pass, ${counts.fail} fail, ${counts.unverified} unverified, ${counts.pending} pending. ` +
+      `state degraded: ${degraded}. contract problems: ${problems.length}. stray onsets: ${strays.length}.`,
+    tone: wrong ? 'bad' : counts.unverified ? 'muted' : counts.pass ? 'ok' : 'muted',
+  }
 }
 </script>
 
@@ -752,13 +789,11 @@ function render() {
     return
   }
   const rows = result.turns
-  const count = status => rows.filter(r => r.status === status).length
-  const degraded = result.states.filter(s => s.status === 'STATUS_DEGRADED').length
+  const line = summarize(result)
   $('summary').innerHTML = ''
   const summary = document.createElement('span')
-  summary.textContent = `${rows.length} turns: ${count('pass')} pass, ${count('fail')} fail, ${count('pending')} pending. ` +
-    `state degraded: ${degraded}. contract problems: ${result.problems.length}. stray onsets: ${result.strays.length}.`
-  summary.className = count('fail') || degraded || result.problems.length || result.strays.length ? 'bad' : count('pass') ? 'ok' : 'muted'
+  summary.textContent = line.text
+  summary.className = line.tone
   $('summary').append(summary)
 
   const body = $('turns').tBodies[0]
@@ -775,7 +810,7 @@ function render() {
       cell(onsetDelta(r), onsetDeltaClass(r)),
       cell(r.end ? `end +${Math.round(r.end.at)} ms, pcm ${r.end.pcmMs} ms, ${r.end.segments} seg` : r.abort ? `abort +${Math.round(r.abort.at)} ms` : '-', 'l'),
       cell(r.abort && r.abort.sinceUser != null ? signed(r.abort.sinceUser) : '-', r.abort && r.abort.sinceUser != null ? (r.abort.sinceUser <= ABORT_MAX_MS ? 'ok' : 'bad') : ''),
-      cell(r.status === 'fail' ? `fail: ${r.fails.join('; ')}` : r.status + (r.notes.length ? ` (${r.notes.join('; ')})` : ''), r.status === 'pass' ? 'l ok' : r.status === 'fail' ? 'l bad' : 'l'),
+      cell(r.status === 'fail' ? `fail: ${r.fails.join('; ')}` : r.status + (r.notes.length ? ` (${r.notes.join('; ')})` : ''), r.status === 'pass' ? 'l ok' : r.status === 'fail' ? 'l bad' : r.status === 'unverified' ? 'l muted' : 'l'),
     )
     body.append(tr)
   }

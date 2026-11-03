@@ -56,19 +56,5 @@ true}`, unless `DAILY_ROOM_URL` is set; the example pages do. `bot.py` adds:
 The avatar needs RTVI, which Pipecat's `PipelineWorker` enables by default: the animation reaches
 the browser as RTVI server messages, and the bot's audio keeps playing through the transport.
 
-## Checking a run
-
-The [probe](probe/README.md) checks a Daily session: start the bot with `-t daily`, open
-<http://localhost:7860/probe/receiver.html?mic=1>, press Start, talk for ten turns and interrupt the
-bot once. On every turn a good run should show:
-
-* `turn_start` arriving at least 100 ms before the audible onset of its speech;
-* every chunk of the turn's first segment arrived before that onset;
-* the onsets the processor announces and the onsets found in the audio the browser receives within
-  40 ms of each other (the probe's README says what it can compare);
-* no `state` message with `STATUS_DEGRADED`;
-* after an interruption, `turn_abort` within 300 ms of Pipecat's `user-started-speaking` message,
-  which arrives about 0.2 s (the VAD's `start_secs`) after the user's first sound.
-
-These are the values to expect, to be confirmed by the first live run on Daily, which has not been
-done yet.
+To measure how the avatar lines up with the bot's audio on a Daily room, use the probe, a developer
+tool for this package: [probe/README.md](probe/README.md) says how.
