@@ -176,9 +176,14 @@ the page started tapping.
 
 ## The live run
 
-Needs the SpatialReal, Deepgram, Cartesia, Gemini and Daily keys in `.env`. It has not been done
-yet: the values below are what the design expects, not measurements, and the first run decides
-whether they hold.
+Needs the SpatialReal, Deepgram, Cartesia, Gemini and Daily keys in `.env`. The first run was done
+on 2026-11-03 with a scripted second participant (the capture is `capture.jsonl` and `capture.wav`
+next to this file): on Daily, eleven turns with a message lead of 159–306 ms over the detected
+onset, a first-segment latency of 580–965 ms (median 694 ms) from the first TTS audio, barge-ins
+aborted 83 and 170 ms after `user-started-speaking`, no degraded state; on LiveKit, eleven of
+twelve turns within tolerance (one soft attack placed 107 ms late by the Opus decode), barge-ins
+in the same data-channel burst as the trigger. The values below are the design's expectations;
+the run above is the measurement.
 
 1. `uv run python examples/bot.py -t daily`, then open the probe with `?mic=1` and press Start.
 2. Talk to the bot for ten turns. Interrupt it mid-sentence once.
