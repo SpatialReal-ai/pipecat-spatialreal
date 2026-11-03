@@ -5,16 +5,16 @@ name: Pipecat compatibility
 #
 # When the tests fail, the job fails and the run is the report: nothing is changed. When they pass
 # on a release newer than the one the README says the package was tested with ("Tested with Pipecat
-# vX.Y.Z"), the job opens a pull request that moves that line.
+# vX.Y.Z"), a second job opens a pull request that moves that line.
+#
+# The two jobs are kept apart because the first runs freshly resolved third-party code (the newest
+# Pipecat and whatever it pulls in). It holds a read-only token and nothing else; its checkout does
+# not keep even that. The second holds the write token and runs no dependency code: it checks out
+# the repository without keeping the token, edits one line of the README itself, and the pull
+# request can carry README.md and nothing else.
 #
 # The pull request is opened with the workflow's own token, so GitHub starts no other workflow on
-# it; the change is one line of the README, and the tests of this run have passed. The repository
-# setting "Allow GitHub Actions to create and approve pull requests" must be on.
-#
-# The job holds contents: write and runs freshly resolved third-party code (the newest Pipecat and
-# whatever it pulls in), so the checkout does not leave the token in the working copy's git config
-# (persist-credentials: false) and only the pull request step is given it. That this works is
-# confirmed by the first workflow_dispatch run: it has not run yet.
+# it. The repository setting "Allow GitHub Actions to create and approve pull requests" must be on.
 #
 # workflow_dispatch only finds workflows that are on the default branch.
 
@@ -24,13 +24,20 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
-  compat:
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A run takes a few minutes; a hung one is cut off here instead of at GitHub's six hours.
+    timeout-minutes: 15
+    # The job's token, which setup-uv also receives by default (its github-token input), can only
+    # read.
+    permissions:
+      contents: read
+    outputs:
+      installed: ${{ steps.version.outputs.installed }}
+      bump: ${{ steps.version.outputs.bump }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -40,6 +47,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # tests/probe_check.mjs runs the probe page's analysis under Node.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
       # Libraries resolve fresh here (uv.lock is not committed), and --upgrade-package makes the
       # newest pipecat-ai win even when a lock file has been restored from somewhere. Resolving
       # again, rather than upgrading the installed package alone, keeps the dependencies of the
@@ -47,6 +59,8 @@ jobs:
       - name: Install the newest Pipecat that pyproject.toml allows
         run: uv sync --extra dev --extra example --upgrade-package pipecat-ai
 
+      # The suite includes tests/test_rtvi_smoke.py, which sends the avatar messages through RTVI
+      # and Pipecat's eval transport.
       - name: Test
         run: uv run pytest -q
 
@@ -70,27 +84,46 @@ jobs:
             fi
           } >> "$GITHUB_OUTPUT"
 
-      # The version goes through env, not into the script text.
+  pr:
+    needs: check
+    if: needs.check.outputs.bump == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # The version comes from the job that ran third-party code, so it is checked before it is
+      # used anywhere, and it goes through env, not into the script text.
       - name: Move the README to the tested version
-        if: steps.version.outputs.bump == 'true'
         env:
-          INSTALLED: ${{ steps.version.outputs.installed }}
+          INSTALLED: ${{ needs.check.outputs.installed }}
         run: |
+          if ! [[ "$INSTALLED" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "Not a release version: '${INSTALLED}'" >&2
+            exit 1
+          fi
           sed -E "s/Tested with Pipecat v[0-9]+(\.[0-9]+)*/Tested with Pipecat v${INSTALLED}/" README.md > README.md.new
           mv README.md.new README.md
+          git diff --stat
 
       - name: Open a pull request
-        if: steps.version.outputs.bump == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ github.token }}
-          branch: compat/pipecat-${{ steps.version.outputs.installed }}
+          # Only the README goes into the pull request, whatever else is in the working tree.
+          add-paths: README.md
+          branch: compat/pipecat-${{ needs.check.outputs.installed }}
           delete-branch: true
-          commit-message: "docs: tested with Pipecat v${{ steps.version.outputs.installed }}"
-          title: "docs: tested with Pipecat v${{ steps.version.outputs.installed }}"
+          commit-message: "docs: tested with Pipecat v${{ needs.check.outputs.installed }}"
+          title: "docs: tested with Pipecat v${{ needs.check.outputs.installed }}"
           body: |
             The weekly compatibility check ran the tests against pipecat-ai
-            ${{ steps.version.outputs.installed }} and they passed, so the README now says the
+            ${{ needs.check.outputs.installed }} and they passed, so the README now says the
             package was tested with it.
 
             Nothing else changed. The check does not raise the `pipecat-ai` floor in

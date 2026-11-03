@@ -35,13 +35,23 @@ dependencies = [
 # to import under an older protobuf runtime. That version must stay <= the `protobuf>=` floor in
 # `dependencies` (pipecat-ai and spatialreal both allow 6.x), so bump the two together.
 dev = [
-    "pytest>=8",
-    "pytest-asyncio>=1.0",
-    "pytest-aiohttp",
+    # pytest-asyncio 1.1 is the first to cancel the tasks a test leaves running when its loop ends;
+    # under 1.0 they are finalised inside a later test, whose teardown then fails. It needs pytest
+    # 8.2 or newer.
+    "pytest>=8.2",
+    "pytest-asyncio>=1.1",
+    "pytest-timeout>=2.3",
+    # CI also installs the lowest version every requirement allows (ci.yml, floors), so none is
+    # left open: unbounded, these two resolved to pytest-aiohttp 0.1.0 (2016) and ruff 0.0.13,
+    # which only builds from source.
+    "pytest-aiohttp>=1.1",
     "aiohttp>=3.9",
     "websockets>=12",
     "grpcio-tools==1.75.1",
-    "ruff",
+    "ruff>=0.17",
+    # Pipecat's eval transport, which tests/test_rtvi_smoke.py sends through, is its FastAPI
+    # WebSocket transport.
+    "pipecat-ai[websocket]>=1.15.0,<2",
 ]
 example = [
     "pipecat-ai[daily,livekit,runner,silero,deepgram,cartesia,openai]>=1.15.0",
@@ -64,6 +74,12 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# A test that hangs (a pipeline whose EndFrame never gets through, say) ends the run after two
+# minutes instead of holding CI until the job's timeout; the slowest test takes a few seconds.
+# The thread method dumps every stack and stops the run. The signal method cannot end such a test:
+# it fails it, and the teardown then waits forever on the pipeline's tasks.
+timeout = 120
+timeout_method = "thread"
 filterwarnings = [
     # pipecat-ai imports the stdlib audioop, deprecated on Python 3.11 and 3.12 (it uses
     # audioop-lts from 3.13 on). Not ours to fix; nothing else is ignored.
