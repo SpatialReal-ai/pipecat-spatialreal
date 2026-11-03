@@ -6,6 +6,7 @@ import pytest
 from conftest import (
     Do,
     Until,
+    audio_at_driveningress,
     interruption_pushed,
     link_up,
     message_pushed,
@@ -234,7 +235,7 @@ async def test_interruption_before_first_segment(fake):
             # Frames queued together reach the processor's input queue together, and a system
             # frame there is taken before data frames: the interruption must come after the
             # turn exists, and after its audio has been sent for the interrupt to stop.
-            Until("the turn's audio to reach driveningress", lambda: fake.received),
+            audio_at_driveningress(fake),
             InterruptionFrame(),
             SleepFrame(0.5),
         ],
@@ -289,7 +290,8 @@ async def test_driven_down_passes_audio_through(fake):
             link_up(proc),
             TTSStartedFrame(),
             tone_frame(100),
-            Do(lambda: fake.close_with(4001)),  # the turn is still waiting for its animation
+            audio_at_driveningress(fake),  # on the wire, waiting for its animation
+            Do(lambda: fake.close_with(4001)),
             message_pushed(pushed, "state"),
             SleepFrame(0.4),
             tone_frame(100),
@@ -1064,7 +1066,10 @@ async def test_a_turn_that_loses_its_link_is_released_at_once(fake):
             link_up(proc),
             TTSStartedFrame(),
             tone_frame(100),
-            Do(lambda: fake.close_with(4001)),  # the turn is still waiting for its animation
+            # The turn's request is on the wire, waiting for its animation, when the link goes;
+            # cut earlier, the turn would meet the loss in its first send, which is another path.
+            audio_at_driveningress(fake),
+            Do(lambda: fake.close_with(4001)),
             message_pushed(pushed, "state"),
             SleepFrame(0.4),  # the TTS pauses; the hold cap is 1.5 s
             tone_frame(100),
@@ -1089,6 +1094,7 @@ async def test_degraded_state_is_reported_once_and_cleared(fake):
             link_up(proc),
             TTSStartedFrame(),
             tone_frame(100),
+            audio_at_driveningress(fake),  # on the wire, waiting for its animation
             Do(lambda: fake.close_with(4001)),
             message_pushed(pushed, "state"),
             SleepFrame(0.25),

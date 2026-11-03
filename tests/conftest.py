@@ -209,6 +209,11 @@ def link_up(proc):
     return Until("the driveningress session to be up", lambda: proc._driven.connected)
 
 
+def audio_at_driveningress(fake):
+    """The step that waits until the fake backend has received audio from the processor."""
+    return Until("the turn's audio to reach driveningress", lambda: bool(fake.received))
+
+
 def tts_audio_released(pushed, count=1):
     """The step that waits until ``count`` frames of TTS audio have been pushed."""
     return Until(
