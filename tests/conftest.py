@@ -111,7 +111,7 @@ class Do:
     action: Callable[[], object]
 
 
-async def play(processor, steps, *, send_end_frame=True):
+async def play(processor, steps, *, send_end_frame=True, wait_s=WAIT_S):
     """Run ``processor`` in a test pipeline and feed it ``steps``, as ``run_test`` does.
 
     The result is the same too: the frames that came out downstream and upstream. A step is a frame
@@ -128,13 +128,15 @@ async def play(processor, steps, *, send_end_frame=True):
         processor: The processor, or a pipeline of processors, under test.
         steps: What to do, in order.
         send_end_frame: Whether to end the pipeline with an ``EndFrame`` after the last step.
+        wait_s: The longest an ``Until`` step waits, and the longest the pipeline has to end after
+            the last step. Only a test of ``play`` itself has reason to shorten it.
 
     Returns:
         ``(downstream frames, upstream frames)``, the ``EndFrame`` not included.
 
     Raises:
-        AssertionError: If a step waits longer than ``WAIT_S`` for the pipeline, or the pipeline
-            has not ended ``WAIT_S`` after the last step (a processor that never lets the
+        AssertionError: If a step waits longer than ``wait_s`` for the pipeline, or the pipeline
+            has not ended ``wait_s`` after the last step (a processor that never lets the
             ``EndFrame`` go, say). Either way the pipeline is cancelled first.
     """
     received_up, received_down = asyncio.Queue(), asyncio.Queue()
@@ -156,7 +158,7 @@ async def play(processor, steps, *, send_end_frame=True):
                 await asyncio.sleep(step.sleep)
             elif isinstance(step, Until):
                 try:
-                    await until(step.condition, timeout=WAIT_S)
+                    await until(step.condition, timeout=wait_s)
                 except AssertionError:
                     raise AssertionError(f"timed out waiting for {step.what}") from None
             elif isinstance(step, Do):
@@ -175,9 +177,9 @@ async def play(processor, steps, *, send_end_frame=True):
         await feed()
         # asyncio.wait, not wait_for: wait_for cancels the run on a timeout, and the run ends
         # quietly when it is cancelled, which would look like a pipeline that ended by itself.
-        done, _ = await asyncio.wait({running}, timeout=WAIT_S)
+        done, _ = await asyncio.wait({running}, timeout=wait_s)
         if not done:
-            raise AssertionError(f"the pipeline did not end within {WAIT_S:g} s of the last step")
+            raise AssertionError(f"the pipeline did not end within {wait_s:g} s of the last step")
         running.result()
     except BaseException:
         # A step failed or the pipeline hung: do not leave it running behind the test. One cancel
