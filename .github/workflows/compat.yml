@@ -11,6 +11,11 @@ name: Pipecat compatibility
 # it; the change is one line of the README, and the tests of this run have passed. The repository
 # setting "Allow GitHub Actions to create and approve pull requests" must be on.
 #
+# The job holds contents: write and runs freshly resolved third-party code (the newest Pipecat and
+# whatever it pulls in), so the checkout does not leave the token in the working copy's git config
+# (persist-credentials: false) and only the pull request step is given it. That this works is
+# confirmed by the first workflow_dispatch run: it has not run yet.
+#
 # workflow_dispatch only finds workflows that are on the default branch.
 
 on:
@@ -28,6 +33,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: astral-sh/setup-uv@v4
         with:
@@ -76,6 +83,7 @@ jobs:
         if: steps.version.outputs.bump == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
+          token: ${{ github.token }}
           branch: compat/pipecat-${{ steps.version.outputs.installed }}
           delete-branch: true
           commit-message: "docs: tested with Pipecat v${{ steps.version.outputs.installed }}"
