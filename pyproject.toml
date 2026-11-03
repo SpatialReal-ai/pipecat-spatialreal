@@ -64,6 +64,11 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # pipecat-ai imports the stdlib audioop, deprecated on Python 3.11 and 3.12 (it uses
+    # audioop-lts from 3.13 on). Not ours to fix; nothing else is ignored.
+    "ignore:'audioop' is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100

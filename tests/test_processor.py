@@ -1,0 +1,798 @@
+import asyncio
+import math
+import struct
+
+import pytest
+from loguru import logger
+from pipecat.frames.frames import (
+    InterruptionFrame,
+    OutputAudioRawFrame,
+    TextFrame,
+    TTSAudioRawFrame,
+    TTSStartedFrame,
+    TTSStoppedFrame,
+    UserStartedSpeakingFrame,
+)
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
+from pipecat.tests.utils import SleepFrame, run_test
+
+from pipecat_spatialreal import SpatialRealAvatarProcessor
+from pipecat_spatialreal.driven import DrivenIngress
+
+
+def make_proc(fake, **kw):
+    return SpatialRealAvatarProcessor(
+        api_key="k",
+        app_id="a",
+        avatar_id="av",
+        console_endpoint_url=fake.console_url,
+        ingress_endpoint_url=fake.ingress_url,
+        **kw,
+    )
+
+
+def tone_frame(ms, rate=24000, **kw):
+    """``ms`` of a 440 Hz tone at amplitude 9800, as the TTS would push it."""
+    count = rate * ms // 1000
+    audio = struct.pack(
+        f"<{count}h", *(round(9800 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(count))
+    )
+    return TTSAudioRawFrame(audio=audio, sample_rate=rate, num_channels=1, **kw)
+
+
+def kinds(frames):
+    """Each frame as ``("rtvi", <payload member>)`` for an avatar message, else its type name."""
+    out = []
+    for f in frames:
+        if isinstance(f, RTVIServerMessageFrame):
+            (member,) = [key for key in f.data if key != "tag"]
+            out.append(("rtvi", member))
+        else:
+            out.append(type(f).__name__)
+    return out
+
+
+def req_of(frames):
+    """The ``turn_id`` of the first ``turn_start``."""
+    return messages(frames, "turn_start")[0]["turn_id"]
+
+
+def messages(frames, member):
+    """The payloads of the avatar messages of one kind, in order."""
+    return [
+        f.data[member] for f in frames if isinstance(f, RTVIServerMessageFrame) and member in f.data
+    ]
+
+
+@pytest.fixture(autouse=True)
+def pipecat_log():
+    """Fail a test whose pipeline reported an error or left a task running.
+
+    Pipecat logs, rather than raises, what goes wrong inside a processor's tasks: an exception
+    in a background task, an error pushed by ``process_frame``, a task still running at teardown.
+    The one error every test expects is the setup notice that RTVI is off, which ``run_test``
+    does on purpose.
+    """
+    records = []
+    sink = logger.add(lambda message: records.append(message.record), level="WARNING")
+    yield records
+    logger.remove(sink)
+    errors = [
+        r["message"]
+        for r in records
+        if (r["level"].no >= 40 and "RTVI" not in r["message"]) or "dangling" in r["message"]
+    ]
+    assert errors == []
+
+
+async def test_audio_is_held_until_first_segment(fake):
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            *[tone_frame(40) for _ in range(10)],
+            TTSStoppedFrame(),
+            SleepFrame(1.0),
+        ],
+        expected_down_frames=None,  # we assert on order ourselves
+    )
+    k = kinds(down)
+    assert (
+        k.index(("rtvi", "turn_start")) < k.index(("rtvi", "frames")) < k.index("TTSAudioRawFrame")
+    )
+    assert k[-1] == ("rtvi", "turn_end") and k.count("TTSAudioRawFrame") == 10
+    assert fake.received_audio_ms(req_of(down)) == 400
+
+
+async def test_released_audio_is_resampled_to_out_rate(fake):
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(400, rate=22050),
+            TTSStoppedFrame(),
+            SleepFrame(1.0),
+        ],
+    )
+    rel = [f for f in down if isinstance(f, TTSAudioRawFrame)]
+    assert all(f.sample_rate == 24000 for f in rel)
+    assert abs(sum(len(f.audio) for f in rel) / 2 / 24000 * 1000 - 400) <= 1
+    assert fake.received_audio_bytes(req_of(down)) == b"".join(f.audio for f in rel)
+
+
+async def test_stall_mirrors_silence(fake):
+    down, _ = await run_test(
+        make_proc(fake, lead_ms=0),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(300),
+            SleepFrame(0.6),
+            tone_frame(200),
+            TTSStoppedFrame(),
+            SleepFrame(1.0),
+        ],
+    )
+    sil = [f for f in down if type(f) is OutputAudioRawFrame]
+    assert 4 <= len(sil) <= 10 and all(set(f.audio) == {0} for f in sil)
+    assert fake.received_audio_ms(req_of(down)) == 500 + 40 * len(sil)
+
+
+async def test_interruption_before_first_segment(fake):
+    fake.first_segment_ms = 10_000
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(100),
+            # Frames queued together reach the processor's input queue together, and a system
+            # frame there is taken before data frames: without this sleep the interruption
+            # would run before the turn exists.
+            SleepFrame(0.1),
+            InterruptionFrame(),
+            SleepFrame(0.5),
+        ],
+    )
+    assert not [f for f in down if isinstance(f, TTSAudioRawFrame)]
+    # A turn interrupted before its turn_start is never announced at all, so it gets no
+    # turn_abort either (pipecat/v1/avatar.proto, TurnStart).
+    k = kinds(down)
+    assert ("rtvi", "turn_start") not in k and ("rtvi", "turn_abort") not in k
+    assert "InterruptionFrame" in k
+    assert fake.received[-1].WhichOneof("data") == "client_interrupt"
+
+
+async def test_short_turn_uses_end_flush(fake):
+    fake.first_segment_ms = 1000
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[TTSStartedFrame(), tone_frame(120), TTSStoppedFrame(), SleepFrame(0.8)],
+    )
+    k = kinds(down)
+    assert k.index(("rtvi", "frames")) < k.index("TTSAudioRawFrame") and ("rtvi", "turn_end") in k
+
+
+async def test_back_to_back_turns_chain(fake):
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(1.5),
+        ],
+    )
+    starts = [
+        f.data["turn_start"]
+        for f in down
+        if isinstance(f, RTVIServerMessageFrame) and "turn_start" in f.data
+    ]
+    assert starts[1]["prev_turn_id"] == starts[0]["turn_id"]
+    assert starts[1]["prev_turn_pcm_ms"] == 300.0
+
+
+async def test_driven_down_passes_audio_through(fake):
+    proc = make_proc(fake, reconnect_backoff_s=(0.1,))
+
+    async def kill():
+        await asyncio.sleep(0.15)
+        await fake.close_with(4001)
+
+    killer = asyncio.create_task(kill())
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(100),
+            SleepFrame(0.4),
+            tone_frame(100),
+            TTSStoppedFrame(),
+            SleepFrame(1.0),
+        ],
+    )
+    await killer
+    k = kinds(down)
+    assert ("rtvi", "state") in k and k.count("TTSAudioRawFrame") == 2
+
+
+# --- Beyond the brief: the contract rulings and the Pipecat duties its seven tests leave open.
+
+
+def avatar_messages(frames):
+    """``(member, payload)`` for every avatar message, in order."""
+    return [
+        next((key, value) for key, value in f.data.items() if key != "tag")
+        for f in frames
+        if isinstance(f, RTVIServerMessageFrame)
+    ]
+
+
+def assert_turn_lifecycle(frames):
+    """Every announced turn ends exactly once, and nothing of a turn follows its end."""
+    seen, ended = set(), set()
+    for member, payload in avatar_messages(frames):
+        if member == "state":
+            assert payload["status"] in ("STATUS_OK", "STATUS_DEGRADED")
+            continue
+        turn_id = payload["turn_id"]
+        if member == "turn_start":
+            assert turn_id not in seen
+            seen.add(turn_id)
+            assert payload["prev_turn_id"] or payload["prev_turn_pcm_ms"] == 0
+            continue
+        assert turn_id in seen and turn_id not in ended, (member, turn_id)
+        if member in ("turn_end", "turn_abort"):
+            ended.add(turn_id)
+        if member == "turn_onsets":
+            assert payload["onsets_ms"]
+    assert seen == ended
+
+
+async def test_every_turn_message_follows_the_lifecycle(fake):
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(300),
+            SleepFrame(0.3),
+            tone_frame(500),
+            TTSStoppedFrame(),
+            TTSStartedFrame(),
+            tone_frame(200),
+            TTSStoppedFrame(),
+            SleepFrame(1.5),
+        ],
+    )
+    assert_turn_lifecycle(down)
+    segments = [p for m, p in avatar_messages(down) if m == "frames"]
+    ends = messages(down, "turn_end")
+    assert len(ends) == 2
+    for end in ends:
+        seqs = sorted({s["segment_seq"] for s in segments if s["turn_id"] == end["turn_id"]})
+        assert seqs == list(range(end["segment_count"]))
+
+
+async def test_turn_end_counts_segments_and_pcm(fake):
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[TTSStartedFrame(), tone_frame(500), TTSStoppedFrame(), SleepFrame(1.0)],
+    )
+    (end,) = messages(down, "turn_end")
+    # 500 ms: segments at 200 and 400 ms, then the end flush with the 100 ms left over.
+    assert end == {"turn_id": req_of(down), "pcm_ms": 500.0, "segment_count": 3}
+    seqs = [(p["segment_seq"], p["end"]) for m, p in avatar_messages(down) if m == "frames"]
+    assert sorted(set(seqs)) == [(0, False), (1, False), (2, True)]
+
+
+async def test_turn_start_reports_the_onsets_found_so_far(fake):
+    silence = TTSAudioRawFrame(audio=bytes(2 * 4800), sample_rate=24000, num_channels=1)
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            silence,  # 200 ms: the first segment comes back for silence alone
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(1.0),
+        ],
+    )
+    (start,) = messages(down, "turn_start")
+    later = [o for p in messages(down, "turn_onsets") for o in p["onsets_ms"]]
+    # The tone starts at sample 4800 (200 ms); a sine's first sample is 0, so the onset is the next.
+    assert start["onsets_ms"] + later == [4801 * 1000 / 24000]
+
+
+async def test_frames_in_a_turn_keep_their_order(fake):
+    text = TextFrame("hello")
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(context_id="c1"),
+            tone_frame(100, context_id="c1"),
+            text,
+            tone_frame(100, context_id="c1"),
+            TTSStoppedFrame(context_id="c1"),
+            SleepFrame(0.8),
+        ],
+    )
+    plain = [f for f in down if not isinstance(f, RTVIServerMessageFrame)]
+    assert [type(f).__name__ for f in plain] == [
+        "TTSStartedFrame",
+        "TTSAudioRawFrame",
+        "TextFrame",
+        "TTSAudioRawFrame",
+        "TTSStoppedFrame",
+    ]
+    assert plain[2] is text
+    assert {f.context_id for f in plain if isinstance(f, TTSAudioRawFrame)} == {"c1"}
+
+
+async def test_turns_never_interleave(fake):
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(context_id="c1"),
+            tone_frame(300, context_id="c1"),
+            TTSStoppedFrame(context_id="c1"),
+            TTSStartedFrame(context_id="c2"),
+            tone_frame(100, context_id="c2"),
+            tone_frame(100, context_id="c2"),
+            TTSStoppedFrame(context_id="c2"),
+            SleepFrame(1.5),
+        ],
+    )
+    order = [
+        (type(f).__name__, f.context_id)
+        for f in down
+        if isinstance(f, (TTSStartedFrame, TTSAudioRawFrame, TTSStoppedFrame))
+    ]
+    assert order == [
+        ("TTSStartedFrame", "c1"),
+        ("TTSAudioRawFrame", "c1"),
+        ("TTSStoppedFrame", "c1"),
+        ("TTSStartedFrame", "c2"),
+        ("TTSAudioRawFrame", "c2"),
+        ("TTSAudioRawFrame", "c2"),
+        ("TTSStoppedFrame", "c2"),
+    ]
+    assert_turn_lifecycle(down)
+
+
+async def test_end_frame_waits_for_the_open_turn(fake):
+    # No sleep after the turn: run_test's EndFrame arrives while the audio is still held.
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[TTSStartedFrame(), tone_frame(300), TTSStoppedFrame()],
+    )
+    k = kinds(down)
+    assert k.count("TTSAudioRawFrame") == 1 and k[-1] == ("rtvi", "turn_end")
+
+
+async def test_interruption_during_release_aborts_the_turn(fake):
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            *[tone_frame(100) for _ in range(10)],
+            SleepFrame(0.3),
+            InterruptionFrame(),
+            SleepFrame(0.5),
+        ],
+    )
+    k = kinds(down)
+    assert ("rtvi", "turn_end") not in k
+    assert k.index(("rtvi", "turn_abort")) < k.index("InterruptionFrame")
+    assert "TTSAudioRawFrame" not in k[k.index("InterruptionFrame") :]
+    assert 0 < k.count("TTSAudioRawFrame") < 10
+    assert messages(down, "turn_abort") == [{"turn_id": req_of(down)}]
+    assert fake.received[-1].WhichOneof("data") == "client_interrupt"
+    assert_turn_lifecycle(down)
+
+
+async def test_interruption_after_tts_stopped_aborts_the_turn(fake):
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            *[tone_frame(100) for _ in range(10)],
+            TTSStoppedFrame(),
+            SleepFrame(0.3),
+            InterruptionFrame(),
+            SleepFrame(0.5),
+        ],
+    )
+    k = kinds(down)
+    assert ("rtvi", "turn_abort") in k and ("rtvi", "turn_end") not in k
+    assert "TTSStoppedFrame" not in k  # it was still held, behind audio, and is dropped with it
+    assert 0 < k.count("TTSAudioRawFrame") < 10
+    # The request was closed already; the interrupt still goes out to stop its inference.
+    assert fake.received[-1].WhichOneof("data") == "client_interrupt"
+    assert_turn_lifecycle(down)
+
+
+async def test_interruption_while_the_last_audio_plays_aborts_the_turn(fake):
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(800),  # released at once: the hold is drained, the audio is still playing
+            TTSStoppedFrame(),
+            SleepFrame(0.3),
+            InterruptionFrame(),
+            SleepFrame(0.8),
+        ],
+    )
+    k = kinds(down)
+    assert ("rtvi", "turn_abort") in k and ("rtvi", "turn_end") not in k
+    assert_turn_lifecycle(down)
+
+
+class InterruptUpstream(FrameProcessor):
+    """Turns a ``UserStartedSpeakingFrame`` into an ``InterruptionFrame`` sent back upstream.
+
+    It stands for a processor after the avatar processor that interrupts the bot, the way
+    Pipecat's ``broadcast_interruption`` sends one copy each way.
+    """
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        await self.push_frame(frame, direction)
+        if isinstance(frame, UserStartedSpeakingFrame):
+            await self.push_frame(InterruptionFrame(), FrameDirection.UPSTREAM)
+
+
+async def test_an_interruption_from_downstream_aborts_the_turn(fake):
+    down, up = await run_test(
+        Pipeline([make_proc(fake), InterruptUpstream()]),
+        frames_to_send=[
+            TTSStartedFrame(),
+            *[tone_frame(100) for _ in range(10)],
+            SleepFrame(0.3),
+            UserStartedSpeakingFrame(),
+            SleepFrame(0.5),
+        ],
+    )
+    k = kinds(down)
+    assert ("rtvi", "turn_abort") in k and ("rtvi", "turn_end") not in k
+    assert 0 < k.count("TTSAudioRawFrame") < 10
+    assert [type(f) for f in up] == [InterruptionFrame]  # passed on in its own direction
+    assert fake.received[-1].WhichOneof("data") == "client_interrupt"
+
+
+def uninterruptible(frame):
+    frame.interruptible = False
+    return frame
+
+
+async def test_an_uninterruptible_context_plays_through_an_interruption(fake):
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            uninterruptible(TTSStartedFrame()),  # a backchannel, say
+            *[uninterruptible(tone_frame(100)) for _ in range(5)],
+            uninterruptible(TTSStoppedFrame()),
+            SleepFrame(0.1),
+            InterruptionFrame(),
+            SleepFrame(0.8),
+        ],
+    )
+    k = kinds(down)
+    assert k.count("TTSAudioRawFrame") == 5 and "TTSStoppedFrame" in k
+    assert ("rtvi", "turn_abort") not in k and k[-1] == ("rtvi", "turn_end")
+    assert not [m for m in fake.received if m.WhichOneof("data") == "client_interrupt"]
+    assert_turn_lifecycle(down)
+
+
+async def test_a_failed_send_plays_the_turn_unanimated(fake, monkeypatch):
+    async def failing_send(self, pcm, *, end=False):
+        await asyncio.sleep(0.05)  # the write fails a little later, as a broken socket does
+        self._lose(self._link, "connectionClosed")
+        raise RuntimeError("driveningress not connected")
+
+    monkeypatch.setattr(DrivenIngress, "send", failing_send)
+    down, _ = await run_test(
+        make_proc(fake, reconnect_backoff_s=(5,)),
+        frames_to_send=[TTSStartedFrame(), tone_frame(200), TTSStoppedFrame(), SleepFrame(0.6)],
+    )
+    assert messages(down, "state") == [{"status": "STATUS_DEGRADED", "reason": "connectionClosed"}]
+    (start,) = messages(down, "turn_start")
+    assert start["degraded"] is True
+    assert kinds(down).count("TTSAudioRawFrame") == 1
+    assert messages(down, "turn_end")[0]["segment_count"] == 0
+    assert_turn_lifecycle(down)
+
+
+async def test_a_turn_after_an_interruption_is_a_new_request(fake):
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(300),
+            SleepFrame(0.1),
+            InterruptionFrame(),
+            SleepFrame(0.1),
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(1.0),
+        ],
+    )
+    first, second = messages(down, "turn_start")
+    assert first["turn_id"] != second["turn_id"]
+    assert second["prev_turn_id"] == "" and second["prev_turn_pcm_ms"] == 0
+    assert fake.received_audio_ms(second["turn_id"]) == 300
+    assert_turn_lifecycle(down)
+
+
+async def test_uninterruptible_frames_survive_an_interruption(fake):
+    fake.first_segment_ms = 10_000
+    keep = TextFrame("function result")
+    keep.interruptible = False
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(100),
+            keep,
+            SleepFrame(0.1),
+            InterruptionFrame(),
+            SleepFrame(0.3),
+        ],
+    )
+    k = kinds(down)
+    assert keep in down and "TTSAudioRawFrame" not in k
+    assert down.index(keep) > k.index("InterruptionFrame")
+
+
+async def test_hold_cap_starts_a_degraded_turn(fake):
+    fake.first_segment_ms = 10_000
+    down, _ = await run_test(
+        make_proc(fake, hold_cap_s=0.3),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(200),
+            SleepFrame(0.6),
+            TTSStoppedFrame(),
+            SleepFrame(0.8),
+        ],
+    )
+    (start,) = messages(down, "turn_start")
+    assert (
+        start["degraded"] is True and start["turn_id"] == fake.received[0].client_audio_input.req_id
+    )
+    k = kinds(down)
+    assert k.index(("rtvi", "turn_start")) < k.index("TTSAudioRawFrame")
+    # The request is still closed, so the next one gets a new id, and the end flush that comes back
+    # before the turn ends is delivered.
+    assert fake.received[-1].client_audio_input.end
+    (end,) = messages(down, "turn_end")
+    assert end["segment_count"] == 1 and k[-1] == ("rtvi", "turn_end")
+    assert_turn_lifecycle(down)
+
+
+async def test_turn_ends_when_the_end_segment_never_comes(fake, monkeypatch):
+    animate = fake._animate
+
+    async def no_end(ws, connection_id, req_id, *, end, with_animation):
+        if not end:
+            await animate(ws, connection_id, req_id, end=end, with_animation=with_animation)
+
+    monkeypatch.setattr(fake, "_animate", no_end)
+    down, _ = await run_test(
+        make_proc(fake, hold_cap_s=0.3),
+        frames_to_send=[TTSStartedFrame(), tone_frame(200), TTSStoppedFrame(), SleepFrame(1.0)],
+    )
+    (end,) = messages(down, "turn_end")
+    assert end["segment_count"] == 1 and end["pcm_ms"] == 200.0
+    assert_turn_lifecycle(down)
+
+
+async def test_a_segment_after_turn_end_is_dropped(fake, monkeypatch):
+    animate = fake._animate
+
+    async def late_end(ws, connection_id, req_id, *, end, with_animation):
+        if end:
+            await asyncio.sleep(0.8)
+        await animate(ws, connection_id, req_id, end=end, with_animation=with_animation)
+
+    monkeypatch.setattr(fake, "_animate", late_end)
+    down, _ = await run_test(
+        make_proc(fake, hold_cap_s=0.2),
+        frames_to_send=[TTSStartedFrame(), tone_frame(300), TTSStoppedFrame(), SleepFrame(1.5)],
+    )
+    assert len(fake.animation_frames) == 2  # the late end did reach the processor
+    (end,) = messages(down, "turn_end")
+    assert end["segment_count"] == 1
+    assert kinds(down)[-1] == ("rtvi", "turn_end")
+    assert_turn_lifecycle(down)
+
+
+async def test_turn_end_waits_for_an_end_segment_that_comes_after_the_audio(fake, monkeypatch):
+    animate = fake._animate
+
+    async def slow_end(ws, connection_id, req_id, *, end, with_animation):
+        if end:
+            await asyncio.sleep(0.4)  # the 300 ms of audio have played by then
+        await animate(ws, connection_id, req_id, end=end, with_animation=with_animation)
+
+    monkeypatch.setattr(fake, "_animate", slow_end)
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[TTSStartedFrame(), tone_frame(300), TTSStoppedFrame(), SleepFrame(1.2)],
+    )
+    (end,) = messages(down, "turn_end")
+    assert end["segment_count"] == 2
+    assert [p["end"] for m, p in avatar_messages(down) if m == "frames"][-1] is True
+    assert kinds(down)[-1] == ("rtvi", "turn_end")
+
+
+async def test_a_turn_that_loses_its_link_is_released_at_once(fake):
+    proc = make_proc(fake, reconnect_backoff_s=(5,))
+
+    async def kill():
+        await asyncio.sleep(0.15)
+        await fake.close_with(4001)
+
+    killer = asyncio.create_task(kill())
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(100),
+            SleepFrame(0.5),
+            tone_frame(100),
+            TTSStoppedFrame(),
+            SleepFrame(0.6),
+        ],
+    )
+    await killer
+    k = kinds(down)
+    first, second = [i for i, kind in enumerate(k) if kind == "TTSAudioRawFrame"]
+    # It plays from the moment the link goes, not once the hold cap (1.5 s) runs out: the TTS's
+    # pause is already bridged with silence.
+    assert "OutputAudioRawFrame" in k[first:second]
+    assert messages(down, "turn_start")[0]["degraded"] is True
+
+
+async def test_degraded_state_is_reported_once_and_cleared(fake):
+    proc = make_proc(fake, reconnect_backoff_s=(0.2,))
+
+    async def kill():
+        await asyncio.sleep(0.15)
+        await fake.close_with(4001)
+
+    killer = asyncio.create_task(kill())
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(100),
+            SleepFrame(0.25),
+            tone_frame(100),
+            tone_frame(100),
+            TTSStoppedFrame(),
+            SleepFrame(0.5),
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(1.0),
+        ],
+    )
+    await killer
+    states = messages(down, "state")
+    assert states == [
+        {"status": "STATUS_DEGRADED", "reason": "creditsExhausted (4001)"},
+        {"status": "STATUS_OK", "reason": ""},
+    ]
+    first, second = messages(down, "turn_start")
+    assert first["degraded"] is True and second["degraded"] is False
+    assert [m for m, _ in avatar_messages(down)].count("frames") >= 1
+    assert fake.connections == 2
+    assert_turn_lifecycle(down)
+
+
+async def test_a_turn_while_down_is_announced_degraded_and_sends_nothing(fake):
+    proc = make_proc(fake, reconnect_backoff_s=(5,))
+
+    async def kill():
+        await asyncio.sleep(0.1)
+        await fake.close_with(4001)
+
+    killer = asyncio.create_task(kill())
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            SleepFrame(0.3),
+            TTSStartedFrame(),
+            tone_frame(200),
+            TTSStoppedFrame(),
+            SleepFrame(0.5),
+        ],
+    )
+    await killer
+    (start,) = messages(down, "turn_start")
+    assert start["degraded"] is True and start["onsets_ms"] == [1000 / 24000]
+    (end,) = messages(down, "turn_end")
+    assert end == {"turn_id": start["turn_id"], "pcm_ms": 200.0, "segment_count": 0}
+    assert kinds(down).count("TTSAudioRawFrame") == 1
+    assert not [m for m in fake.received if m.WhichOneof("data") == "client_audio_input"]
+
+
+async def test_a_turn_while_down_is_not_held(fake):
+    proc = make_proc(fake, reconnect_backoff_s=(5,))
+
+    async def kill():
+        await asyncio.sleep(0.1)
+        await fake.close_with(4001)
+
+    killer = asyncio.create_task(kill())
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            SleepFrame(0.3),
+            TTSStartedFrame(),
+            tone_frame(100),
+            SleepFrame(0.4),
+            TTSStoppedFrame(),
+            SleepFrame(0.5),
+        ],
+    )
+    await killer
+    k = kinds(down)
+    # Released as it comes: the audio already played and silence bridges the TTS's pause.
+    assert "OutputAudioRawFrame" in k[k.index("TTSAudioRawFrame") : k.index("TTSStoppedFrame")]
+
+
+async def test_system_frames_overtake_a_held_turn(fake):
+    fake.first_segment_ms = 10_000
+    down, _ = await run_test(
+        make_proc(fake, hold_cap_s=0.3),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(100),
+            SleepFrame(0.1),  # the turn is held when the system frame arrives
+            UserStartedSpeakingFrame(),
+            SleepFrame(0.5),
+        ],
+    )
+    k = kinds(down)
+    # The turn itself comes out on the hold cap, after the system frame.
+    assert k.index("UserStartedSpeakingFrame") < k.index("TTSStartedFrame")
+
+
+async def test_upstream_frames_pass_at_once(fake):
+    _, up = await run_test(
+        make_proc(fake),
+        frames_to_send=[TextFrame("upstream")],
+        frames_to_send_direction=FrameDirection.UPSTREAM,
+    )
+    assert [type(f).__name__ for f in up] == ["TextFrame"]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"threshold": -1},
+        {"min_silence_ms": 0},
+        {"lead_ms": -1},
+        {"hold_cap_s": 0},
+        {"silence_chunk_ms": 0},
+        {"reconnect_backoff_s": ()},
+        {"reconnect_backoff_s": (1, -1)},
+        {"api_key": ""},
+    ],
+)
+def test_bad_settings_fail_at_construction(overrides):
+    arguments = {"api_key": "k", "app_id": "a", "avatar_id": "av", **overrides}
+    with pytest.raises(ValueError):
+        SpatialRealAvatarProcessor(**arguments)
+
+
+def test_exported():
+    import pipecat_spatialreal
+
+    assert "SpatialRealAvatarProcessor" in pipecat_spatialreal.__all__
