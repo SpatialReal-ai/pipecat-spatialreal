@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import pytest
 from fake_driveningress import FakeDriveningress
+from loguru import logger
 from pipecat.frames.frames import EndFrame, InterruptionFrame, TTSAudioRawFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineWorker
@@ -67,6 +68,25 @@ def make(fake: FakeDriveningress, **overrides) -> DrivenIngress:
     return client
 
 
+def half_open(fake: FakeDriveningress, client: DrivenIngress) -> None:
+    """Leave the client's link half-open: nothing it writes gets through, and nothing says so.
+
+    The server stops reading the connection without closing it (``fake.stop_reading``), and the
+    client's next write blocks, as it does once a dropped flow has filled the kernel's send
+    buffer. That second part is the flow-control call the asyncio transport makes when its write
+    buffer passes the high-water mark; the test makes it by hand, because loopback buffers on
+    macOS take everything and never fill. From here on the client's ``send``, ``interrupt`` and
+    ``close`` wait in websockets' ``drain()`` until the socket is aborted.
+
+    Args:
+        fake: The fake the client is connected to.
+        client: A connected ``DrivenIngress``.
+    """
+    fake.stop_reading()
+    assert client._link is not None, "the client is not connected"
+    client._link.session._connection.pause_writing()
+
+
 async def until(condition: Callable[[], object], timeout: float = 2.0) -> None:
     """Wait until ``condition()`` is true; fail the test if it is not within ``timeout`` seconds."""
     loop = asyncio.get_running_loop()
@@ -83,6 +103,27 @@ async def fake():
         yield backend
         while _clients:
             await _clients.pop().close()
+
+
+@pytest.fixture
+def pipecat_log():
+    """Fail a test whose pipeline reported an error or left a task running.
+
+    Pipecat logs, rather than raises, what goes wrong inside a processor's tasks: an exception
+    in a background task, an error pushed by ``process_frame``, a task still running at teardown.
+    The one error every test expects is the setup notice that RTVI is off, which ``run_test``
+    does on purpose. The records are the test's to inspect, and to drop an error it expected.
+    """
+    records = []
+    sink = logger.add(lambda message: records.append(message.record), level="WARNING")
+    yield records
+    logger.remove(sink)
+    errors = [
+        r["message"]
+        for r in records
+        if (r["level"].no >= 40 and "RTVI" not in r["message"]) or "dangling" in r["message"]
+    ]
+    assert errors == []
 
 
 # --- Waiting for the pipeline instead of for a time
@@ -111,7 +152,7 @@ class Do:
     action: Callable[[], object]
 
 
-async def play(processor, steps, *, send_end_frame=True, wait_s=WAIT_S):
+async def play(processor, steps, *, send_end_frame=True, wait_s=WAIT_S, params=None):
     """Run ``processor`` in a test pipeline and feed it ``steps``, as ``run_test`` does.
 
     The result is the same too: the frames that came out downstream and upstream. A step is a frame
@@ -130,6 +171,8 @@ async def play(processor, steps, *, send_end_frame=True, wait_s=WAIT_S):
         send_end_frame: Whether to end the pipeline with an ``EndFrame`` after the last step.
         wait_s: The longest an ``Until`` step waits, and the longest the pipeline has to end after
             the last step. Only a test of ``play`` itself has reason to shorten it.
+        params: The pipeline's ``PipelineParams``, for a scenario that needs other than Pipecat's
+            defaults (another ``audio_out_sample_rate``, say); None takes the defaults.
 
     Returns:
         ``(downstream frames, upstream frames)``, the ``EndFrame`` not included.
@@ -143,7 +186,10 @@ async def play(processor, steps, *, send_end_frame=True, wait_s=WAIT_S):
     source = QueuedFrameProcessor(queue=received_up, queue_direction=FrameDirection.UPSTREAM)
     sink = QueuedFrameProcessor(queue=received_down, queue_direction=FrameDirection.DOWNSTREAM)
     worker = PipelineWorker(
-        Pipeline([source, processor, sink]), cancel_on_idle_timeout=False, enable_rtvi=False
+        Pipeline([source, processor, sink]),
+        cancel_on_idle_timeout=False,
+        enable_rtvi=False,
+        params=params,
     )
     started = asyncio.Event()
 
