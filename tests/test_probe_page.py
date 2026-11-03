@@ -4,12 +4,14 @@
 bot's audio into its table, in plain JavaScript. ``probe_check.mjs`` runs that code under Node on
 messages built by :mod:`pipecat_spatialreal.envelope` and on random audio scanned by the package's
 ``OnsetTracker``, so the page's reading of the contract and its onset rule cannot drift from the
-processor's. That test is skipped when ``node`` is not installed, and the one that asks the bot's
-server for the page when the example extra is not.
+processor's. Without ``node`` that test is skipped locally and fails in CI, where the workflow
+installs Node; the one that asks the bot's server for the page is skipped when the example extra
+is not installed.
 """
 
 import base64
 import json
+import os
 import random
 import shutil
 import struct
@@ -100,8 +102,9 @@ async def test_the_bot_serves_the_probe_at_probe():
     assert reply.text == PAGE.read_text()
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+@pytest.mark.skipif(shutil.which("node") is None and not os.environ.get("CI"), reason="needs node")
 def test_the_probe_reads_the_envelope_and_the_audio_as_the_processor_does(tmp_path):
+    assert shutil.which("node"), "Node is not installed; the workflow must install it"
     audio = _audio()
     assert len(audio["onsets"]) >= 8  # the fixture has to exercise the rule
     fixture = tmp_path / "fixture.json"

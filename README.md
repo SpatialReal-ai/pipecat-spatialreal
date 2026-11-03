@@ -8,10 +8,10 @@ SpatialReal web SDK, so the pipeline never carries video frames.
 
 Built and maintained by [SpatialReal](https://www.spatialreal.ai/).
 
-Tested with Pipecat v1.15.0. That is the version the test suite and CI run against, with a fake
-SpatialReal backend; the first live run on Daily and LiveKit rooms is still to be done. A weekly job
-runs the tests against the newest Pipecat release the package allows (`pipecat-ai>=1.15.0,<2`) and
-opens a pull request that moves this line when they pass on a newer one.
+Tested with Pipecat v1.15.0. CI runs the tests against that declared floor and against the newest
+Pipecat release the package allows (`pipecat-ai>=1.15.0,<2`), with a fake SpatialReal backend; the
+first live run on Daily and LiveKit rooms is still to be done. A weekly job runs the tests against
+the newest release and opens a pull request that moves this line when they pass on a newer one.
 
 ## How it works
 
@@ -108,7 +108,9 @@ All of them are keyword arguments. The first three are required and must not be 
 | `min_silence_ms` | `150` | Shortest silence, in ms, after which the next sound is a new onset. Must equal the web SDK's value, which is fixed at 150 (see below). A turn that does not follow the previous one back to back starts at least this long after the last audio before it, so that the web SDK can find its onset; one that would have started sooner waits until this long plus one `silence_chunk_ms` have passed. |
 | `lead_ms` | `200` | How far ahead of real time the audio is released. |
 | `hold_cap_s` | `1.5` | Longest time a turn's audio is held for its first animation; after it, the turn plays without animation. Also the longest wait, once a turn's audio has played, for the last segment of its animation. |
-| `silence_chunk_ms` | `40` | Length of each chunk of silence played while the TTS is behind. |
+| `silence_chunk_ms` | `40` | Length of each chunk of silence played while the TTS is behind. Must be a multiple of `output_chunk_ms`. |
+| `output_chunk_ms` | `40` | Length of the audio chunks released downstream, which every turn is padded to a whole number of (the padding is sent to inference and counted too). Must equal the output transport's chunk: its `audio_out_10ms_chunks` times 10 ms. A positive multiple of 10. |
+| `wire_timeout_s` | `2.0` | Longest wait, in seconds, for one write to SpatialReal (audio, the end of a turn, an interrupt) and for closing the session. A write that takes longer means the link is lost: the audio plays on unanimated, the browser is told, and the processor reconnects. |
 | `reconnect_backoff_s` | `(1, 2, 4, 8)` | Seconds to wait before each new attempt to reach SpatialReal, in turn; the last value repeats. |
 | `**kwargs` | | Passed to Pipecat's `FrameProcessor`. |
 
@@ -135,6 +137,7 @@ from the environment or a `.env` file (`env.example` lists them all):
 | `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `GEMINI_API_KEY` | The example's speech to text, text to speech and language model (Gemini). `CARTESIA_VOICE_ID` picks another voice. |
 | `DAILY_API_KEY` | `-t daily`. `DAILY_ROOM_URL` reuses one room instead of creating one per session. |
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | `-t livekit`. |
+| `PIPECAT_ALLOWED_ORIGINS` | The web origins Pipecat's runner answers; `env.example` allows only the bot's own, `http://localhost:7860`. The token route refuses any other origin regardless. |
 
 ## The browser side
 
