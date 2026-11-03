@@ -24,8 +24,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install (dev extra)
-        run: uv sync --extra dev
+      # The example extra brings FastAPI and the Pipecat runner, which the token-route tests of
+      # examples/bot.py import: without it they are skipped.
+      - name: Install (dev and example extras)
+        run: uv sync --extra dev --extra example
 
       - name: Lint
         run: uv run ruff check .
