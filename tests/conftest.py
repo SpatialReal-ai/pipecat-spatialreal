@@ -133,7 +133,9 @@ async def play(processor, steps, *, send_end_frame=True):
         ``(downstream frames, upstream frames)``, the ``EndFrame`` not included.
 
     Raises:
-        AssertionError: If a step waits longer than ``WAIT_S`` for the pipeline.
+        AssertionError: If a step waits longer than ``WAIT_S`` for the pipeline, or the pipeline
+            has not ended ``WAIT_S`` after the last step (a processor that never lets the
+            ``EndFrame`` go, say). Either way the pipeline is cancelled first.
     """
     received_up, received_down = asyncio.Queue(), asyncio.Queue()
     source = QueuedFrameProcessor(queue=received_up, queue_direction=FrameDirection.UPSTREAM)
@@ -171,10 +173,24 @@ async def play(processor, steps, *, send_end_frame=True):
     running = asyncio.create_task(runner.run())
     try:
         await feed()
-        await running
+        # asyncio.wait, not wait_for: wait_for cancels the run on a timeout, and the run ends
+        # quietly when it is cancelled, which would look like a pipeline that ended by itself.
+        done, _ = await asyncio.wait({running}, timeout=WAIT_S)
+        if not done:
+            raise AssertionError(f"the pipeline did not end within {WAIT_S:g} s of the last step")
+        running.result()
     except BaseException:
-        running.cancel()  # a step failed: do not leave the pipeline running behind the test
-        await asyncio.gather(running, return_exceptions=True)
+        # A step failed or the pipeline hung: do not leave it running behind the test. One cancel
+        # winds a healthy pipeline down. A worker that waits for an EndFrame that never arrives
+        # does not wind down (Pipecat waits for that without a limit), and the second cancel cuts
+        # through that wait.
+        for _ in range(2):
+            running.cancel()
+            await asyncio.wait({running}, timeout=0.5)
+            if running.done():
+                break
+        if running.done() and not running.cancelled():
+            running.exception()  # retrieved: the error that matters is the one being raised
         raise
 
     down = []
