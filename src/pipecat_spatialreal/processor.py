@@ -221,7 +221,8 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         self._driven: DrivenIngress | None = None
         self._link_task: asyncio.Task | None = None
         self._driver: asyncio.Task | None = None
-        self._finished = False
+        self._finished = False  # the EndFrame or CancelFrame went out: nothing more is released
+        self._broken = False  # the release failed: every frame passes straight through
 
         # The link. One lock orders everything written to driveningress, so audio, silence and
         # interrupts reach it in the order they were decided.
@@ -279,9 +280,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         await super().cleanup()
         self._finished = True
         await self._stop_driver()
-        if self._link_task is not None:
-            await self.cancel_task(self._link_task)
-            self._link_task = None
+        await self._stop_link()
         if self._driven is not None:
             await self._driven.close()
 
@@ -294,14 +293,18 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         """
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, InterruptionFrame):  # either way: Pipecat treats both as one
+        if self._broken:
+            if isinstance(frame, (EndFrame, CancelFrame)):
+                await self._finish()
+            await self.push_frame(frame, direction)
+        elif isinstance(frame, InterruptionFrame):  # either way: Pipecat treats both as one
             await self._interrupt(frame, direction)
         elif direction == FrameDirection.UPSTREAM:
             await self.push_frame(frame, direction)
         elif isinstance(frame, SystemFrame):
             if isinstance(frame, CancelFrame):
-                self._finished = True  # nothing more is released, whatever arrives next
                 await self._stop_driver()
+                await self._finish()
             await self.push_frame(frame, direction)
             if isinstance(frame, StartFrame):
                 self._start_driver()
@@ -321,6 +324,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
     async def _open_turn(self, frame: TTSStartedFrame) -> None:
         if self._open is not None:
             await self._stop_turn(self._open, None)  # a context that never said it stopped
+            if self._broken:  # the release failed meanwhile
+                await self.push_frame(frame)
+                return
         turn = _Turn(
             frame,
             rate=self._out_rate,
@@ -343,8 +349,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         Audio for another track only keeps its place.
         """
         if not turn.on_track(frame):
-            turn.hold.append(frame)
-            self._wake.set()
+            await self._keep(turn, frame)
             return
         if turn.stream_rate is not None and frame.sample_rate != turn.stream_rate:
             await self._flush_stream(turn)  # its tail plays before what comes next
@@ -363,7 +368,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 turn.last_audio[frame.sample_rate] = frame
             released = _with_audio(frame, pcm, self._out_rate)
         if pcm:  # a resampler may give nothing back while it fills its filter
-            turn.hold.append(released)
+            await self._keep(turn, released)
             await self._take_audio(turn, pcm)
 
     async def _flush_stream(self, turn: _Turn) -> None:
@@ -373,17 +378,16 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             return
         tail = await turn.resamplers[rate].flush()
         if tail:
-            turn.hold.append(_with_audio(turn.last_audio[rate], tail, self._out_rate))
+            await self._keep(turn, _with_audio(turn.last_audio[rate], tail, self._out_rate))
             await self._take_audio(turn, tail)
 
     async def _stop_turn(self, turn: _Turn, frame: TTSStoppedFrame | None) -> None:
         self._open = None
         await self._flush_stream(turn)
         if frame is not None:
-            turn.hold.append(frame)
-        turn.hold.append(_END_OF_AUDIO)
+            await self._keep(turn, frame)
+        await self._keep(turn, _END_OF_AUDIO)
         turn.stopped = True
-        self._wake.set()
         if turn.sent:
             await self._send(turn, b"", end=True)  # the end flush returns the last animation
 
@@ -394,17 +398,29 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             self._end_frame = frame  # it goes once every turn has played out and closed
             self._wake.set()
         else:
+            await self._finish()
             await self.push_frame(frame)
 
     async def _hold_or_push(self, frame: Frame) -> None:
         last = self._turns[-1] if self._turns else None
         if last is not None and not last.drained:
-            last.hold.append(frame)  # nothing overtakes a turn's frames
-            self._wake.set()
+            await self._keep(last, frame)  # nothing overtakes a turn's frames
             return
         if _plays(frame) and frame.transport_destination == self._track:
             self._playout_end = max(self._playout_end, self._now()) + _duration(frame)
         await self.push_frame(frame)
+
+    async def _keep(self, turn: _Turn, item: Frame | _EndOfAudio) -> None:
+        """Add ``item`` to the turn's hold; once the release has failed, push a frame on instead.
+
+        The process task can be waiting on driveningress when the release fails, and must not
+        then leave what it was handling in a hold nothing releases any more.
+        """
+        if not self._broken:
+            turn.hold.append(item)
+            self._wake.set()
+        elif isinstance(item, Frame):
+            await self.push_frame(item)
 
     async def _take_audio(self, turn: _Turn, pcm: bytes) -> None:
         """Count audio that just joined the turn's hold, and send it to driveningress."""
@@ -576,7 +592,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
     # --- the release task
 
     def _start_driver(self) -> None:
-        if self._driver is None and not self._finished:
+        if self._driver is None and not (self._finished or self._broken):
             self._driver = self.create_task(self._drive(), "avatar_release")
 
     async def _stop_driver(self) -> None:
@@ -584,25 +600,72 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         if driver is not None:
             await self.cancel_task(driver)
 
+    async def _stop_link(self) -> None:
+        task, self._link_task = self._link_task, None
+        if task is not None:
+            await self.cancel_task(task)
+
+    async def _finish(self) -> None:
+        """The EndFrame or CancelFrame goes out: no state follows it, and no reconnect."""
+        self._finished = True
+        await self._stop_link()
+
     async def _drive(self) -> None:
-        """Push whatever is due, then sleep until the next deadline or the next change."""
-        while True:
-            self._wake.clear()
-            deadlines: list[float] = []
-            await self._push_status()
-            await self._announce_and_forward(deadlines)
-            await self._release(deadlines)
-            await self._close(deadlines)
-            if self._wake.is_set():
-                continue
-            try:
-                async with asyncio.timeout_at(min(deadlines, default=None)):
-                    await self._wake.wait()
-            except TimeoutError:
-                pass
+        """Push whatever is due, then sleep until the next deadline or the next change.
+
+        Should this ever fail, the bot's audio would be held for good; the processor gives up on
+        the animation instead and lets the audio through.
+        """
+        try:
+            while True:
+                self._wake.clear()
+                deadlines: list[float] = []
+                await self._push_status()
+                await self._announce_and_forward(deadlines)
+                await self._release(deadlines)
+                await self._close(deadlines)
+                if self._wake.is_set():
+                    continue
+                try:
+                    async with asyncio.timeout_at(min(deadlines, default=None)):
+                        await self._wake.wait()
+                except TimeoutError:
+                    pass
+        except Exception:  # noqa: BLE001 - fail open, whatever the fault
+            logger.exception(
+                f"{self}: the avatar release failed; audio plays unanimated from now on"
+            )
+            await self._fail_open()
+
+    async def _fail_open(self) -> None:
+        """Push everything held at once, end the turns, and let every later frame through."""
+        self._broken = True
+        turns, self._turns = list(self._turns), deque()
+        self._open = self._chain = None
+        for turn in turns:
+            turn.sends = False
+        if not self._finished and self._status_sent != _STATUS_DEGRADED:
+            self._status_sent = _STATUS_DEGRADED
+            await self._push_message(envelope.state(_STATUS_DEGRADED, "processor error"))
+        for turn in turns:
+            # No playout end can be timed any more: the client is told to stop animating now,
+            # which every announced turn needs, exactly once, to end.
+            if turn.announced and not turn.silent:
+                await self._push_message(envelope.turn_abort(turn.turn_id))
+            for item in turn.hold:
+                if isinstance(item, Frame):
+                    await self.push_frame(item)
+            turn.hold.clear()
+        if self._end_frame is not None:
+            frame, self._end_frame = self._end_frame, None
+            await self._finish()
+            await self.push_frame(frame)
+        await self._stop_link()
+        if self._driven is not None:
+            await self._driven.close()
 
     async def _push_status(self) -> None:
-        if self._status != self._status_sent:
+        if self._status != self._status_sent and not self._finished:
             self._status_sent = self._status
             await self._push_message(envelope.state(self._status, self._status_reason))
 
@@ -755,6 +818,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 )
         if not self._turns and self._end_frame is not None:
             frame, self._end_frame = self._end_frame, None
+            await self._finish()
             await self.push_frame(frame)
 
     # --- helpers

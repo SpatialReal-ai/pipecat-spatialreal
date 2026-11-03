@@ -5,6 +5,8 @@ import struct
 import pytest
 from loguru import logger
 from pipecat.frames.frames import (
+    CancelFrame,
+    EndFrame,
     InterruptionFrame,
     OutputAudioRawFrame,
     TextFrame,
@@ -885,6 +887,90 @@ async def test_upstream_frames_pass_at_once(fake):
         frames_to_send_direction=FrameDirection.UPSTREAM,
     )
     assert [type(f).__name__ for f in up] == ["TextFrame"]
+
+
+async def test_a_cancel_mid_turn_stops_the_release_and_the_link(fake):
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    at_cancel = {}
+
+    @proc.event_handler("on_after_push_frame")
+    async def _at_cancel(processor, frame):
+        if isinstance(frame, CancelFrame):
+            at_cancel.update(release=processor._driver, link=processor._link_task)
+
+    await run_test(
+        proc,
+        frames_to_send=[
+            TTSStartedFrame(),
+            *[tone_frame(100) for _ in range(20)],  # 2 s of audio, still being released
+            SleepFrame(0.3),
+            CancelFrame(),
+            SleepFrame(0.5),
+        ],
+        send_end_frame=False,
+    )
+    assert at_cancel == {"release": None, "link": None}
+    assert isinstance(pushed[-1][1], CancelFrame)  # nothing is pushed after it
+    assert 0 < sum(isinstance(f, TTSAudioRawFrame) for _, f in pushed) < 20
+
+
+async def test_nothing_follows_the_end_frame(fake):
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    at_end = {}
+
+    @proc.event_handler("on_after_push_frame")
+    async def _lose_the_link_as_the_pipeline_ends(processor, frame):
+        if isinstance(frame, EndFrame):
+            at_end["link"] = processor._link_task
+            processor._on_down("closed")  # a loss reported right then
+
+    # No sleep: the EndFrame waits behind the turn and goes out from the release task.
+    await run_test(proc, frames_to_send=[TTSStartedFrame(), tone_frame(300), TTSStoppedFrame()])
+    assert at_end == {"link": None}  # no reconnect either
+    assert isinstance(pushed[-1][1], EndFrame)  # no state message after it
+
+
+async def test_a_failing_release_lets_the_audio_through(fake, monkeypatch, pipecat_log):
+    async def fault(self, turn):
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(SpatialRealAvatarProcessor, "_forward_segments", fault)
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(0.3),
+            TTSStartedFrame(),
+            tone_frame(200),
+            TTSStoppedFrame(),
+            SleepFrame(0.3),
+        ],
+    )
+    assert kinds(down) == [
+        ("rtvi", "turn_start"),
+        ("rtvi", "state"),
+        ("rtvi", "turn_abort"),  # the announced turn still ends, once
+        "TTSStartedFrame",
+        "TTSAudioRawFrame",
+        "TTSStoppedFrame",
+        "TTSStartedFrame",  # and the next turn passes straight through
+        "TTSAudioRawFrame",
+        "TTSStoppedFrame",
+    ]
+    assert messages(down, "state") == [{"status": "STATUS_DEGRADED", "reason": "processor error"}]
+    audio_requests = {
+        m.client_audio_input.req_id
+        for m in fake.received
+        if m.WhichOneof("data") == "client_audio_input"
+    }
+    assert audio_requests == {req_of(down)}  # the second turn never reached driveningress
+    failures = [r for r in pipecat_log if "release failed" in r["message"]]
+    assert len(failures) == 1 and failures[0]["exception"] is not None
+    pipecat_log[:] = [r for r in pipecat_log if r not in failures]  # expected, not a test error
 
 
 @pytest.mark.parametrize(
