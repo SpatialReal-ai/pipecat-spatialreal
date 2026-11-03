@@ -1234,13 +1234,20 @@ async def test_a_failing_release_lets_the_audio_through(fake, monkeypatch, pipec
 
     monkeypatch.setattr(SpatialRealAvatarProcessor, "_forward_segments", fault)
     proc = make_proc(fake)
+    pushed = record_pushes(proc)
     down, _ = await play(
         proc,
         [
             TTSStartedFrame(),
             tone_frame(300),
             TTSStoppedFrame(),
-            Until("the release to fail", lambda: proc._broken),
+            # The release fails, sets proc._broken and then pushes turn 1's frames. Turn 2 must
+            # wait for the last of them: once the flag is set, its frames pass straight through,
+            # ahead of any of turn 1's that are still to come.
+            Until(
+                "turn 1's frames to be pushed",
+                lambda: any(isinstance(f, TTSStoppedFrame) for _, f in pushed),
+            ),
             TTSStartedFrame(),
             tone_frame(200),
             TTSStoppedFrame(),
