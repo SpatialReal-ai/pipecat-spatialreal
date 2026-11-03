@@ -1,5 +1,6 @@
 import asyncio
 import math
+import statistics
 import struct
 
 import pytest
@@ -210,17 +211,27 @@ async def test_a_stall_is_not_stretched_by_the_lead(fake):
         ],
     )
     (first, _), (second, _) = [(t, f) for t, f in pushed if isinstance(f, TTSAudioRawFrame)]
-    silence = [f for t, f in pushed if type(f) is OutputAudioRawFrame and first <= t <= second]
+    silence = [t for t, f in pushed if type(f) is OutputAudioRawFrame and first <= t <= second]
     stall = second - (first + 0.3)  # how long the room waited for the TTS
     inserted = len(silence) * 0.04
-    assert stall > 0.2
+    assert stall > 0.2 and silence
     # The silence never runs further ahead of the room than one chunk plus the chunk kept queued so
     # the transport never runs dry; the 200 ms lead is not added on top. This bound holds on any
     # machine: a loop that wakes late can only make the silence shorter.
     assert inserted - stall <= 0.04 + 0.04 + 0.01
-    # And it bridges the stall. How closely it follows the stall depends on how promptly the loop
-    # wakes, which is the machine's business: a wake 100 ms late leaves 60 ms of the stall bare.
-    assert inserted - stall >= -0.15
+    # And it bridges the stall, a good part of it at least. How closely depends on how promptly the
+    # loop wakes, which is the machine's business: while the process is not scheduled nothing can
+    # be pushed, and the stall measured here grows by as much as that.
+    assert inserted >= stall / 3
+    # The chunk kept queued: each chunk is pushed while one chunk (40 ms) of what the room was
+    # given is still to play, not when the room has run dry. Rebuild how much that was at each push
+    # (the end of what was queued, less the time of the push). A late wake-up lowers its own
+    # sample, and can leave the room dry; the median of the samples is what carries the pin.
+    ends, left = first + 0.3, []
+    for t in silence:
+        left.append(ends - t)
+        ends = max(ends, t) + 0.04
+    assert statistics.median(left) >= 0.02
     assert fake.received_audio_ms(req_of(down)) == 800 + 40 * len(silence)
 
 
