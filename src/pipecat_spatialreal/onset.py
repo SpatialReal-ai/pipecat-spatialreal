@@ -12,15 +12,23 @@ from array import array
 class OnsetTracker:
     """Finds the audible onsets in PCM audio that arrives in chunks of any size.
 
-    The audio is PCM16 little-endian mono. A sample is audible when its absolute value is greater
-    than ``threshold`` and silent otherwise, so a sample at exactly ``threshold`` is silent. An
-    onset is an audible sample that follows at least ``min_silence_ms`` of consecutive silent
-    samples; the rest of the same sound is not an onset. The start of the stream counts as such a
-    silence whatever its length, so audio that begins with sound has an onset at 0 ms and audio
-    that begins with 400 ms of silence has its first onset at 400 ms.
+    The audio is PCM16 little-endian mono. The rule below is the contract the web SDK mirrors on
+    the same audio, so it is stated in samples and not only in ms:
 
-    Offsets are in ms from the first sample ever fed. Where the audio is cut into chunks does not
-    change the result.
+    * A sample ``x`` is audible when ``abs(x) > threshold`` and silent otherwise, so a sample at
+      exactly ``threshold`` is silent.
+    * A run of consecutive silent samples counts when it has at least
+      ``ceil(min_silence_ms * sample_rate / 1000)`` samples. Any audible sample ends the run, so
+      separate short pauses never add up.
+    * An onset is the first audible sample after a run that counts; the rest of the same sound is
+      not an onset.
+    * The silence at the start of the stream, before its first audible sample, counts whatever
+      its length (even none). Audio that begins with sound therefore has an onset at 0 ms, and
+      audio that begins with 400 ms of silence has its first onset at 400 ms.
+    * The offset of an onset is ``n * 1000 / sample_rate`` ms, where ``n`` is the number of
+      samples before its sample, counted over every feed since the start.
+
+    Where the audio is cut into chunks does not change the result.
     """
 
     def __init__(self, sample_rate: int, *, threshold: int = 328, min_silence_ms: int = 150):

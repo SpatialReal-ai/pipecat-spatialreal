@@ -17,10 +17,11 @@ def silence(ms, sr):
 
 
 def tone(ms, sr, amp=9800, freq=440):
-    """``ms`` milliseconds of a sine that starts at its peak.
+    """``ms`` milliseconds of a cosine wave.
 
-    The first sample is ``amp``, so the tone is audible from its very first sample and an onset
-    lands exactly where the tone begins (a sine that starts at 0 would put it one sample later).
+    It starts at its peak: the first sample is ``amp``, so the tone is audible from its very first
+    sample and an onset lands exactly where the tone begins (a sine, which starts at 0, would put
+    it one sample later).
     """
     count = sr * ms // 1000
     return pcm16(*(round(amp * math.cos(2 * math.pi * freq * i / sr)) for i in range(count)))
@@ -94,13 +95,33 @@ def test_gap_of_exactly_min_silence_reanchors_one_sample_less_does_not(min_silen
     assert short.feed(burst + pcm16(*[0] * (gap - 1)) + burst) == [0.0]
 
 
-def test_min_silence_rounds_up_to_whole_samples():
-    # 150 ms at 22.05 kHz is 3307.5 samples: 3307 last 149.97 ms, too short; 3308 are enough.
+def test_pauses_that_are_each_short_never_add_up():
+    # The silence has to be consecutive: any audible sample ends the run, even one that is not an
+    # onset. Here the two pauses total 4000 samples (167 ms), more than the 150 ms minimum.
+    t = OnsetTracker(24000)
     burst = pcm16(5000)
-    too_short = OnsetTracker(22050).feed(burst + pcm16(*[0] * 3307) + burst)
-    enough = OnsetTracker(22050).feed(burst + pcm16(*[0] * 3308) + burst)
-    assert too_short == [0.0]
-    assert enough == [0.0, 3309 * 1000 / 22050]
+    pause = pcm16(*[0] * 2000)  # 83 ms, shorter than the 150 ms minimum
+    assert t.feed(burst + pause + burst + pause + burst) == [0.0]
+
+
+@pytest.mark.parametrize(
+    ("min_silence_ms", "needed"),
+    [
+        # 150 ms at 22.05 kHz is 3307.5 samples: 3307 last 149.97 ms, too short; 3308 are enough.
+        pytest.param(150, 3308, id="half-a-sample-over"),
+        # 161 ms at 22.05 kHz is 3550.05 samples: 3550 last 160.998 ms, too short; 3551 are enough.
+        pytest.param(161, 3551, id="a-twentieth-of-a-sample-over"),
+    ],
+)
+def test_min_silence_rounds_up_to_whole_samples(min_silence_ms, needed):
+    burst = pcm16(5000)
+
+    def onsets(zeros):
+        tracker = OnsetTracker(22050, min_silence_ms=min_silence_ms)
+        return tracker.feed(burst + pcm16(*[0] * zeros) + burst)
+
+    assert onsets(needed - 1) == [0.0]
+    assert onsets(needed) == [0.0, (needed + 1) * 1000 / 22050]
 
 
 @pytest.mark.parametrize("sample_rate", [8000, 16000, 22050, 24000, 44100, 48000])
@@ -152,6 +173,7 @@ def test_empty_feed_changes_nothing():
     t = OnsetTracker(24000)
     assert t.feed(b"") == []
     assert t.fed_ms == 0.0
+    assert t.feed(pcm16(5000)) == [0.0]  # still armed, still counting from sample 0
 
 
 def test_samples_are_little_endian():
