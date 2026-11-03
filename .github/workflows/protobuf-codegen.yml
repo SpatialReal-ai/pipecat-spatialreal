@@ -51,8 +51,8 @@ jobs:
           cache: pip
 
       # grpcio-tools is pinned in the dev extra: it decides the gencode protobuf version, which
-      # must stay <= the runtime protobuf the package is installed alongside (pipecat-ai and
-      # spatialreal both allow protobuf 6.x). Bump it only in a commit of its own.
+      # must stay <= the `protobuf>=` floor in pyproject.toml, or an older runtime refuses to
+      # import the generated code. Bump the pin together with that floor.
       - name: Install (dev extra)
         run: python -m pip install -e ".[dev]"
 

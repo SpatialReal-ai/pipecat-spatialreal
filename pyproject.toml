@@ -31,9 +31,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# grpcio-tools is pinned: it decides the gencode protobuf version, which must stay <= the runtime
-# protobuf this package is installed alongside (pipecat-ai and spatialreal both allow 6.x).
-# Bump it only in a commit of its own.
+# grpcio-tools is pinned: it decides the gencode protobuf version, and the generated code refuses
+# to import under an older protobuf runtime. That version must stay <= the `protobuf>=` floor in
+# `dependencies` (pipecat-ai and spatialreal both allow 6.x), so bump the two together.
 dev = [
     "pytest>=8",
     "pytest-asyncio>=1.0",
