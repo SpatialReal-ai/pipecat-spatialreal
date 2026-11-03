@@ -19,7 +19,10 @@ depends on the audio and on nothing else, so a test sees the same segments on ev
   segment's worth makes several.
 * ``end=True`` closes the request with one message that has ``end=True``: it carries
   ``animation_bytes`` bytes if any audio is left over, and none if the last segment filled
-  exactly or no audio was sent at all. The real server sends that message in both cases.
+  exactly or no audio was sent at all. The empty one is a simplification, so that a client
+  always sees an end. The real server's end message carries the audio left over plus the tail
+  (about 21 ms) its resampler holds back, so it has a little animation unless the client already
+  sends the 16 kHz the inference runs at; there, with nothing left, it may send none.
 * ``ClientInterrupt`` drops the request's left-over audio without a flush, as the real server
   does.
 """

@@ -237,9 +237,8 @@ class DrivenIngress:
         self._on_segment(Segment(req_id=req_id, wire=wire, end=is_last))
 
     def _on_error(self, link: _Link, exc: Exception) -> None:
-        # An error does not end the session: the server reports a failed request this way and
-        # carries on. Only the close that follows a fatal one does, so remember the error and
-        # let _on_close decide.
+        # An error does not necessarily end the session: the server may report a failed request
+        # and carry on. What ends it is the close, so remember the error and let _on_close decide.
         if link.state is not _State.UP:
             return
         link.error = exc
