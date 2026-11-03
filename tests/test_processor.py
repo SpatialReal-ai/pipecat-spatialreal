@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import itertools
 import math
 import statistics
@@ -85,11 +86,11 @@ def chunks(ms):
 # this much lateness on top of the time the rule names.
 LATE_S = 0.5
 
-# A push is stamped once it is done, and the processor read its clock before it began. A turn's
-# playout end, rebuilt from the stamp of its first chunk, is therefore later than the processor's
-# own by that push's time, and a gap measured from it can come out shorter than the rule by that
-# much (0.1 ms on an idle machine; more when the process is descheduled inside the push). This
-# much is allowed.
+# A push is stamped as it begins (see ``record_pushes``), right after the processor read its
+# clock, so a turn's playout end rebuilt from the stamp of its first chunk is the processor's own
+# to within the stamp's cost. The release timer may still fire a millisecond early (the
+# processor's own tolerance), so a gap measured from that end can come out shorter than the rule
+# by that much. This much is allowed.
 GAP_SLACK_S = 0.01
 
 
@@ -120,16 +121,53 @@ def messages(frames, member):
 def record_pushes(proc):
     """Every frame ``proc`` pushes, with the loop time it pushed it at, in order.
 
+    The time is taken as the push begins: nothing in a push gives the loop up, so the order is the
+    order the frames went out in, and the stamp of an audio chunk is the clock the processor
+    placed it by, not that clock plus however long the process was held up inside the push.
+
     Unlike the sink, this also sees what is pushed after a ``CancelFrame``, which the processors
     downstream drop.
     """
     pushed = []
 
-    @proc.event_handler("on_after_push_frame")
+    @proc.event_handler("on_before_push_frame")
     async def _record(processor, frame):
         pushed.append((asyncio.get_running_loop().time(), frame))
 
     return pushed
+
+
+@contextlib.asynccontextmanager
+async def heartbeat(period_s=0.01):
+    """Loop times at which the loop was running, taken every ``period_s`` while the block runs.
+
+    Time the process was held up (not scheduled, frozen) leaves no ticks, so the ticks between two
+    moments tell how long the loop was actually there to act in between: see ``live_s``.
+    """
+    ticks = []
+    loop = asyncio.get_running_loop()
+
+    async def beat():
+        while True:
+            await asyncio.sleep(period_s)
+            ticks.append(loop.time())
+
+    task = asyncio.create_task(beat())
+    try:
+        yield ticks
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+def live_s(ticks, start, end, period_s=0.01):
+    """How long the loop was running between ``start`` and ``end``, from ``heartbeat``'s ticks.
+
+    At most the wall-clock time between the two, less the time nothing in the loop could run: a
+    tick comes no earlier than its period after the previous one, so this never over-reports.
+    """
+    return sum(1 for t in ticks if start < t < end) * period_s
 
 
 def first_audio_pushes(pushed):
@@ -234,19 +272,20 @@ async def test_the_pipelines_output_rate_is_what_inference_and_the_room_get(fake
 async def test_stall_mirrors_silence(fake):
     proc = make_proc(fake, lead_ms=0)
     pushed = record_pushes(proc)
-    down, _ = await play(
-        proc,
-        [
-            link_up(proc),
-            TTSStartedFrame(),
-            tone_frame(300),
-            tts_audio_released(pushed),  # the room plays it for 300 ms from here
-            SleepFrame(0.8),  # the TTS falls ~500 ms behind the room
-            tone_frame(200),
-            TTSStoppedFrame(),
-            SleepFrame(1.0),
-        ],
-    )
+    async with heartbeat() as ticks:
+        down, _ = await play(
+            proc,
+            [
+                link_up(proc),
+                TTSStartedFrame(),
+                tone_frame(300),
+                tts_audio_released(pushed),  # the room plays it for 300 ms from here
+                SleepFrame(0.8),  # the TTS falls ~500 ms behind the room
+                tone_frame(200),
+                TTSStoppedFrame(),
+                SleepFrame(1.0),
+            ],
+        )
     _, room_end1, second = _around_the_stall(pushed)
     stall = second - room_end1  # how long the room waited for the TTS
     sil = [f for f in down if type(f) is OutputAudioRawFrame]
@@ -254,7 +293,7 @@ async def test_stall_mirrors_silence(fake):
     # Silence went out for the stall, one 40 ms chunk at a time and just in time (the lead is 0):
     # no more than the stall, and up to the audio that ended it.
     assert len(sil) * 0.04 <= stall + 0.05
-    assert_bridged([t for t, f in pushed if type(f) is OutputAudioRawFrame], second)
+    assert_bridged([t for t, f in pushed if type(f) is OutputAudioRawFrame], second, ticks)
     # The same silence went to inference, and it is part of the turn's length.
     length = padded(500) + 40 * len(sil)
     assert fake.received_audio_ms(req_of(down)) == length
@@ -278,14 +317,26 @@ def _around_the_stall(pushed):
 
 # A stall is bridged to its end: each chunk of silence is pushed while the room has one chunk left
 # to play, so the TTS audio that ends the stall is pushed within a chunk of the last silence. A
-# loaded machine can push either later; this much later is allowed. The stalls in these tests are
-# half a second and longer, so a bridge that stops short of their end by more than this is caught.
+# loaded machine can push either later; this much later is allowed on the clock. The stalls in
+# these tests are half a second and longer, so a bridge that stops short of their end by more than
+# this is caught on the clock alone.
 BRIDGE_LATE_S = 0.25
 
+# The same gap, in time the loop was running (``live_s``): a process that is not scheduled pushes
+# nothing and is not blamed, but a loop that was there to push silence and did not is. Nominally
+# the gap is under a chunk (40 ms); this much is allowed, so a bridge that stops short of a stall's
+# end by more than it is caught however short the stall, whatever the machine.
+BRIDGE_IDLE_S = 0.1
 
-def assert_bridged(silence, resumed):
-    """The silence pushed for a stall (its push times) went on until the audio that ended it."""
+
+def assert_bridged(silence, resumed, ticks):
+    """The silence pushed for a stall (its push times) went on until the audio that ended it.
+
+    ``ticks`` are the ``heartbeat`` ticks of the run: the gap between the last silence and the
+    audio that resumed is bounded both on the clock and in the time the loop was running.
+    """
     assert silence and resumed - silence[-1] <= CHUNK_MS / 1000 + BRIDGE_LATE_S
+    assert live_s(ticks, silence[-1], resumed) <= BRIDGE_IDLE_S
 
 
 def queued_ahead(pushes, ends=None):
@@ -307,19 +358,20 @@ def queued_ahead(pushes, ends=None):
 async def test_a_stall_is_not_stretched_by_the_lead(fake):
     proc = make_proc(fake)  # lead_ms 200, silence_chunk_ms 40
     pushed = record_pushes(proc)
-    down, _ = await play(
-        proc,
-        [
-            link_up(proc),
-            TTSStartedFrame(),
-            tone_frame(300),
-            tts_audio_released(pushed),  # the room plays it for 300 ms from here
-            SleepFrame(1.0),  # the TTS falls ~700 ms behind the room
-            tone_frame(500),
-            TTSStoppedFrame(),
-            SleepFrame(1.2),
-        ],
-    )
+    async with heartbeat() as ticks:
+        down, _ = await play(
+            proc,
+            [
+                link_up(proc),
+                TTSStartedFrame(),
+                tone_frame(300),
+                tts_audio_released(pushed),  # the room plays it for 300 ms from here
+                SleepFrame(1.0),  # the TTS falls ~700 ms behind the room
+                tone_frame(500),
+                TTSStoppedFrame(),
+                SleepFrame(1.2),
+            ],
+        )
     first, room_end1, second = _around_the_stall(pushed)
     silence = [(t, f) for t, f in pushed if type(f) is OutputAudioRawFrame and first <= t <= second]
     stall = second - room_end1  # how long the room waited for the TTS
@@ -334,7 +386,7 @@ async def test_a_stall_is_not_stretched_by_the_lead(fake):
     # and the silence does not make that up (the room was dry meanwhile). Judged by when the last
     # of it went out: within a chunk of the audio that ended the stall, however late the loop
     # woke before that.
-    assert_bridged([t for t, _ in silence], second)
+    assert_bridged([t for t, _ in silence], second, ticks)
     # The chunk kept queued: each chunk is pushed while one chunk (40 ms) of what the room was
     # given is still to play, not when the room has run dry. Rebuild how much that was at each push
     # (the end of what was queued, less the time of the push). A late wake-up lowers its own
@@ -400,7 +452,7 @@ async def test_audio_is_released_lead_ms_ahead_of_the_room(fake):
     assert len(audio) == chunks(2000) and all(isinstance(f, TTSAudioRawFrame) for _, f in audio)
     ahead = queued_ahead(audio)
     # Never more than the lead queued when a chunk is pushed, give or take the clock's tolerance
-    # and the push's own time...
+    # (a chunk may go a millisecond early)...
     assert max(ahead) <= LEAD_S + 0.05
     # ...and, once the first chunks have filled the lead, about the lead. A late wake-up can only
     # lower a sample; the median of the samples is what carries the pin.
@@ -932,12 +984,13 @@ async def test_audio_released_between_two_drained_turns_breaks_the_chain(fake):
     )
     proc = make_proc(fake, lead_ms=1000)  # turn 1 drains a second before it has played out
     pushed = record_pushes(proc)
+    segments = record_segments(proc)
     down, _ = await play(
         proc,
         [
             link_up(proc),
             TTSStartedFrame(),
-            tone_frame(600),
+            tone_frame(1000),
             TTSStoppedFrame(),
             Until(
                 "turn 1 to drain", lambda: any(isinstance(f, TTSStoppedFrame) for _, f in pushed)
@@ -952,13 +1005,16 @@ async def test_audio_released_between_two_drained_turns_breaks_the_chain(fake):
     first, second = messages(down, "turn_start")
     assert second["prev_turn_id"] == "" and second["prev_turn_pcm_ms"] == 0
     (t1, _), (t2, second_audio) = first_audio_pushes(pushed)
-    end1 = t1 + 0.6  # 600 ms is a whole number of chunks: nothing is padded
+    end1 = t1 + 1.0  # 1000 ms is a whole number of chunks: nothing is padded
     chime_at = next(t for t, f in pushed if f is chime)
-    assert chime_at < end1  # the case under test: the chime went out while turn 1 still played
+    ready2 = min(t for t, req_id in segments if req_id == second["turn_id"])
+    # The case under test: the chime went out, and turn 2's animation was in hand, while turn 1
+    # still played. Ready only after that, turn 2 would be unchained by the quiet instead.
+    assert chime_at < ready2 < end1
     assert [f for _, f in audio_pushes(pushed) if not isinstance(f, TTSAudioRawFrame)] == [chime]
     # Unchained, turn 2 waits for the quiet after the chime and starts with its own audio.
     assert t2 - (end1 + 0.1) >= GAP_S - GAP_SLACK_S and type(second_audio) is TTSAudioRawFrame
-    assert fake.received_audio_ms(first["turn_id"]) == 600  # the chime is in neither turn
+    assert fake.received_audio_ms(first["turn_id"]) == 1000  # the chime is in neither turn
     assert_turn_lifecycle(down)
 
 
