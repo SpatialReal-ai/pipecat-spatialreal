@@ -1,0 +1,89 @@
+name: Pipecat compatibility
+
+# Once a week, runs the tests against the newest pipecat-ai that pyproject.toml allows, to learn
+# early when a Pipecat release breaks this package.
+#
+# When the tests fail, the job fails and the run is the report: nothing is changed. When they pass
+# on a release newer than the one the README says the package was tested with ("Tested with Pipecat
+# vX.Y.Z"), the job opens a pull request that moves that line.
+#
+# The pull request is opened with the workflow's own token, so GitHub starts no other workflow on
+# it; the change is one line of the README, and the tests of this run have passed. The repository
+# setting "Allow GitHub Actions to create and approve pull requests" must be on.
+#
+# workflow_dispatch only finds workflows that are on the default branch.
+
+on:
+  schedule:
+    - cron: "23 6 * * 1" # Mondays, 06:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+
+      # Libraries resolve fresh here (uv.lock is not committed), and --upgrade-package makes the
+      # newest pipecat-ai win even when a lock file has been restored from somewhere. Resolving
+      # again, rather than upgrading the installed package alone, keeps the dependencies of the
+      # extras in step with the new release.
+      - name: Install the newest Pipecat that pyproject.toml allows
+        run: uv sync --extra dev --extra example --upgrade-package pipecat-ai
+
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Compare with the README
+        id: version
+        run: |
+          installed="$(uv run python -c 'import importlib.metadata as m; print(m.version("pipecat-ai"))')"
+          stated="$(grep -oE 'Tested with Pipecat v[0-9]+(\.[0-9]+)*' README.md | head -n 1 | sed 's/^.* v//')"
+          if [ -z "$stated" ]; then
+            echo "README.md has no 'Tested with Pipecat vX.Y.Z' line" >&2
+            exit 1
+          fi
+          echo "The README says v${stated}; the tests passed on v${installed}."
+          newest="$(printf '%s\n%s\n' "$stated" "$installed" | sort -V | tail -n 1)"
+          {
+            echo "installed=${installed}"
+            if [ "$installed" != "$stated" ] && [ "$newest" = "$installed" ]; then
+              echo "bump=true"
+            else
+              echo "bump=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      # The version goes through env, not into the script text.
+      - name: Move the README to the tested version
+        if: steps.version.outputs.bump == 'true'
+        env:
+          INSTALLED: ${{ steps.version.outputs.installed }}
+        run: |
+          sed -E "s/Tested with Pipecat v[0-9]+(\.[0-9]+)*/Tested with Pipecat v${INSTALLED}/" README.md > README.md.new
+          mv README.md.new README.md
+
+      - name: Open a pull request
+        if: steps.version.outputs.bump == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: compat/pipecat-${{ steps.version.outputs.installed }}
+          delete-branch: true
+          commit-message: "docs: tested with Pipecat v${{ steps.version.outputs.installed }}"
+          title: "docs: tested with Pipecat v${{ steps.version.outputs.installed }}"
+          body: |
+            The weekly compatibility check ran the tests against pipecat-ai
+            ${{ steps.version.outputs.installed }} and they passed, so the README now says the
+            package was tested with it.
+
+            Nothing else changed. The check does not raise the `pipecat-ai` floor in
+            `pyproject.toml`.

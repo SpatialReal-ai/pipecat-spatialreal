@@ -192,8 +192,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 the same value.
             min_silence_ms: Shortest silence, in ms, after which the next sound is a new onset.
                 The web SDK must use the same value. A turn that does not follow the previous
-                one back to back starts at least this long, plus one ``silence_chunk_ms``, after
-                the last audio before it, so that the web SDK can find its onset.
+                one back to back starts at least this long after the last audio before it, so
+                that the web SDK can find its onset; one that would have started sooner waits
+                until this long plus one ``silence_chunk_ms`` have passed.
             lead_ms: How far ahead of real time the audio is released.
             hold_cap_s: Longest time a turn's audio is held for its first animation; after it,
                 the turn plays without animation. Also the longest wait, once a turn's audio has
