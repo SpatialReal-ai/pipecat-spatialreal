@@ -67,6 +67,25 @@ def make(fake: FakeDriveningress, **overrides) -> DrivenIngress:
     return client
 
 
+def half_open(fake: FakeDriveningress, client: DrivenIngress) -> None:
+    """Leave the client's link half-open: nothing it writes gets through, and nothing says so.
+
+    The server stops reading the connection without closing it (``fake.stop_reading``), and the
+    client's next write blocks, as it does once a dropped flow has filled the kernel's send
+    buffer. That second part is the flow-control call the asyncio transport makes when its write
+    buffer passes the high-water mark; the test makes it by hand, because loopback buffers on
+    macOS take everything and never fill. From here on the client's ``send``, ``interrupt`` and
+    ``close`` wait in websockets' ``drain()`` until the socket is aborted.
+
+    Args:
+        fake: The fake the client is connected to.
+        client: A connected ``DrivenIngress``.
+    """
+    fake.stop_reading()
+    assert client._link is not None, "the client is not connected"
+    client._link.session._connection.pause_writing()
+
+
 async def until(condition: Callable[[], object], timeout: float = 2.0) -> None:
     """Wait until ``condition()`` is true; fail the test if it is not within ``timeout`` seconds."""
     loop = asyncio.get_running_loop()
