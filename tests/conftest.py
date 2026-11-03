@@ -152,7 +152,7 @@ class Do:
     action: Callable[[], object]
 
 
-async def play(processor, steps, *, send_end_frame=True, wait_s=WAIT_S):
+async def play(processor, steps, *, send_end_frame=True, wait_s=WAIT_S, params=None):
     """Run ``processor`` in a test pipeline and feed it ``steps``, as ``run_test`` does.
 
     The result is the same too: the frames that came out downstream and upstream. A step is a frame
@@ -171,6 +171,8 @@ async def play(processor, steps, *, send_end_frame=True, wait_s=WAIT_S):
         send_end_frame: Whether to end the pipeline with an ``EndFrame`` after the last step.
         wait_s: The longest an ``Until`` step waits, and the longest the pipeline has to end after
             the last step. Only a test of ``play`` itself has reason to shorten it.
+        params: The pipeline's ``PipelineParams``, for a scenario that needs other than Pipecat's
+            defaults (another ``audio_out_sample_rate``, say); None takes the defaults.
 
     Returns:
         ``(downstream frames, upstream frames)``, the ``EndFrame`` not included.
@@ -184,7 +186,10 @@ async def play(processor, steps, *, send_end_frame=True, wait_s=WAIT_S):
     source = QueuedFrameProcessor(queue=received_up, queue_direction=FrameDirection.UPSTREAM)
     sink = QueuedFrameProcessor(queue=received_down, queue_direction=FrameDirection.DOWNSTREAM)
     worker = PipelineWorker(
-        Pipeline([source, processor, sink]), cancel_on_idle_timeout=False, enable_rtvi=False
+        Pipeline([source, processor, sink]),
+        cancel_on_idle_timeout=False,
+        enable_rtvi=False,
+        params=params,
     )
     started = asyncio.Event()
 
