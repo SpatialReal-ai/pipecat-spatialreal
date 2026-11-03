@@ -33,13 +33,18 @@ def make_proc(fake, **kw):
     )
 
 
+def sine(ms, rate, freq=440):
+    """``ms`` of a sine at amplitude 9800, as PCM16 sample values."""
+    return [round(9800 * math.sin(2 * math.pi * freq * i / rate)) for i in range(rate * ms // 1000)]
+
+
+def pcm16(samples):
+    return struct.pack(f"<{len(samples)}h", *samples)
+
+
 def tone_frame(ms, rate=24000, **kw):
     """``ms`` of a 440 Hz tone at amplitude 9800, as the TTS would push it."""
-    count = rate * ms // 1000
-    audio = struct.pack(
-        f"<{count}h", *(round(9800 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(count))
-    )
-    return TTSAudioRawFrame(audio=audio, sample_rate=rate, num_channels=1, **kw)
+    return TTSAudioRawFrame(audio=pcm16(sine(ms, rate)), sample_rate=rate, num_channels=1, **kw)
 
 
 def kinds(frames):
@@ -369,6 +374,75 @@ async def test_frames_in_a_turn_keep_their_order(fake):
     ]
     assert plain[2] is text
     assert {f.context_id for f in plain if isinstance(f, TTSAudioRawFrame)} == {"c1"}
+
+
+async def test_other_audio_in_a_turn_is_sent_and_counted_and_keeps_its_class(fake):
+    chime = OutputAudioRawFrame(
+        audio=pcm16(sine(100, 16000, 880)), sample_rate=16000, num_channels=1
+    )
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(200),
+            chime,  # a sound effect, at a rate of its own
+            tone_frame(200),
+            TTSStoppedFrame(),
+            SleepFrame(1.0),
+        ],
+    )
+    audio = [f for f in down if isinstance(f, OutputAudioRawFrame)]
+    names = [type(f).__name__ for f in audio]
+    assert names[0] == names[-1] == "TTSAudioRawFrame"
+    assert set(names[1:-1]) == {"OutputAudioRawFrame"}  # not counted as the bot speaking
+    assert all(f.sample_rate == 24000 and f.num_channels == 1 for f in audio)
+    chime_ms = sum(len(f.audio) for f in audio[1:-1]) * 1000 / (2 * 24000)
+    assert abs(chime_ms - 100) <= 1  # its resampler's tail comes out before the next tone
+    # Inference gets the same samples as the room, in the same order.
+    assert fake.received_audio_bytes(req_of(down)) == b"".join(f.audio for f in audio)
+    (end,) = messages(down, "turn_end")
+    assert end["pcm_ms"] == 400 + chime_ms
+
+
+async def test_audio_for_another_track_keeps_its_place_and_is_not_counted(fake):
+    music = OutputAudioRawFrame(
+        audio=pcm16(sine(100, 24000, 220)), sample_rate=24000, num_channels=1
+    )
+    music.transport_destination = "music"
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(200),
+            music,
+            tone_frame(200),
+            TTSStoppedFrame(),
+            SleepFrame(1.0),
+        ],
+    )
+    audio = [f for f in down if isinstance(f, OutputAudioRawFrame)]
+    assert audio[1] is music and len(audio) == 3
+    assert fake.received_audio_ms(req_of(down)) == 400
+    assert messages(down, "turn_end")[0]["pcm_ms"] == 400.0
+
+
+async def test_stereo_tts_audio_is_downmixed(fake):
+    left = sine(200, 24000)
+    stereo = pcm16([sample for value in left for sample in (value, 0)])  # right channel silent
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            TTSAudioRawFrame(audio=stereo, sample_rate=24000, num_channels=2),
+            TTSStoppedFrame(),
+            SleepFrame(0.8),
+        ],
+    )
+    (released,) = [f for f in down if isinstance(f, TTSAudioRawFrame)]
+    assert released.num_channels == 1 and released.sample_rate == 24000
+    assert released.audio == pcm16([value // 2 for value in left])  # the two channels averaged
+    assert fake.received_audio_bytes(req_of(down)) == released.audio
+    assert messages(down, "turn_end")[0]["pcm_ms"] == 200.0
 
 
 async def test_turns_never_interleave(fake):

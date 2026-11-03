@@ -20,6 +20,9 @@ animation source (driveningress unreachable, or too slow) the audio still plays,
 
 import asyncio
 import contextlib
+import dataclasses
+import sys
+from array import array
 from collections import deque
 
 import spatialreal
@@ -34,7 +37,6 @@ from pipecat.frames.frames import (
     OutputAudioRawFrame,
     StartFrame,
     SystemFrame,
-    TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
 )
@@ -69,23 +71,19 @@ _END_OF_AUDIO = _EndOfAudio()
 class _Turn:
     """One TTS context: one turn of the envelope and, while it can, one driveningress request."""
 
-    def __init__(
-        self,
-        started: TTSStartedFrame,
-        *,
-        rate: int,
-        tracker: OnsetTracker,
-        resampler: BaseAudioResampler,
-        sends: bool,
-    ):
+    def __init__(self, started: TTSStartedFrame, *, rate: int, tracker: OnsetTracker, sends: bool):
         self.started = started
         self.rate = rate
         self.tracker = tracker
-        self.resampler = resampler
         # Every frame that arrived while the turn was open, in arrival order, waiting for its
         # release. _END_OF_AUDIO follows the turn's last audio once the turn has stopped.
         self.hold: deque[Frame | _EndOfAudio] = deque([started])
-        self.last_audio: TTSAudioRawFrame | None = None  # dresses the resampler's tail
+        # Audio not already mono at the output rate goes through one stream resampler per input
+        # rate. stream_rate is the rate the last such audio came at, whose filter still holds its
+        # tail; last_audio[rate] is that stream's latest frame, which dresses the tail.
+        self.resamplers: dict[int, BaseAudioResampler] = {}
+        self.stream_rate: int | None = None
+        self.last_audio: dict[int, OutputAudioRawFrame] = {}
         self.turn_id = ""
         self.sends = sends  # its audio still goes to driveningress
         self.sent = False  # it has a request on the current session
@@ -113,6 +111,10 @@ class _Turn:
     def pcm_ms(self) -> float:
         """Exact length of the turn's audio so far, in ms."""
         return (self.pcm_bytes // 2) * 1000 / self.rate
+
+    def on_track(self, frame: Frame | _EndOfAudio) -> bool:
+        """Whether ``frame`` is audio on the turn's own track, the one the browser animates."""
+        return _plays(frame) and frame.transport_destination == self.started.transport_destination
 
 
 class SpatialRealAvatarProcessor(FrameProcessor):
@@ -237,6 +239,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         # The turns, oldest first, until each is closed. They release strictly in this order.
         self._turns: deque[_Turn] = deque()
         self._open: _Turn | None = None  # the turn still taking frames
+        self._track: str | None = None  # the transport destination the turns' audio plays on
         self._chain: _Turn | None = None  # the latest announced turn, which the next may follow
         self._end_frame: EndFrame | None = None  # waits until every turn is closed
         self._playout_end = 0.0  # loop time by which everything released has played
@@ -304,8 +307,8 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 self._start_driver()
         elif isinstance(frame, TTSStartedFrame):
             await self._open_turn(frame)
-        elif isinstance(frame, TTSAudioRawFrame) and self._open is not None:
-            await self._add_audio(self._open, frame)
+        elif isinstance(frame, OutputAudioRawFrame) and self._open is not None:
+            await self._add_audio(self._open, frame)  # TTS audio or not: it plays in the turn
         elif isinstance(frame, TTSStoppedFrame) and self._open is not None:
             await self._stop_turn(self._open, frame)
         elif isinstance(frame, EndFrame):
@@ -324,31 +327,58 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             tracker=OnsetTracker(
                 self._out_rate, threshold=self._threshold, min_silence_ms=self._min_silence_ms
             ),
-            # One stream per turn, never cleared on a pause: the TTS may stall mid-turn.
-            resampler=create_stream_resampler(clear_after_secs=None),
             sends=not self._degraded,
         )
         self._turns.append(turn)
         self._open = turn
+        self._track = frame.transport_destination
         self._wake.set()
 
-    async def _add_audio(self, turn: _Turn, frame: TTSAudioRawFrame) -> None:
+    async def _add_audio(self, turn: _Turn, frame: OutputAudioRawFrame) -> None:
+        """Hold audio that came while the turn is open.
+
+        Audio on the turn's track belongs to the turn whatever produced it, since inference has
+        to see every sample the room plays: it is made mono at the output rate, counted, sent,
+        and released in its own class (Pipecat counts only TTS audio as the bot speaking).
+        Audio for another track only keeps its place.
+        """
+        if not turn.on_track(frame):
+            turn.hold.append(frame)
+            self._wake.set()
+            return
+        if turn.stream_rate is not None and frame.sample_rate != turn.stream_rate:
+            await self._flush_stream(turn)  # its tail plays before what comes next
         if frame.sample_rate == self._out_rate and frame.num_channels == 1:
             pcm, released = frame.audio, frame
         else:
-            pcm = await turn.resampler.resample(frame.audio, frame.sample_rate, self._out_rate)
-            released = self._audio_frame(pcm, like=frame)
-        turn.last_audio = frame
+            pcm = _downmix(frame.audio, frame.num_channels)
+            if frame.sample_rate != self._out_rate:
+                resampler = turn.resamplers.get(frame.sample_rate)
+                if resampler is None:
+                    # Never cleared on a pause: the TTS may stall mid-turn.
+                    resampler = create_stream_resampler(clear_after_secs=None)
+                    turn.resamplers[frame.sample_rate] = resampler
+                pcm = await resampler.resample(pcm, frame.sample_rate, self._out_rate)
+                turn.stream_rate = frame.sample_rate
+                turn.last_audio[frame.sample_rate] = frame
+            released = _with_audio(frame, pcm, self._out_rate)
         if pcm:  # a resampler may give nothing back while it fills its filter
             turn.hold.append(released)
             await self._take_audio(turn, pcm)
 
+    async def _flush_stream(self, turn: _Turn) -> None:
+        """Release the tail the turn's current resampler stream still holds, in its place."""
+        rate, turn.stream_rate = turn.stream_rate, None
+        if rate is None:
+            return
+        tail = await turn.resamplers[rate].flush()
+        if tail:
+            turn.hold.append(_with_audio(turn.last_audio[rate], tail, self._out_rate))
+            await self._take_audio(turn, tail)
+
     async def _stop_turn(self, turn: _Turn, frame: TTSStoppedFrame | None) -> None:
         self._open = None
-        tail = await turn.resampler.flush()
-        if tail and turn.last_audio is not None:
-            turn.hold.append(self._audio_frame(tail, like=turn.last_audio))
-            await self._take_audio(turn, tail)
+        await self._flush_stream(turn)
         if frame is not None:
             turn.hold.append(frame)
         turn.hold.append(_END_OF_AUDIO)
@@ -372,7 +402,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             last.hold.append(frame)  # nothing overtakes a turn's frames
             self._wake.set()
             return
-        if _plays(frame):
+        if _plays(frame) and frame.transport_destination == self._track:
             self._playout_end = max(self._playout_end, self._now()) + _duration(frame)
         await self.push_frame(frame)
 
@@ -384,16 +414,6 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             turn.first_audio_at = self._now()
         self._wake.set()
         await self._send(turn, pcm)
-
-    def _audio_frame(self, pcm: bytes, *, like: TTSAudioRawFrame) -> TTSAudioRawFrame:
-        frame = TTSAudioRawFrame(
-            audio=pcm, sample_rate=self._out_rate, num_channels=1, context_id=like.context_id
-        )
-        frame.pts = like.pts
-        frame.metadata = like.metadata
-        frame.transport_destination = like.transport_destination
-        frame.interruptible = like.interruptible
-        return frame
 
     # --- driveningress
 
@@ -684,7 +704,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                     turn.finished = True
                     turn.playout_end = max(self._playout_end, self._now())
                     continue
-                if _plays(item):
+                if turn.on_track(item):
                     due = self._next_release(self._lead_s)
                     if due is not None:
                         deadlines.append(due)
@@ -765,3 +785,32 @@ def _duration(frame: OutputAudioRawFrame) -> float:
     if frame.sample_rate <= 0 or frame.num_channels <= 0:
         return 0.0
     return len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
+
+
+def _downmix(pcm: bytes, channels: int) -> bytes:
+    """Average interleaved PCM16 little-endian channels into one; mono comes back unchanged.
+
+    A trailing partial frame (fewer bytes than one sample of every channel) is dropped.
+    """
+    if channels <= 1:
+        return pcm
+    samples = array("h")
+    samples.frombytes(pcm[: len(pcm) - len(pcm) % (2 * channels)])
+    if sys.byteorder == "big":
+        samples.byteswap()  # array reads the machine's byte order, the audio is little-endian
+    columns = [samples[channel::channels] for channel in range(channels)]
+    mono = array("h", (sum(frame) // channels for frame in zip(*columns)))
+    if sys.byteorder == "big":
+        mono.byteswap()
+    return mono.tobytes()
+
+
+def _with_audio(frame: OutputAudioRawFrame, pcm: bytes, rate: int) -> OutputAudioRawFrame:
+    """A frame of the same class and routing as ``frame`` that carries ``pcm``, mono at ``rate``."""
+    copy = dataclasses.replace(frame, audio=pcm, sample_rate=rate, num_channels=1)
+    copy.pts = frame.pts
+    copy.metadata = frame.metadata
+    copy.transport_source = frame.transport_source
+    copy.transport_destination = frame.transport_destination
+    copy.interruptible = frame.interruptible
+    return copy
