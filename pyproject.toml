@@ -42,6 +42,9 @@ dev = [
     "websockets>=12",
     "grpcio-tools==1.75.1",
     "ruff",
+    # Pipecat's eval transport, which tests/test_rtvi_smoke.py sends through, is its FastAPI
+    # WebSocket transport.
+    "pipecat-ai[websocket]>=1.15.0,<2",
 ]
 example = [
     "pipecat-ai[daily,livekit,runner,silero,deepgram,cartesia,openai]>=1.15.0",
