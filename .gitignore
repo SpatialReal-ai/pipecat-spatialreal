@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+.env
+
+# Libraries resolve fresh in CI (see ci.yml) instead of pinning through a lock file.
+uv.lock
+
+# The contract lives in shared-proto; this repo holds generated code only. The codegen
+# workflow refuses any committed .proto, this keeps one from being added by accident.
+*.proto

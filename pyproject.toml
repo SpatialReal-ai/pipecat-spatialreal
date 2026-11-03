@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pipecat-spatialreal"
+dynamic = ["version"]
+description = "Pipecat processor that drives a SpatialReal avatar from a voice bot's TTS audio"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+# pipecat-ai dropped Python 3.10 in 1.0.0; every release this package can depend on needs >=3.11.
+requires-python = ">=3.11"
+authors = [{ name = "SpatialReal", email = "hello@spatialreal.com" }]
+keywords = ["pipecat", "avatar", "voice-agent", "realtime", "spatialreal"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pipecat-ai>=1.15.0,<2",
+    "spatialreal>=0.2.2,<0.3",
+    "protobuf>=6.31,<8",
+]
+
+[project.optional-dependencies]
+# grpcio-tools is pinned: it decides the gencode protobuf version, which must stay <= the runtime
+# protobuf this package is installed alongside (pipecat-ai and spatialreal both allow 6.x).
+# Bump it only in a commit of its own.
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=1.0",
+    "pytest-aiohttp",
+    "aiohttp>=3.9",
+    "websockets>=12",
+    "grpcio-tools==1.75.1",
+    "ruff",
+]
+example = [
+    "pipecat-ai[daily,livekit,runner,silero,deepgram,cartesia,openai]>=1.15.0",
+    "python-dotenv>=1.0",
+]
+
+[project.urls]
+Documentation = "https://docs.spatialreal.ai"
+Website = "https://www.spatialreal.ai/"
+Source = "https://github.com/SpatialReal-ai/pipecat-spatialreal"
+
+[tool.hatch.version]
+path = "src/pipecat_spatialreal/version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pipecat_spatialreal"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["src/pipecat_spatialreal/proto/generated"]
