@@ -26,8 +26,17 @@ opens a pull request that moves this line when they pass on a newer one.
 * Pipecat's own frames keep their order: the bot speaks, is interrupted and has its context
   aggregated as before, at the delayed playout. An interruption ends the turn in the browser
   (`turn_abort`) and stops its inference.
-* If SpatialReal cannot be reached, or answers too slowly (`hold_cap_s`), the audio still plays,
-  unanimated. The browser is told (`STATUS_DEGRADED`) and the processor keeps reconnecting.
+* If SpatialReal cannot be reached, or the connection is lost, the audio still plays, unanimated.
+  The browser gets a `state` message with `STATUS_DEGRADED`, and the processor keeps reconnecting
+  (`reconnect_backoff_s`); once it is connected again, the browser gets `STATUS_OK` and the turns
+  that start after that are animated.
+* If a turn's first animation segment is not back within `hold_cap_s` (1.5 s by default) of the
+  turn's first audio, that turn plays unanimated and its `turn_start` says so (`degraded: true`).
+  The connection stays up and no `state` message is sent. The next turn is held for its own
+  animation as usual, so as long as first segments come back that late, every turn's audio is held
+  for the full `hold_cap_s`. The first segment covers about the first second of a turn's audio, and
+  the cap counts the time the TTS takes to produce that second: with a TTS at real-time speed or
+  slower, the default cap leaves SpatialReal half a second or less to answer.
 * The processor connects to SpatialReal when the pipeline starts and holds one connection for the
   bot session, opening a new one whenever it is lost or the server ends it at the plan's maximum
   session duration (see [Limitations](#limitations)). Billing is per connection, not per viewer.
