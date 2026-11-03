@@ -805,9 +805,16 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         if interrupt:
             self._last_sent = None
 
-        # The browser and the pipeline hear of the barge-in first; the socket, which may be
-        # congested, is told by the writer, behind nothing of the victims' and ahead of every
-        # later send.
+        # The interrupt is queued behind nothing of the victims' and before the pushes below,
+        # so that nothing the pipeline sends after the barge-in (Pipecat has already restarted
+        # the process task) can reach the socket ahead of it. The pushes never wait for the
+        # socket: a congested link cannot hold the barge-in back.
+        self._writes = deque(
+            op for op in self._writes if isinstance(op, _Interrupt) or op.turn not in victims
+        )
+        if interrupt:
+            self._writes.append(_INTERRUPT)
+            self._writes_ready.set()
         for turn in victims:
             if turn.announced and not turn.silent:
                 await self._push_message(envelope.turn_abort(turn.turn_id))
@@ -816,12 +823,6 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             if _plays(item):
                 self._playout_end = max(self._playout_end, self._now()) + _duration(item)
             await self.push_frame(item)
-        self._writes = deque(
-            op for op in self._writes if isinstance(op, _Interrupt) or op.turn not in victims
-        )
-        if interrupt:
-            self._writes.append(_INTERRUPT)
-            self._writes_ready.set()
         self._start_driver()
 
     # --- the release task
