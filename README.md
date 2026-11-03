@@ -95,13 +95,21 @@ All of them are keyword arguments. The first three are required and must not be 
 | `environment` | `"us-west"` | The SpatialReal deployment to use when the two URLs are not given. |
 | `console_endpoint_url` | `""` | Root URL of the console API that issues session tokens, as in `https://<host>`; the token path is added to it. The older form ending in `/v1/console` is accepted too. Empty takes it from `environment`. |
 | `ingress_endpoint_url` | `""` | URL of SpatialReal's inference ingress with its path, as in `https://<host>/v2/driveningress`. A bare origin, `https://<host>`, is accepted too and gets that path. Empty takes it from `environment`. |
-| `threshold` | `328` | Largest absolute sample value that still counts as silence when finding the audible onsets the browser anchors the animation to. The web SDK must use the same value. |
-| `min_silence_ms` | `150` | Shortest silence, in ms, after which the next sound is a new onset. The web SDK must use the same value. A turn that does not follow the previous one back to back starts at least this long after the last audio before it, so that the web SDK can find its onset; one that would have started sooner waits until this long plus one `silence_chunk_ms` have passed. |
+| `threshold` | `328` | Largest absolute sample value that still counts as silence when finding the audible onsets the browser anchors the animation to. Must equal the web SDK's value, which is fixed at 328 (see below). |
+| `min_silence_ms` | `150` | Shortest silence, in ms, after which the next sound is a new onset. Must equal the web SDK's value, which is fixed at 150 (see below). A turn that does not follow the previous one back to back starts at least this long after the last audio before it, so that the web SDK can find its onset; one that would have started sooner waits until this long plus one `silence_chunk_ms` have passed. |
 | `lead_ms` | `200` | How far ahead of real time the audio is released. |
 | `hold_cap_s` | `1.5` | Longest time a turn's audio is held for its first animation; after it, the turn plays without animation. Also the longest wait, once a turn's audio has played, for the last segment of its animation. |
 | `silence_chunk_ms` | `40` | Length of each chunk of silence played while the TTS is behind. |
 | `reconnect_backoff_s` | `(1, 2, 4, 8)` | Seconds to wait before each new attempt to reach SpatialReal, in turn; the last value repeats. |
 | `**kwargs` | | Passed to Pipecat's `FrameProcessor`. |
+
+`threshold` and `min_silence_ms` make up the rule by which the processor and the web SDK find
+onsets in the same audio: a sample `x` is audible when `abs(x) > threshold`, and an onset is the
+first audible sample after at least `min_silence_ms` of silence. The web SDK applies that rule with
+fixed values, 328 and 150, and takes no setting for either. The two parameters exist so that the
+processor can be kept equal to the web SDK if its rule ever changes; changing either on its own
+makes the two ends find different onsets, and the animation is then anchored to the wrong points of
+the voice.
 
 The constructor raises `ValueError` for an empty credential or a setting out of range. It connects
 to nothing: the connection opens when the pipeline sets the processor up.
