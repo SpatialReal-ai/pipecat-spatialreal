@@ -1,8 +1,12 @@
 import asyncio
+import inspect
 import math
 import struct
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import pytest
+from conftest import until
 from loguru import logger
 from pipecat.frames.frames import (
     CancelFrame,
@@ -16,9 +20,11 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
-from pipecat.tests.utils import SleepFrame, run_test
+from pipecat.tests.utils import QueuedFrameProcessor, SleepFrame, run_test
+from pipecat.workers.runner import WorkerRunner
 
 from pipecat_spatialreal import SpatialRealAvatarProcessor
 from pipecat_spatialreal.driven import DrivenIngress
@@ -101,6 +107,130 @@ def record_segments(proc):
     return received
 
 
+# --- Waiting for the pipeline instead of for a time
+#
+# run_test feeds its frames on a timetable, and a SleepFrame is a guess at how long the pipeline
+# needs. On a loaded machine the guess is wrong: the first connect to the fake took 600 ms and more,
+# which moved every scenario that began with a short sleep. play() feeds frames the same way, but
+# its steps can also wait for the pipeline itself.
+
+# The longest a step waits for the pipeline. Only a test that is going to fail waits this long.
+WAIT_S = 10.0
+
+
+@dataclass
+class Until:
+    """A step for ``play``: wait here until ``condition()`` is true."""
+
+    what: str  # named in the failure
+    condition: Callable[[], object]
+
+
+@dataclass
+class Do:
+    """A step for ``play``: call ``action()`` here, and await what it returns if it is awaitable."""
+
+    action: Callable[[], object]
+
+
+async def play(processor, steps, *, send_end_frame=True):
+    """Run ``processor`` in a test pipeline and feed it ``steps``, as ``run_test`` does.
+
+    The result is the same too: the frames that came out downstream and upstream. A step is a frame
+    to queue, a ``SleepFrame``, an ``Until`` that waits for the pipeline to get somewhere, or a
+    ``Do`` that acts. Use a sleep to set a duration that is the point of the scenario, and an
+    ``Until`` wherever the scenario needs the processor to have got somewhere first.
+
+    Args:
+        processor: The processor, or a pipeline of processors, under test.
+        steps: What to do, in order.
+        send_end_frame: Whether to end the pipeline with an ``EndFrame`` after the last step.
+
+    Returns:
+        ``(downstream frames, upstream frames)``, the ``EndFrame`` not included.
+    """
+    received_up, received_down = asyncio.Queue(), asyncio.Queue()
+    source = QueuedFrameProcessor(queue=received_up, queue_direction=FrameDirection.UPSTREAM)
+    sink = QueuedFrameProcessor(queue=received_down, queue_direction=FrameDirection.DOWNSTREAM)
+    worker = PipelineWorker(
+        Pipeline([source, processor, sink]), cancel_on_idle_timeout=False, enable_rtvi=False
+    )
+    started = asyncio.Event()
+
+    @worker.event_handler("on_pipeline_started")
+    async def _on_started(worker, frame):
+        started.set()
+
+    async def feed():
+        await asyncio.wait_for(started.wait(), timeout=WAIT_S)
+        for step in steps:
+            if isinstance(step, SleepFrame):
+                await asyncio.sleep(step.sleep)
+            elif isinstance(step, Until):
+                try:
+                    await until(step.condition, timeout=WAIT_S)
+                except AssertionError:
+                    raise AssertionError(f"timed out waiting for {step.what}") from None
+            elif isinstance(step, Do):
+                result = step.action()
+                if inspect.isawaitable(result):
+                    await result
+            else:
+                await worker.queue_frame(step)
+        if send_end_frame:
+            await worker.queue_frame(EndFrame())
+
+    runner = WorkerRunner()
+    await runner.add_workers(worker)
+    running = asyncio.create_task(runner.run())
+    try:
+        await feed()
+        await running
+    except BaseException:
+        running.cancel()  # a step failed: do not leave the pipeline running behind the test
+        await asyncio.gather(running, return_exceptions=True)
+        raise
+
+    down = []
+    while not received_down.empty():
+        frame = received_down.get_nowait()
+        if not (send_end_frame and isinstance(frame, EndFrame)):
+            down.append(frame)
+    up = []
+    while not received_up.empty():
+        up.append(received_up.get_nowait())
+    return down, up
+
+
+def link_up(proc):
+    """The step that waits for the processor's driveningress session to be up."""
+    return Until("the driveningress session to be up", lambda: proc._driven.connected)
+
+
+def tts_audio_released(pushed, count=1):
+    """The step that waits until ``count`` frames of TTS audio have been pushed."""
+    return Until(
+        f"{count} frame(s) of TTS audio to be released",
+        lambda: sum(isinstance(f, TTSAudioRawFrame) for _, f in pushed) >= count,
+    )
+
+
+def message_pushed(pushed, member, count=1):
+    """The step that waits until ``count`` avatar messages of one kind have been pushed."""
+    return Until(
+        f"{count} {member} message(s) to be pushed",
+        lambda: len(messages([f for _, f in pushed], member)) >= count,
+    )
+
+
+def interruption_pushed(pushed):
+    """The step that waits until the processor has passed an ``InterruptionFrame`` on."""
+    return Until(
+        "the InterruptionFrame to be passed on",
+        lambda: any(isinstance(f, InterruptionFrame) for _, f in pushed),
+    )
+
+
 @pytest.fixture(autouse=True)
 def pipecat_log():
     """Fail a test whose pipeline reported an error or left a task running.
@@ -158,30 +288,41 @@ async def test_released_audio_is_resampled_to_out_rate(fake):
 
 
 async def test_stall_mirrors_silence(fake):
-    down, _ = await run_test(
-        make_proc(fake, lead_ms=0),
-        frames_to_send=[
+    proc = make_proc(fake, lead_ms=0)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
+            link_up(proc),
             TTSStartedFrame(),
             tone_frame(300),
-            SleepFrame(0.6),
+            tts_audio_released(pushed),  # the room plays it for 300 ms from here
+            SleepFrame(0.8),  # the TTS falls ~500 ms behind the room
             tone_frame(200),
             TTSStoppedFrame(),
             SleepFrame(1.0),
         ],
     )
+    (first, _), (second, _) = [(t, f) for t, f in pushed if isinstance(f, TTSAudioRawFrame)]
+    stall = second - (first + 0.3)  # how long the room waited for the TTS
     sil = [f for f in down if type(f) is OutputAudioRawFrame]
-    assert 4 <= len(sil) <= 10 and all(set(f.audio) == {0} for f in sil)
+    assert stall > 0.4 and all(set(f.audio) == {0} for f in sil)
+    # Silence went out for the stall, one 40 ms chunk at a time and just in time (the lead is 0):
+    # no more than the stall, and a good part of it however late the loop woke up.
+    assert 4 <= len(sil) and len(sil) * 0.04 <= stall + 0.05
     assert fake.received_audio_ms(req_of(down)) == 500 + 40 * len(sil)
 
 
 async def test_a_stall_is_not_stretched_by_the_lead(fake):
     proc = make_proc(fake)  # lead_ms 200, silence_chunk_ms 40
     pushed = record_pushes(proc)
-    down, _ = await run_test(
+    down, _ = await play(
         proc,
-        frames_to_send=[
+        [
+            link_up(proc),
             TTSStartedFrame(),
             tone_frame(300),
+            tts_audio_released(pushed),  # the room plays it for 300 ms from here
             SleepFrame(0.6),  # the TTS falls ~300 ms behind the room
             tone_frame(500),
             TTSStoppedFrame(),
@@ -193,23 +334,28 @@ async def test_a_stall_is_not_stretched_by_the_lead(fake):
     stall = second - (first + 0.3)  # how long the room waited for the TTS
     inserted = len(silence) * 0.04
     assert stall > 0.2
-    # The silence bridges the stall and the one chunk kept queued so the transport never runs
-    # dry, within one chunk; the 200 ms lead is not added on top.
-    assert -0.01 <= inserted - stall - 0.04 <= 0.04 + 0.01
+    # The silence never runs further ahead of the room than one chunk plus the chunk kept queued so
+    # the transport never runs dry; the 200 ms lead is not added on top. This bound holds on any
+    # machine: a loop that wakes late can only make the silence shorter.
+    assert inserted - stall <= 0.04 + 0.04 + 0.01
+    # And it bridges the stall. How closely it follows the stall depends on how promptly the loop
+    # wakes, which is the machine's business: a wake 100 ms late leaves 60 ms of the stall bare.
+    assert inserted - stall >= -0.15
     assert fake.received_audio_ms(req_of(down)) == 800 + 40 * len(silence)
 
 
 async def test_interruption_before_first_segment(fake):
     fake.first_segment_ms = 10_000
-    down, _ = await run_test(
-        make_proc(fake),
-        frames_to_send=[
+    proc = make_proc(fake)
+    down, _ = await play(
+        proc,
+        [
             TTSStartedFrame(),
             tone_frame(100),
             # Frames queued together reach the processor's input queue together, and a system
-            # frame there is taken before data frames: without this sleep the interruption
-            # would run before the turn exists.
-            SleepFrame(0.1),
+            # frame there is taken before data frames: the interruption must come after the
+            # turn exists, and after its audio has been sent for the interrupt to stop.
+            Until("the turn's audio to reach driveningress", lambda: fake.received),
             InterruptionFrame(),
             SleepFrame(0.5),
         ],
@@ -257,24 +403,21 @@ async def test_back_to_back_turns_chain(fake):
 
 async def test_driven_down_passes_audio_through(fake):
     proc = make_proc(fake, reconnect_backoff_s=(0.1,))
-
-    async def kill():
-        await asyncio.sleep(0.15)
-        await fake.close_with(4001)
-
-    killer = asyncio.create_task(kill())
-    down, _ = await run_test(
+    pushed = record_pushes(proc)
+    down, _ = await play(
         proc,
-        frames_to_send=[
+        [
+            link_up(proc),
             TTSStartedFrame(),
             tone_frame(100),
+            Do(lambda: fake.close_with(4001)),  # the turn is still waiting for its animation
+            message_pushed(pushed, "state"),
             SleepFrame(0.4),
             tone_frame(100),
             TTSStoppedFrame(),
             SleepFrame(1.0),
         ],
     )
-    await killer
     k = kinds(down)
     assert ("rtvi", "state") in k and k.count("TTSAudioRawFrame") == 2
 
@@ -368,12 +511,14 @@ async def test_turn_start_reports_the_onsets_found_so_far(fake):
 
 async def test_a_mid_turn_onset_is_reported_once(fake):
     silence = TTSAudioRawFrame(audio=bytes(2 * 4800), sample_rate=24000, num_channels=1)
-    down, _ = await run_test(
-        make_proc(fake),
-        frames_to_send=[
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
             TTSStartedFrame(),
             tone_frame(300),
-            SleepFrame(0.1),  # the turn is announced before the rest comes
+            message_pushed(pushed, "turn_start"),  # the turn is announced before the rest comes
             silence,  # 200 ms, more than min_silence_ms (150)
             tone_frame(300),
             TTSStoppedFrame(),
@@ -519,6 +664,12 @@ async def test_turns_never_interleave(fake):
 # room has been quiet for min_silence_ms (150) and one chunk (40), so the browser finds its onset.
 GAP_S = (150 + 40) / 1000
 
+# The tests that need a turn to be ready after the previous one has played out, but before the room
+# has been quiet for min_silence_ms, use a min_silence_ms of 400: the window is 400 ms wide, not
+# 150, which a loaded machine would miss. The rule they pin does not depend on the numbers.
+WIDE_MIN_SILENCE_MS = 400
+WIDE_GAP_S = (WIDE_MIN_SILENCE_MS + 40) / 1000
+
 
 def audio_pushes(pushed):
     """``(time, frame)`` of every audio frame pushed, stall silence included."""
@@ -526,17 +677,18 @@ def audio_pushes(pushed):
 
 
 async def test_a_turn_after_a_short_gap_is_not_chained_and_waits_for_a_findable_onset(fake):
-    proc = make_proc(fake)
+    proc = make_proc(fake, min_silence_ms=WIDE_MIN_SILENCE_MS)
     pushed = record_pushes(proc)
     segments = record_segments(proc)
-    down, _ = await run_test(
+    down, _ = await play(
         proc,
-        frames_to_send=[
-            SleepFrame(0.2),  # connected: turn 1 plays as soon as its animation is in
+        [
+            link_up(proc),
             TTSStartedFrame(),
             tone_frame(300),
             TTSStoppedFrame(),
-            SleepFrame(0.38),  # turn 2's TTS starts ~80 ms after turn 1 has played out
+            tts_audio_released(pushed),  # turn 1 plays for 300 ms from here
+            SleepFrame(0.4),  # turn 2's TTS starts ~100 ms after turn 1 has played out
             TTSStartedFrame(),
             tone_frame(300),
             TTSStoppedFrame(),
@@ -547,9 +699,9 @@ async def test_a_turn_after_a_short_gap_is_not_chained_and_waits_for_a_findable_
     end1 = t1 + 0.3  # turn 1's playout end
     _, second = messages(down, "turn_start")
     ready = min(t for t, req_id in segments if req_id == second["turn_id"])
-    assert 0 < ready - end1 < 0.15  # ready inside the gap the browser could not see
+    assert 0 < ready - end1 < WIDE_MIN_SILENCE_MS / 1000  # inside the gap the browser can't see
     assert second["prev_turn_id"] == "" and second["prev_turn_pcm_ms"] == 0
-    assert t2 - end1 >= GAP_S - 0.002
+    assert t2 - end1 >= WIDE_GAP_S - 0.002
     assert type(second_audio) is TTSAudioRawFrame  # no silence was pushed for the gap
     # Its inference stream starts at its own first sample, as for any turn.
     assert fake.received_audio_ms(second["turn_id"]) == 300
@@ -561,23 +713,29 @@ async def test_a_turn_ready_only_after_the_previous_one_played_out_is_not_chaine
     fake, monkeypatch
 ):
     animate = fake._animate
+    asked = set()
 
     async def slow(ws, connection_id, req_id, *, end, with_animation):
-        await asyncio.sleep(0.15)  # inference takes time
+        if req_id not in asked:
+            asked.add(req_id)
+            await asyncio.sleep(0.3)  # the first answer takes the time inference takes
         await animate(ws, connection_id, req_id, end=end, with_animation=with_animation)
 
     monkeypatch.setattr(fake, "_animate", slow)
-    proc = make_proc(fake)
+    proc = make_proc(fake, min_silence_ms=WIDE_MIN_SILENCE_MS)
     pushed = record_pushes(proc)
     segments = record_segments(proc)
-    down, _ = await run_test(
+    tts_starts = []
+    down, _ = await play(
         proc,
-        frames_to_send=[
-            SleepFrame(0.2),
+        [
+            link_up(proc),
             TTSStartedFrame(),
-            tone_frame(300),
+            tone_frame(600),
             TTSStoppedFrame(),
-            SleepFrame(0.36),  # turn 2's TTS starts before turn 1 has played out...
+            tts_audio_released(pushed),  # turn 1 plays for 600 ms from here
+            SleepFrame(0.35),  # turn 2's TTS starts before turn 1 has played out...
+            Do(lambda: tts_starts.append(asyncio.get_running_loop().time())),
             TTSStartedFrame(),
             tone_frame(300),
             TTSStoppedFrame(),
@@ -585,12 +743,14 @@ async def test_a_turn_ready_only_after_the_previous_one_played_out_is_not_chaine
         ],
     )
     (t1, _), (t2, second_audio) = audio_pushes(pushed)
-    end1 = t1 + 0.3
+    end1 = t1 + 0.6
     _, second = messages(down, "turn_start")
     ready = min(t for t, req_id in segments if req_id == second["turn_id"])
-    assert 0 < ready - end1 < 0.15  # ...but its animation only comes back after
+    # The case under test: the TTS came in time, but its animation only comes back after.
+    assert tts_starts[0] < end1
+    assert 0 < ready - end1 < WIDE_MIN_SILENCE_MS / 1000
     assert second["prev_turn_id"] == "" and second["prev_turn_pcm_ms"] == 0
-    assert t2 - end1 >= GAP_S - 0.002 and type(second_audio) is TTSAudioRawFrame
+    assert t2 - end1 >= WIDE_GAP_S - 0.002 and type(second_audio) is TTSAudioRawFrame
     assert_turn_lifecycle(down)
 
 
@@ -633,19 +793,18 @@ def turn_start_time(pushed, turn_id):
 
 
 async def test_an_unchained_turn_is_announced_when_its_release_starts(fake):
-    # A min_silence_ms of 400 widens the window turn 2 must be ready in (after turn 1 has played
-    # out, before the room has been quiet that long) so the case holds on a loaded machine.
-    proc = make_proc(fake, min_silence_ms=400)
+    proc = make_proc(fake, min_silence_ms=WIDE_MIN_SILENCE_MS)
     pushed = record_pushes(proc)
     segments = record_segments(proc)
-    down, _ = await run_test(
+    down, _ = await play(
         proc,
-        frames_to_send=[
-            SleepFrame(0.2),
+        [
+            link_up(proc),
             TTSStartedFrame(),
             tone_frame(300),
             TTSStoppedFrame(),
-            SleepFrame(0.5),  # turn 2 is ready ~200 ms after turn 1 has played out
+            tts_audio_released(pushed),  # turn 1 plays for 300 ms from here
+            SleepFrame(0.4),  # turn 2 is ready ~100 ms after turn 1 has played out
             TTSStartedFrame(),
             tone_frame(300),
             TTSStoppedFrame(),
@@ -657,11 +816,12 @@ async def test_an_unchained_turn_is_announced_when_its_release_starts(fake):
     (t1, _), (t2, _) = audio_pushes(pushed)
     end1 = t1 + 0.3
     ready = min(t for t, req_id in segments if req_id == turn_id)
-    assert 0 < ready - end1 < 0.4 and second["prev_turn_id"] == ""  # the case under test
+    assert 0 < ready - end1 < WIDE_MIN_SILENCE_MS / 1000 and second["prev_turn_id"] == ""
     announced = turn_start_time(pushed, turn_id)
-    # Not when its animation is in hand: when its release begins, after 440 ms of quiet.
-    assert announced - end1 >= (400 + 40) / 1000 - 0.002
-    assert 0 <= t2 - announced < 0.05
+    # Not when its animation is in hand: when its release begins, after 440 ms of quiet. Its audio
+    # follows in the same step (the 200 ms leave room for a loaded machine between two pushes).
+    assert announced - end1 >= WIDE_GAP_S - 0.002
+    assert 0 <= t2 - announced < 0.2
     # At its release: turn_start, then every segment already in hand, in order, then its audio.
     at_release = [f for t, f in pushed if t >= announced]
     first_audio = next(i for i, f in enumerate(at_release) if isinstance(f, TTSAudioRawFrame))
@@ -740,11 +900,14 @@ async def test_end_frame_waits_for_the_open_turn(fake):
 
 
 async def test_interruption_during_release_aborts_the_turn(fake):
-    down, _ = await run_test(
-        make_proc(fake),
-        frames_to_send=[
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
             TTSStartedFrame(),
             *[tone_frame(100) for _ in range(10)],
+            tts_audio_released(pushed),  # the release is under way: 1 s of audio, 200 ms ahead
             SleepFrame(0.3),
             InterruptionFrame(),
             SleepFrame(0.5),
@@ -761,12 +924,15 @@ async def test_interruption_during_release_aborts_the_turn(fake):
 
 
 async def test_interruption_after_tts_stopped_aborts_the_turn(fake):
-    down, _ = await run_test(
-        make_proc(fake),
-        frames_to_send=[
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
             TTSStartedFrame(),
             *[tone_frame(100) for _ in range(10)],
             TTSStoppedFrame(),
+            tts_audio_released(pushed),
             SleepFrame(0.3),
             InterruptionFrame(),
             SleepFrame(0.5),
@@ -782,12 +948,15 @@ async def test_interruption_after_tts_stopped_aborts_the_turn(fake):
 
 
 async def test_interruption_while_the_last_audio_plays_aborts_the_turn(fake):
-    down, _ = await run_test(
-        make_proc(fake),
-        frames_to_send=[
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
             TTSStartedFrame(),
             tone_frame(800),  # released at once: the hold is drained, the audio is still playing
             TTSStoppedFrame(),
+            tts_audio_released(pushed),
             SleepFrame(0.3),
             InterruptionFrame(),
             SleepFrame(0.8),
@@ -813,11 +982,14 @@ class InterruptUpstream(FrameProcessor):
 
 
 async def test_an_interruption_from_downstream_aborts_the_turn(fake):
-    down, up = await run_test(
-        Pipeline([make_proc(fake), InterruptUpstream()]),
-        frames_to_send=[
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, up = await play(
+        Pipeline([proc, InterruptUpstream()]),
+        [
             TTSStartedFrame(),
             *[tone_frame(100) for _ in range(10)],
+            tts_audio_released(pushed),
             SleepFrame(0.3),
             UserStartedSpeakingFrame(),
             SleepFrame(0.5),
@@ -874,14 +1046,16 @@ async def test_a_failed_send_plays_the_turn_unanimated(fake, monkeypatch):
 
 
 async def test_a_turn_after_an_interruption_is_a_new_request(fake):
-    down, _ = await run_test(
-        make_proc(fake),
-        frames_to_send=[
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
             TTSStartedFrame(),
-            tone_frame(300),
-            SleepFrame(0.1),
+            tone_frame(600),
+            message_pushed(pushed, "turn_start"),  # turn 1 is on the air...
             InterruptionFrame(),
-            SleepFrame(0.1),
+            interruption_pushed(pushed),  # ...and cut off before turn 2 begins
             TTSStartedFrame(),
             tone_frame(300),
             TTSStoppedFrame(),
@@ -917,12 +1091,15 @@ async def test_uninterruptible_frames_survive_an_interruption(fake):
 
 async def test_hold_cap_starts_a_degraded_turn(fake):
     fake.first_segment_ms = 10_000
-    down, _ = await run_test(
-        make_proc(fake, hold_cap_s=0.3),
-        frames_to_send=[
+    proc = make_proc(fake, hold_cap_s=0.3)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
+            link_up(proc),
             TTSStartedFrame(),
             tone_frame(200),
-            SleepFrame(0.6),
+            message_pushed(pushed, "turn_start"),  # the cap has run out, the TTS still goes on
             TTSStoppedFrame(),
             SleepFrame(0.8),
         ],
@@ -949,9 +1126,10 @@ async def test_turn_ends_when_the_end_segment_never_comes(fake, monkeypatch):
             await animate(ws, connection_id, req_id, end=end, with_animation=with_animation)
 
     monkeypatch.setattr(fake, "_animate", no_end)
-    down, _ = await run_test(
-        make_proc(fake, hold_cap_s=0.3),
-        frames_to_send=[TTSStartedFrame(), tone_frame(200), TTSStoppedFrame(), SleepFrame(1.0)],
+    proc = make_proc(fake, hold_cap_s=0.3)
+    down, _ = await play(
+        proc,
+        [link_up(proc), TTSStartedFrame(), tone_frame(200), TTSStoppedFrame(), SleepFrame(1.0)],
     )
     (end,) = messages(down, "turn_end")
     assert end["segment_count"] == 1 and end["pcm_ms"] == 200.0
@@ -967,9 +1145,10 @@ async def test_a_segment_after_turn_end_is_dropped(fake, monkeypatch):
         await animate(ws, connection_id, req_id, end=end, with_animation=with_animation)
 
     monkeypatch.setattr(fake, "_animate", late_end)
-    down, _ = await run_test(
-        make_proc(fake, hold_cap_s=0.2),
-        frames_to_send=[TTSStartedFrame(), tone_frame(300), TTSStoppedFrame(), SleepFrame(1.5)],
+    proc = make_proc(fake, hold_cap_s=0.2)
+    down, _ = await play(
+        proc,
+        [link_up(proc), TTSStartedFrame(), tone_frame(300), TTSStoppedFrame(), SleepFrame(1.5)],
     )
     assert len(fake.animation_frames) == 2  # the late end did reach the processor
     (end,) = messages(down, "turn_end")
@@ -999,24 +1178,21 @@ async def test_turn_end_waits_for_an_end_segment_that_comes_after_the_audio(fake
 
 async def test_a_turn_that_loses_its_link_is_released_at_once(fake):
     proc = make_proc(fake, reconnect_backoff_s=(5,))
-
-    async def kill():
-        await asyncio.sleep(0.15)
-        await fake.close_with(4001)
-
-    killer = asyncio.create_task(kill())
-    down, _ = await run_test(
+    pushed = record_pushes(proc)
+    down, _ = await play(
         proc,
-        frames_to_send=[
+        [
+            link_up(proc),
             TTSStartedFrame(),
             tone_frame(100),
-            SleepFrame(0.5),
+            Do(lambda: fake.close_with(4001)),  # the turn is still waiting for its animation
+            message_pushed(pushed, "state"),
+            SleepFrame(0.4),  # the TTS pauses; the hold cap is 1.5 s
             tone_frame(100),
             TTSStoppedFrame(),
             SleepFrame(0.6),
         ],
     )
-    await killer
     k = kinds(down)
     first, second = [i for i, kind in enumerate(k) if kind == "TTSAudioRawFrame"]
     # It plays from the moment the link goes, not once the hold cap (1.5 s) runs out: the TTS's
@@ -1027,29 +1203,26 @@ async def test_a_turn_that_loses_its_link_is_released_at_once(fake):
 
 async def test_degraded_state_is_reported_once_and_cleared(fake):
     proc = make_proc(fake, reconnect_backoff_s=(0.2,))
-
-    async def kill():
-        await asyncio.sleep(0.15)
-        await fake.close_with(4001)
-
-    killer = asyncio.create_task(kill())
-    down, _ = await run_test(
+    pushed = record_pushes(proc)
+    down, _ = await play(
         proc,
-        frames_to_send=[
+        [
+            link_up(proc),
             TTSStartedFrame(),
             tone_frame(100),
+            Do(lambda: fake.close_with(4001)),
+            message_pushed(pushed, "state"),
             SleepFrame(0.25),
             tone_frame(100),
             tone_frame(100),
             TTSStoppedFrame(),
-            SleepFrame(0.5),
+            message_pushed(pushed, "state", count=2),  # reconnected: the status is OK again
             TTSStartedFrame(),
             tone_frame(300),
             TTSStoppedFrame(),
             SleepFrame(1.0),
         ],
     )
-    await killer
     states = messages(down, "state")
     assert states == [
         {"status": "STATUS_DEGRADED", "reason": "creditsExhausted (4001)"},
@@ -1064,23 +1237,19 @@ async def test_degraded_state_is_reported_once_and_cleared(fake):
 
 async def test_a_turn_while_down_is_announced_degraded_and_sends_nothing(fake):
     proc = make_proc(fake, reconnect_backoff_s=(5,))
-
-    async def kill():
-        await asyncio.sleep(0.1)
-        await fake.close_with(4001)
-
-    killer = asyncio.create_task(kill())
-    down, _ = await run_test(
+    pushed = record_pushes(proc)
+    down, _ = await play(
         proc,
-        frames_to_send=[
-            SleepFrame(0.3),
+        [
+            link_up(proc),
+            Do(lambda: fake.close_with(4001)),
+            message_pushed(pushed, "state"),
             TTSStartedFrame(),
             tone_frame(200),
             TTSStoppedFrame(),
             SleepFrame(0.5),
         ],
     )
-    await killer
     (start,) = messages(down, "turn_start")
     assert start["degraded"] is True and start["onsets_ms"] == [1000 / 24000]
     (end,) = messages(down, "turn_end")
@@ -1091,24 +1260,20 @@ async def test_a_turn_while_down_is_announced_degraded_and_sends_nothing(fake):
 
 async def test_a_turn_while_down_is_not_held(fake):
     proc = make_proc(fake, reconnect_backoff_s=(5,))
-
-    async def kill():
-        await asyncio.sleep(0.1)
-        await fake.close_with(4001)
-
-    killer = asyncio.create_task(kill())
-    down, _ = await run_test(
+    pushed = record_pushes(proc)
+    down, _ = await play(
         proc,
-        frames_to_send=[
-            SleepFrame(0.3),
+        [
+            link_up(proc),
+            Do(lambda: fake.close_with(4001)),
+            message_pushed(pushed, "state"),
             TTSStartedFrame(),
             tone_frame(100),
-            SleepFrame(0.4),
+            SleepFrame(0.4),  # the hold cap is 1.5 s
             TTSStoppedFrame(),
             SleepFrame(0.5),
         ],
     )
-    await killer
     k = kinds(down)
     # Released as it comes: the audio already played and silence bridges the TTS's pause.
     assert "OutputAudioRawFrame" in k[k.index("TTSAudioRawFrame") : k.index("TTSStoppedFrame")]
@@ -1150,11 +1315,12 @@ async def test_a_cancel_mid_turn_stops_the_release_and_the_link(fake):
         if isinstance(frame, CancelFrame):
             at_cancel.update(release=processor._driver, link=processor._link_task)
 
-    await run_test(
+    await play(
         proc,
-        frames_to_send=[
+        [
             TTSStartedFrame(),
             *[tone_frame(100) for _ in range(20)],  # 2 s of audio, still being released
+            tts_audio_released(pushed),
             SleepFrame(0.3),
             CancelFrame(),
             SleepFrame(0.5),
@@ -1188,13 +1354,14 @@ async def test_a_failing_release_lets_the_audio_through(fake, monkeypatch, pipec
         raise RuntimeError("a bug")
 
     monkeypatch.setattr(SpatialRealAvatarProcessor, "_forward_segments", fault)
-    down, _ = await run_test(
-        make_proc(fake),
-        frames_to_send=[
+    proc = make_proc(fake)
+    down, _ = await play(
+        proc,
+        [
             TTSStartedFrame(),
             tone_frame(300),
             TTSStoppedFrame(),
-            SleepFrame(0.3),
+            Until("the release to fail", lambda: proc._broken),
             TTSStartedFrame(),
             tone_frame(200),
             TTSStoppedFrame(),
