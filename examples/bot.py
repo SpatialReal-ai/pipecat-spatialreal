@@ -17,7 +17,7 @@ session and returns the room the browser joins. This file adds three things to t
   serves such a route too, behind its login and with the same origin rule.
 * ``/avatar/``: the example web page, ``examples/client``. Open it from here: the token route
   answers no other origin.
-* ``/probe/``: ``examples/probe/receiver.html``, the silent receiver that measures how the
+* ``/probe/``: the probe page, ``examples/probe``: the silent receiver that measures how the
   envelope and the bot's audio line up in a Daily room. A developer tool for this package.
 
 Settings come from the environment or a ``.env`` file; ``env.example`` lists them. The runner

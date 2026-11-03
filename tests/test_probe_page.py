@@ -1,10 +1,11 @@
-"""The probe page's analysis, run against what the package really sends.
+"""The probe page: where the bot serves it, and its analysis run against what the package sends.
 
-``examples/probe/receiver.html`` turns the recorded envelope messages and the onsets found in the
+``examples/probe/index.html`` turns the recorded envelope messages and the onsets found in the
 bot's audio into its table, in plain JavaScript. ``probe_check.mjs`` runs that code under Node on
 messages built by :mod:`pipecat_spatialreal.envelope` and on random audio scanned by the package's
 ``OnsetTracker``, so the page's reading of the contract and its onset rule cannot drift from the
-processor's. The test is skipped when ``node`` is not installed.
+processor's. That test is skipped when ``node`` is not installed, and the one that asks the bot's
+server for the page when the example extra is not.
 """
 
 import base64
@@ -21,7 +22,7 @@ from pipecat_spatialreal import envelope
 from pipecat_spatialreal.onset import OnsetTracker
 from pipecat_spatialreal.proto.generated import avatar_pb2
 
-PAGE = Path(__file__).resolve().parent.parent / "examples" / "probe" / "receiver.html"
+PAGE = Path(__file__).resolve().parent.parent / "examples" / "probe" / "index.html"
 CHECK = Path(__file__).with_name("probe_check.mjs")
 
 TURN_A = "aaaaaaaa-1111-4111-8111-111111111111"
@@ -78,6 +79,25 @@ def _audio(rate: int = 48000, threshold: int = 328, min_silence_ms: int = 150) -
         "min_silence_ms": min_silence_ms,
         "onsets": [round(ms * rate / 1000) for ms in onsets_ms],
     }
+
+
+async def test_the_bot_serves_the_probe_at_probe():
+    # The URL the README, examples/README.md and bot.py give for the probe.
+    reason = "needs the example extra: uv sync --extra example"
+    pytest.importorskip("fastapi", reason=reason)
+    pytest.importorskip("dotenv", reason=reason)
+    pytest.importorskip("pipecat.runner.run", reason=reason, exc_type=ImportError)
+    import httpx
+    from example_loader import load_bot
+    from pipecat.runner.run import app
+
+    load_bot()  # registers the pages on the runner's app
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:7860") as client:
+        reply = await client.get("/probe/", params={"mic": "1"})
+
+    assert reply.status_code == 200
+    assert reply.text == PAGE.read_text()
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")

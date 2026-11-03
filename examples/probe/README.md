@@ -2,10 +2,10 @@
 
 The processor announces the audible onsets of each turn (`turn_start.onsets_ms`) and sends the
 animation ahead of the audio. The web SDK has to find the same onsets in the audio it receives and
-anchor the animation there. `receiver.html` checks that on a real Daily room: it joins as a
-listener, reads the avatar envelope from the room's app messages, taps the bot's audio track, and
-prints how the two line up. It is a tool for developing this package, not part of what a customer
-ships.
+anchor the animation there. The probe page, `index.html`, checks that on a real Daily room: it
+joins as a listener, reads the avatar envelope from the room's app messages, taps the bot's audio
+track, and prints how the two line up. It is a tool for developing this package, not part of what a
+customer ships.
 
 The page never plays the bot. The track goes into a muted AudioWorklet, held by a media element at
 volume 0 (Chrome feeds a remote track to Web Audio only while an element holds it), and the graph
@@ -22,21 +22,21 @@ quantisation as the web SDK.
 uv run python examples/bot.py -t daily
 ```
 
-Open <http://localhost:7860/probe/receiver.html?mic=1> and press Start. The page asks the runner
+Open <http://localhost:7860/probe/?mic=1> and press Start. The page asks the runner
 for a room (`POST /start`), joins it and taps the bot. `mic=1` publishes your microphone, so you
 talk to the bot from this tab. Because the page is silent, read the bot's side in the terminal; to
 hear it, join the room (the status line shows its URL) from another device with headphones. The
 bot ends its session when any participant leaves. Keep the probe tab in the foreground, and press
 **Leave** when you are done: the capture stays on the page until you close it.
 
-To join a room that already exists, pass it: `receiver.html?room=<room url>&token=<token>`. A room
-and token come from `POST /start` with `{"transport": "daily", "createDailyRoom": true}`; they are
-the `dailyRoom` and `dailyToken` of the reply.
+To join a room that already exists, pass it: `/probe/?room=<room url>&token=<token>`. A room and
+token come from `POST /start` with `{"transport": "daily", "createDailyRoom": true}`; they are the
+`dailyRoom` and `dailyToken` of the reply.
 
 | URL parameter | Meaning | Default |
 |---|---|---|
 | `room`, `token` | Join this Daily room instead of starting a session. | start one |
-| `runner` | Origin of the runner that answers `POST /start`. | this origin |
+| `runner` | Origin of the runner that answers `POST /start`, for a copy of the page served elsewhere. The runner answers it only when its `PIPECAT_ALLOWED_ORIGINS` lists that page's origin (`env.example` lists only the bot's own). | this origin |
 | `mic` | `1` publishes the microphone. | off |
 | `bot` | Part of the bot participant's name; only its audio is tapped. | `bot` (the runner names it "Pipecat Bot") |
 | `threshold` | Largest PCM16 sample that still counts as silence. Must equal the processor's `threshold`. | 328 |

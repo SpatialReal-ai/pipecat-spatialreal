@@ -1,4 +1,4 @@
-// Runs the analysis code of examples/probe/receiver.html (its <script id="analysis"> block) under
+// Runs the analysis code of examples/probe/index.html (its <script id="analysis"> block) under
 // Node. tests/test_probe_page.py runs it: usage `node probe_check.mjs <page> <fixture.json>`, where
 // the fixture holds envelope messages built by pipecat_spatialreal.envelope and random audio with
 // the onsets the package's OnsetTracker finds in it.
