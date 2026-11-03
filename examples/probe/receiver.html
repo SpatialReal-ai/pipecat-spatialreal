@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpatialReal Pipecat probe</title>
+<script src="https://unpkg.com/@daily-co/daily-js@0.94.0/dist/daily.js"></script>
+<style>
+  :root { color-scheme: light dark; --ok: #11773a; --bad: #c0261c; --muted: #6b7280; --line: #c5c8ce; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ok: #5fd68a; --bad: #ff7b72; --muted: #9aa0a6; --line: #4a4f57; }
+  }
+  body { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 16px; max-width: 1280px; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  h2 { font-size: 14px; margin: 22px 0 6px; }
+  p { margin: 4px 0; }
+  button { font: inherit; padding: 4px 10px; }
+  .muted { color: var(--muted); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid var(--line); padding: 2px 8px; text-align: right; white-space: nowrap; }
+  th { font-weight: 600; }
+  th.l, td.l { text-align: left; }
+  .ok { color: var(--ok); }
+  .bad { color: var(--bad); font-weight: 600; }
+  ul { margin: 0; padding-left: 18px; }
+  pre { white-space: pre-wrap; margin: 0; }
+</style>
+</head>
+<body>
+<h1>SpatialReal Pipecat probe</h1>
+<p class="muted">A silent receiver for one Pipecat room. It joins as a listener, taps the bot's audio
+  track into a muted AudioWorklet (the track is never played here), reads the avatar envelope from
+  the room's app messages and prints how the two line up. Keep this tab in the foreground.</p>
+
+<div class="row">
+  <button id="start">Start</button>
+  <button id="leave" disabled>Leave</button>
+  <button id="dl-jsonl" disabled>download capture.jsonl</button>
+  <button id="dl-wav" disabled>download capture.wav</button>
+  <span id="status" class="muted">press Start</span>
+  <span id="live" class="muted"></span>
+</div>
+<p id="summary"></p>
+<div class="scroll">
+<table id="turns">
+  <thead><tr>
+    <th class="l">turn</th>
+    <th title="detected audio onset minus the arrival of turn_start; at least 100 ms">lead ms</th>
+    <th title="chunks arrived / chunk_count, bytes, and how long before the onset the last chunk arrived">segment 0</th>
+    <th title="turn_start.onsets_ms[0]">onsets_ms[0]</th>
+    <th title="lead minus onsets_ms[0]: the audio path's delay over the message path's; should stay put from turn to turn">skew ms</th>
+    <th title="tapped minus announced spacing of the later onsets, or of a chained turn's first onset; at most 40 ms">onset &Delta; ms</th>
+    <th class="l">end</th>
+    <th title="turn_abort minus the user-started-speaking message; at most 300 ms">abort &Delta; ms</th>
+    <th class="l">result</th>
+  </tr></thead>
+  <tbody></tbody>
+</table>
+</div>
+
+<h2>Contract problems</h2>
+<ul id="problems"></ul>
+
+<h2>Timeline</h2>
+<pre id="timeline"></pre>
+
+<script id="analysis">
+'use strict'
+// Analysis: no DOM, no clock. analyze() is a pure function of the three raw logs the page keeps,
+// and the page calls it again after every event, so a message that arrives late only changes the
+// row it belongs to.
+
+const FPS = 25
+const LEAD_MIN_MS = 100     // turn_start arrives at least this long before the audible onset
+const ONSET_TOL_MS = 40     // announced against tapped onsets
+const ABORT_MAX_MS = 300    // user-started-speaking to turn_abort
+const APP_MESSAGE_MAX = 4096 // Daily's cap on one app message, in bytes
+const LATE_START_MS = 1500  // an onset may precede the arrival of its turn_start by this much
+const AFTER_CLOSE_MS = 800  // ... or follow its turn_end / turn_abort (audio trails the messages)
+const LATER_TOL_MS = 120    // how far from its announced place a later onset is still looked for
+
+// Every key of a payload member is present (avatar.proto, JSON rules); a missing key is a bug.
+const PAYLOAD_KEYS = {
+  turn_start: ['turn_id', 'sample_rate', 'fps', 'onsets_ms', 'prev_turn_id', 'prev_turn_pcm_ms', 'degraded'],
+  turn_onsets: ['turn_id', 'onsets_ms'],
+  frames: ['turn_id', 'segment_seq', 'chunk_index', 'chunk_count', 'data', 'end'],
+  turn_end: ['turn_id', 'pcm_ms', 'segment_count'],
+  turn_abort: ['turn_id'],
+  state: ['status', 'reason'],
+}
+
+/** The PCM16 value of a float sample, quantised as the web SDK's detector does. */
+function toPcm16(x) {
+  const s = x < -1 ? -1 : x > 1 ? 1 : x
+  return s < 0 ? (s * 0x8000) | 0 : (s * 0x7fff) | 0
+}
+
+/**
+ * The processor's onset rule on tapped samples (pipecat-spatialreal OnsetTracker, web SDK
+ * OnsetDetector): a sample is audible when |pcm16| > threshold, and an onset is an audible sample
+ * after at least ceil(minSilenceMs * rate / 1000) quiet ones. The stream's leading run counts.
+ */
+class OnsetDetector {
+  constructor(rate, threshold, minSilenceMs) {
+    this.threshold = threshold
+    this.minSilence = Math.ceil((minSilenceMs * rate) / 1000)
+    this.quiet = Infinity
+  }
+
+  /** Feed the next block; returns the indices, within the block, of the onsets in it. */
+  push(block) {
+    const found = []
+    for (let i = 0; i < block.length; i++) {
+      if (Math.abs(toPcm16(block[i])) > this.threshold) {
+        if (this.quiet >= this.minSilence) found.push(i)
+        this.quiet = 0
+      } else {
+        this.quiet++
+      }
+    }
+    return found
+  }
+}
+
+function decodeBase64(text) {
+  const binary = atob(text)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+/** The segment's driveningress message: its chunks joined in chunk_index order, or null. */
+function reassemble(segment) {
+  if (!(segment.count >= 1) || segment.chunks.size !== segment.count) return null
+  const parts = []
+  for (let i = 0; i < segment.count; i++) {
+    const part = segment.chunks.get(i)
+    if (!part) return null
+    parts.push(part)
+  }
+  const wire = new Uint8Array(parts.reduce((n, part) => n + part.length, 0))
+  let offset = 0
+  for (const part of parts) {
+    wire.set(part, offset)
+    offset += part.length
+  }
+  return wire
+}
+
+const short = id => String(id).slice(0, 8)
+
+/** [kind, body] of the one payload member of an AvatarMessage, or null. */
+function payloadOf(data) {
+  const members = Object.keys(data).filter(key => key !== 'tag')
+  const body = members.length === 1 ? data[members[0]] : null
+  return PAYLOAD_KEYS[members[0]] && body && typeof body === 'object' ? [members[0], body] : null
+}
+
+/** What one AvatarMessage gets wrong about the JSON rules of avatar.proto. */
+function envelopeProblems(data) {
+  const out = []
+  const members = Object.keys(data).filter(key => key !== 'tag')
+  if (members.length !== 1) out.push(`${members.length} payload members (${members.join(', ') || 'none'}); exactly one expected`)
+  for (const member of members) {
+    const body = data[member]
+    if (!PAYLOAD_KEYS[member]) out.push(`unknown payload member "${member}"`)
+    else if (!body || typeof body !== 'object') out.push(`${member} is not an object`)
+    else for (const key of PAYLOAD_KEYS[member]) if (!(key in body)) out.push(`${member}.${key} is missing; every key is present`)
+  }
+  return out
+}
+
+function newTurn(id, first) {
+  return {
+    id, first,
+    start: null, startBody: null,          // the turn_start record and its payload
+    onsetsMs: [], onsetMessages: [],       // announced onsets: turn_start's, then each turn_onsets'
+    segments: new Map(),                   // segment_seq -> segment
+    end: null, endBody: null, abort: null,
+    primary: null, later: [],              // tapped onsets: the first, and by announced index
+  }
+}
+
+/** Fold one frames chunk into its segment, reporting every way it breaks the contract. */
+function addChunk(turn, rec, frames, problem) {
+  const where = `${short(turn.id)} segment ${frames.segment_seq}`
+  let segment = turn.segments.get(frames.segment_seq)
+  if (!segment) {
+    segment = { seq: frames.segment_seq, count: frames.chunk_count, end: frames.end, chunks: new Map(), firstT: rec.t, lastT: rec.t }
+    turn.segments.set(frames.segment_seq, segment)
+  }
+  if (!(frames.chunk_count >= 1)) problem(rec.t, `${where}: chunk_count ${frames.chunk_count}, at least 1 expected`)
+  if (frames.chunk_count !== segment.count) problem(rec.t, `${where}: chunk_count changes from ${segment.count} to ${frames.chunk_count}`)
+  if (frames.end !== segment.end) problem(rec.t, `${where}: end differs between the chunks of one segment`)
+  if (!Number.isInteger(frames.chunk_index) || frames.chunk_index < 0 || frames.chunk_index >= frames.chunk_count) {
+    problem(rec.t, `${where}: chunk_index ${frames.chunk_index} outside 0..${frames.chunk_count - 1} (0-based)`)
+  } else if (segment.chunks.has(frames.chunk_index)) {
+    problem(rec.t, `${where}: chunk ${frames.chunk_index} arrived twice`)
+  } else {
+    try {
+      segment.chunks.set(frames.chunk_index, decodeBase64(frames.data))
+    } catch (e) {
+      problem(rec.t, `${where}: chunk ${frames.chunk_index} is not base64`)
+    }
+  }
+  segment.lastT = Math.max(segment.lastT, rec.t)
+}
+
+/** The latest marker of `type` within [t - back, t + ahead] that is not after t, else the first after. */
+function markerNear(markers, type, t, back, ahead) {
+  const near = markers.filter(m => m.type === type && m.t >= t - back && m.t <= t + ahead)
+  const before = near.filter(m => m.t <= t)
+  return before.length ? before[before.length - 1] : near[0] ?? null
+}
+
+/**
+ * Derive everything the page shows from the raw logs.
+ *
+ * log:     [{ t, tap, size, data }]  accepted avatar messages, in arrival order (t = Date.now())
+ * onsets:  [{ pos, wall, level }]    onsets found in the tapped track (pos = tap sample, wall = ms)
+ * markers: [{ t, type }]             RTVI messages about the conversation (user-started-speaking, ...)
+ * rate:    the AudioContext's sample rate, which is the rate of `pos`
+ */
+function analyze({ log, onsets, markers, rate }) {
+  const problems = []
+  const states = []
+  const events = []
+  const turns = new Map()
+  const problem = (t, text) => problems.push({ t, text })
+  const toMs = samples => (samples * 1000) / rate
+  const toSamples = ms => Math.round((ms * rate) / 1000)
+
+  // 1. Group the envelope by turn, checking each message against the contract on the way.
+  for (const rec of log) {
+    for (const text of envelopeProblems(rec.data)) problem(rec.t, text)
+    if (rec.size > APP_MESSAGE_MAX) problem(rec.t, `a message of ${rec.size} bytes exceeds Daily's ${APP_MESSAGE_MAX}-byte app-message limit`)
+    const payload = payloadOf(rec.data)
+    if (!payload) continue
+    const [kind, body] = payload
+    if (kind === 'state') {
+      states.push({ t: rec.t, status: body.status, reason: body.reason })
+      if (body.status === 'STATUS_UNSPECIFIED') problem(rec.t, 'state with STATUS_UNSPECIFIED, which is never sent')
+      events.push({ t: rec.t, text: `state ${body.status}${body.reason ? ` "${body.reason}"` : ''}` })
+      continue
+    }
+    const id = body.turn_id
+    if (typeof id !== 'string' || !id) {
+      problem(rec.t, `${kind} without a turn_id`)
+      continue
+    }
+    if (!turns.has(id)) turns.set(id, newTurn(id, rec))
+    const turn = turns.get(id)
+    const tag = short(id)
+    switch (kind) {
+      case 'turn_start':
+        if (turn.start) {
+          problem(rec.t, `${tag}: a second turn_start`)
+          break
+        }
+        if (turn.segments.size) problem(rec.t, `${tag}: frames arrived before turn_start`)
+        turn.start = rec
+        turn.startBody = body
+        turn.onsetsMs = Array.isArray(body.onsets_ms) ? body.onsets_ms.slice() : []
+        if (body.fps !== FPS) problem(rec.t, `${tag}: fps ${body.fps}, ${FPS} expected`)
+        if (!(body.sample_rate > 0)) problem(rec.t, `${tag}: sample_rate ${body.sample_rate}`)
+        break
+      case 'turn_onsets': {
+        const added = Array.isArray(body.onsets_ms) ? body.onsets_ms : []
+        if (!turn.start) problem(rec.t, `${tag}: turn_onsets before turn_start`)
+        if (!added.length) problem(rec.t, `${tag}: turn_onsets with an empty list, which is never sent`)
+        let last = turn.onsetsMs.length ? turn.onsetsMs[turn.onsetsMs.length - 1] : -Infinity
+        for (const onset of added) {
+          if (!(onset > last)) problem(rec.t, `${tag}: turn_onsets entry ${onset} does not come after ${last}`)
+          last = onset
+        }
+        turn.onsetsMs.push(...added)
+        turn.onsetMessages.push({ t: rec.t, added })
+        break
+      }
+      case 'frames':
+        if (!turn.start) problem(rec.t, `${tag}: frames before turn_start`)
+        if (turn.end || turn.abort) problem(rec.t, `${tag}: frames after ${turn.end ? 'turn_end' : 'turn_abort'}`)
+        addChunk(turn, rec, body, problem)
+        break
+      case 'turn_end':
+        if (!turn.start) problem(rec.t, `${tag}: turn_end for a turn never announced`)
+        if (turn.abort) problem(rec.t, `${tag}: turn_end after turn_abort`)
+        if (turn.end) problem(rec.t, `${tag}: a second turn_end`)
+        turn.end = rec
+        turn.endBody = body
+        break
+      case 'turn_abort':
+        if (!turn.start) problem(rec.t, `${tag}: turn_abort for a turn never announced; an interrupted turn without turn_start is not announced at all`)
+        if (turn.end) problem(rec.t, `${tag}: turn_abort after turn_end`)
+        if (turn.abort) problem(rec.t, `${tag}: a second turn_abort`)
+        turn.abort = rec
+        break
+    }
+  }
+  const list = [...turns.values()]
+
+  // 2. Reassemble the segments and check their numbering.
+  for (const turn of list) {
+    const tag = short(turn.id)
+    for (const segment of turn.segments.values()) {
+      segment.wire = reassemble(segment)
+      segment.complete = segment.wire !== null
+      segment.bytes = segment.wire ? segment.wire.length : [...segment.chunks.values()].reduce((n, c) => n + c.length, 0)
+    }
+    const seqs = [...turn.segments.keys()].sort((a, b) => a - b)
+    const t = turn.first.t
+    if (seqs.some((seq, i) => seq !== i)) problem(t, `${tag}: segment_seq runs ${seqs.join(', ')}; 0, 1, 2, ... without gaps expected`)
+    const ends = seqs.filter(seq => turn.segments.get(seq).end)
+    if (ends.length > 1) problem(t, `${tag}: end is set on segments ${ends.join(', ')}; only the last carries it`)
+    else if (ends.length === 1 && ends[0] !== seqs[seqs.length - 1]) problem(t, `${tag}: segment ${seqs[seqs.length - 1]} follows the end segment ${ends[0]}`)
+    if (turn.end) {
+      if (turn.endBody.segment_count !== turn.segments.size) problem(turn.end.t, `${tag}: turn_end counts ${turn.endBody.segment_count} segments, ${turn.segments.size} arrived`)
+      for (const segment of turn.segments.values()) {
+        if (!segment.complete) problem(turn.end.t, `${tag}: segment ${segment.seq} has ${segment.chunks.size}/${segment.count} chunks at turn_end`)
+      }
+    }
+  }
+
+  // 3. Pair the tapped onsets with the turns, in time order. An onset is first a later onset of
+  //    a turn already placed (it falls where onsets_ms says one should), else the first onset of
+  //    the oldest turn that can still own it, else a stray.
+  const strays = []
+  const canOwn = (turn, onset) => {
+    if (!turn.start) return false
+    const closed = turn.end ? turn.end.t : turn.abort ? turn.abort.t : Infinity
+    return onset.wall >= turn.start.t - LATE_START_MS && onset.wall <= closed + AFTER_CLOSE_MS
+  }
+  const owner = new Map()
+  for (const onset of onsets) {
+    let claimed = false
+    for (const turn of list) {
+      if (!turn.primary) continue
+      for (let k = 1; k < turn.onsetsMs.length && !claimed; k++) {
+        if (turn.later[k]) continue
+        const expected = turn.primary.pos + toSamples(turn.onsetsMs[k] - turn.onsetsMs[0])
+        if (Math.abs(onset.pos - expected) <= toSamples(LATER_TOL_MS)) {
+          turn.later[k] = onset
+          owner.set(onset, { turn, k })
+          claimed = true
+        }
+      }
+      if (claimed) break
+    }
+    if (claimed) continue
+    const turn = list.find(t => !t.primary && canOwn(t, onset))
+    if (turn) {
+      turn.primary = onset
+      owner.set(onset, { turn, k: 0 })
+    } else {
+      strays.push(onset)
+    }
+  }
+  for (const onset of strays) problem(onset.wall, `an audible onset that no turn_start accounts for (the web SDK would play it as plain audio)`)
+
+  // 4. One row per turn.
+  for (const turn of list) {
+    const row = (turn.row = { id: turn.id, short: short(turn.id), fails: [], notes: [], laterErrs: [] })
+    if (!turn.start) {
+      row.fails.push('no turn_start')
+      continue
+    }
+    const start = turn.startBody
+    row.degraded = !!start.degraded
+    row.o0 = turn.onsetsMs.length ? turn.onsetsMs[0] : null
+    if (start.degraded) row.fails.push('turn_start.degraded')
+    if (turn.primary) {
+      row.lead = turn.primary.wall - turn.start.t
+      if (row.lead < LEAD_MIN_MS) row.fails.push(`turn_start only ${Math.round(row.lead)} ms ahead of the onset`)
+      row.skew = row.o0 == null ? null : row.lead - row.o0
+      const segment = turn.segments.get(0)
+      if (segment) {
+        row.seg0 = { chunks: segment.chunks.size, count: segment.count, bytes: segment.bytes, margin: turn.primary.wall - segment.lastT, complete: segment.complete }
+        if (!segment.complete || row.seg0.margin < 0) row.fails.push('segment 0 was not whole before the onset')
+      } else if (!start.degraded) {
+        row.fails.push('no segment 0 before the onset')
+      }
+      for (let k = 1; k < turn.onsetsMs.length; k++) {
+        const heard = turn.later[k]
+        if (heard) {
+          const err = toMs(heard.pos - turn.primary.pos) - (turn.onsetsMs[k] - turn.onsetsMs[0])
+          row.laterErrs.push(err)
+          if (Math.abs(err) > ONSET_TOL_MS) row.fails.push(`onset ${k} is ${Math.round(err)} ms off`)
+        } else if (turn.end) {
+          row.fails.push(`onset ${k} (${turn.onsetsMs[k]} ms) was not heard`)
+        }
+      }
+      if (start.prev_turn_id) {
+        // A chained turn begins where the previous one's audio ends, which fixes its first onset.
+        const prev = turns.get(start.prev_turn_id)
+        if (prev && prev.primary && prev.onsetsMs.length && row.o0 != null) {
+          const expected = prev.primary.pos - toSamples(prev.onsetsMs[0]) + toSamples(start.prev_turn_pcm_ms) + toSamples(row.o0)
+          row.chainErr = toMs(turn.primary.pos - expected)
+          if (Math.abs(row.chainErr) > ONSET_TOL_MS) row.fails.push(`chained onset is ${Math.round(row.chainErr)} ms off`)
+        } else {
+          row.notes.push('chained to a turn that was not measured')
+        }
+      }
+    } else if (turn.end) {
+      row.fails.push('no audible onset was heard')
+    }
+    if (turn.end) row.end = { at: turn.end.t - turn.start.t, pcmMs: turn.endBody.pcm_ms, segments: turn.endBody.segment_count }
+    if (turn.abort) {
+      row.abort = { at: turn.abort.t - turn.start.t, sinceUser: null }
+      const user = markerNear(markers, 'user-started-speaking', turn.abort.t, 3000, 200)
+      if (user) {
+        row.abort.sinceUser = turn.abort.t - user.t
+        if (row.abort.sinceUser > ABORT_MAX_MS) row.fails.push(`turn_abort ${Math.round(row.abort.sinceUser)} ms after the user began`)
+      } else {
+        row.notes.push('no user-started-speaking message to time the abort against')
+      }
+    }
+    row.status = row.fails.length ? 'fail' : turn.end || turn.abort ? 'pass' : 'pending'
+  }
+
+  // 5. The timeline.
+  for (const turn of list) {
+    if (!turn.start) continue
+    const tag = short(turn.id)
+    const sb = turn.startBody
+    const prev = sb.prev_turn_id ? `${short(sb.prev_turn_id)} (${sb.prev_turn_pcm_ms} ms)` : '-'
+    events.push({ t: turn.start.t, text: `[${tag}] turn_start  sample_rate=${sb.sample_rate} onsets_ms=[${turn.startBody.onsets_ms}] prev=${prev} degraded=${sb.degraded}` })
+  }
+  for (const turn of list) {
+    const tag = short(turn.id)
+    for (const segment of turn.segments.values()) {
+      events.push({ t: segment.firstT, text: `[${tag}] frames segment ${segment.seq}  ${segment.chunks.size}/${segment.count} chunks  ${segment.bytes} B  end=${segment.end}  (assembled in ${segment.lastT - segment.firstT} ms)` })
+    }
+    for (const m of turn.onsetMessages) events.push({ t: m.t, text: `[${tag}] turn_onsets [${m.added}]` })
+    if (turn.end) events.push({ t: turn.end.t, text: `[${tag}] turn_end  pcm_ms=${turn.endBody.pcm_ms} segment_count=${turn.endBody.segment_count}` })
+    if (turn.abort) events.push({ t: turn.abort.t, text: `[${tag}] turn_abort` })
+  }
+  for (const onset of onsets) {
+    const o = owner.get(onset)
+    const where = o ? `[${short(o.turn.id)}] ${o.k === 0 ? `first onset, ${Math.round(onset.wall - o.turn.start.t)} ms after turn_start` : `onset ${o.k}`}` : 'no turn accounts for it'
+    events.push({ t: onset.wall, text: `tap onset at sample ${onset.pos}, level ${onset.level.toFixed(3)}: ${where}` })
+  }
+  for (const m of markers) events.push({ t: m.t, text: `rtvi ${m.type}` })
+  events.sort((a, b) => a.t - b.t)
+
+  return { turns: list.map(turn => turn.row), problems, states, strays, events }
+}
+</script>
+
+<script>
+'use strict'
+// The page: Daily, the audio tap, the recorders and the rendering. All numbers come from analyze().
+
+const params = new URLSearchParams(location.search)
+const ROOM = params.get('room')                                   // join this room; else POST /start
+const TOKEN = params.get('token')                                 // the room's meeting token, if any
+const RUNNER = (params.get('runner') || '').replace(/\/$/, '')    // where /start lives, default this origin
+const WITH_MIC = params.get('mic') === '1'                        // publish the microphone: be the user
+const BOT_NAME = (params.get('bot') || 'bot').toLowerCase()       // part of the bot participant's name
+const THRESHOLD = Number(params.get('threshold') || 328)          // must equal the processor's threshold
+const MIN_SILENCE_MS = Number(params.get('min_silence_ms') || 150) // ... and its min_silence_ms
+
+const $ = id => document.getElementById(id)
+const log = []        // accepted avatar messages: { t, tap, size, data }
+const onsets = []     // onsets found in the tapped track: { pos, wall, level }
+const markers = []    // RTVI messages that time a barge-in: { t, type }
+
+let ctx = null
+let rate = 0
+let call = null
+let detector = null
+let botTrackId = null
+let tapPos = 0        // samples of the bot track received so far
+let lastAudible = 0   // wall time of the latest block with sound
+const keepalive = []  // the silent media elements Chrome needs (see tap())
+
+const status = text => { $('status').textContent = text }
+
+/** Samples tapped from the bot track, as PCM16 pages: the source of capture.wav. */
+class Recorder {
+  constructor(pageSamples) {
+    this.pageSamples = pageSamples
+    this.pages = []
+    this.length = 0
+  }
+
+  push(value) {
+    const at = this.length % this.pageSamples
+    if (at === 0) this.pages.push(new Int16Array(this.pageSamples))
+    this.pages[this.pages.length - 1][at] = value
+    this.length++
+  }
+
+  /** A mono 16-bit WAV file at `rate` Hz. */
+  toWav(rate) {
+    const bytes = this.length * 2
+    const buffer = new ArrayBuffer(44 + bytes)
+    const view = new DataView(buffer)
+    const text = (offset, s) => { for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i)) }
+    text(0, 'RIFF'); view.setUint32(4, 36 + bytes, true); text(8, 'WAVE'); text(12, 'fmt ')
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true)
+    view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true)
+    text(36, 'data'); view.setUint32(40, bytes, true)
+    const samples = new Int16Array(buffer, 44, this.length)
+    this.pages.forEach((page, i) => samples.set(page.subarray(0, Math.min(this.pageSamples, this.length - i * this.pageSamples)), i * this.pageSamples))
+    return new Blob([buffer], { type: 'audio/wav' })
+  }
+}
+let recorder = null
+
+// --- the tap
+
+const WORKLET = `class Tap extends AudioWorkletProcessor {
+  process(inputs) { const c = inputs[0] && inputs[0][0]; if (c) this.port.postMessage(c.slice()); return true }
+}
+registerProcessor('tap', Tap)`
+
+/** Route the bot's track into a muted worklet. Nothing here is audible. */
+function tap(track) {
+  const stream = new MediaStream([track])
+  // Chrome feeds a remote WebRTC track to Web Audio only while a media element holds it. This
+  // one plays at volume 0, and the graph below ends in a gain of 0: the track is never heard.
+  const element = new Audio()
+  element.srcObject = stream
+  element.volume = 0
+  element.hidden = true
+  document.body.appendChild(element)
+  keepalive.push(element)
+  element.play().catch(e => status(`the keep-alive element was refused: ${e.message}`))
+
+  const node = new AudioWorkletNode(ctx, 'tap')
+  const mute = ctx.createGain()
+  mute.gain.value = 0
+  ctx.createMediaStreamSource(stream).connect(node)
+  node.connect(mute)
+  mute.connect(ctx.destination)
+  node.port.onmessage = e => onBlock(e.data, Date.now())
+  detector = new OnsetDetector(rate, THRESHOLD, MIN_SILENCE_MS)
+  status(`tapping the bot's track at ${rate} Hz, silently; waiting for speech`)
+}
+
+function onBlock(block, wall) {
+  const n = block.length
+  let peak = 0
+  for (let i = 0; i < n; i++) {
+    recorder.push(toPcm16(block[i]))
+    const a = Math.abs(block[i])
+    if (a > peak) peak = a
+  }
+  const found = detector.push(block)
+  for (const i of found) {
+    // The block ends about now; the sample at index i was heard (n - i) samples earlier.
+    onsets.push({ pos: tapPos + i, wall: wall - ((n - i) * 1000) / rate, level: Math.abs(block[i]) })
+  }
+  tapPos += n
+  if (peak * 32768 > THRESHOLD) lastAudible = wall
+  if (found.length) schedule()
+}
+
+// --- the room
+
+function onTrackStarted(ev) {
+  if (ev.type !== 'audio' || !ev.participant || ev.participant.local) return
+  const name = ev.participant.user_name || ''
+  if (!name.toLowerCase().includes(BOT_NAME)) {
+    status(`not tapping the audio of "${name || ev.participant.session_id}"; add ?bot=<part of the bot's name> to tap it`)
+    return
+  }
+  if (botTrackId === ev.track.id) return
+  botTrackId = ev.track.id
+  tap(ev.track)
+}
+
+function onAppMessage(data, wall) {
+  if (!data || data.label !== 'rtvi-ai') return
+  if (data.type === 'server-message') {
+    if (!data.data || data.data.tag !== 'spatialreal-avatar') return
+    // Date.now() when it arrived; the tap position places it in capture.wav.
+    log.push({ t: wall, tap: tapPos, size: JSON.stringify(data).length, data: data.data })
+  } else if (data.type === 'user-started-speaking' || data.type === 'bot-interrupted') {
+    markers.push({ t: wall, type: data.type })
+  } else {
+    return
+  }
+  schedule()
+}
+
+async function startBot() {
+  const response = await fetch(`${RUNNER}/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ transport: 'daily', createDailyRoom: true }),
+  })
+  if (!response.ok) throw new Error(`POST ${RUNNER}/start answered ${response.status}; see the bot's console`)
+  const started = await response.json()
+  if (!started || !started.dailyRoom) throw new Error('POST /start returned no dailyRoom; run the bot with -t daily and a DAILY_API_KEY')
+  return { room: started.dailyRoom, token: started.dailyToken }
+}
+
+async function join(room, token) {
+  call = DailyIframe.createCallObject(WITH_MIC ? { videoSource: false } : { videoSource: false, audioSource: false })
+  call.on('track-started', onTrackStarted)
+  call.on('track-stopped', ev => { if (ev.track && ev.track.id === botTrackId) status("the bot's track stopped") })
+  call.on('app-message', ev => onAppMessage(ev.data, Date.now()))
+  call.on('error', ev => status(`Daily error: ${ev.errorMsg || JSON.stringify(ev)}`))
+  call.on('left-meeting', () => { $('leave').disabled = true; status('left the room; the capture is still here') })
+  const options = { url: room, userName: 'SpatialReal probe', startVideoOff: true, startAudioOff: !WITH_MIC }
+  if (token) options.token = token
+  await call.join(options)
+  status(`joined ${room}${WITH_MIC ? ' with the microphone on' : ''}; waiting for the bot's track`)
+}
+
+$('start').onclick = async () => {
+  $('start').disabled = true
+  try {
+    // Inside the click: the AudioContext may start, and the worklet is ready before the track.
+    ctx = new AudioContext()
+    await ctx.resume()
+    rate = ctx.sampleRate
+    recorder = new Recorder(rate * 5)
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })))
+    let room = ROOM
+    let token = TOKEN
+    if (!room) {
+      status('starting a bot session (POST /start)')
+      ;({ room, token } = await startBot())
+    }
+    await join(room, token)
+    $('leave').disabled = false
+  } catch (e) {
+    status(`failed: ${e.message || e}`)
+    $('start').disabled = false
+  }
+}
+$('leave').onclick = () => { if (call) call.leave() }
+
+// --- downloads
+
+function download(name, blob) {
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = name
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(link.href), 10000)
+}
+$('dl-jsonl').onclick = () => {
+  // One object per line. `data` is the AvatarMessage, the very object onServerMessage hands to
+  // session.handleServerMessage(); `tap` is how many samples of capture.wav had arrived.
+  const lines = log.map(r => JSON.stringify({ t: r.t, tap: r.tap, data: r.data }))
+  download('capture.jsonl', new Blob([lines.join('\n') + '\n'], { type: 'application/x-ndjson' }))
+}
+$('dl-wav').onclick = () => download('capture.wav', recorder.toWav(rate))
+
+// --- rendering
+
+let pending = false
+function schedule() {
+  if (pending) return
+  pending = true
+  setTimeout(() => { pending = false; render() }, 100)
+}
+
+const cell = (text, cls = '') => {
+  const td = document.createElement('td')
+  td.textContent = text
+  if (cls) td.className = cls
+  return td
+}
+const signed = (n, digits = 0) => (n >= 0 ? '+' : '-') + Math.abs(n).toFixed(digits)
+const clock = t => {
+  const d = new Date(t)
+  return `${d.toTimeString().slice(0, 8)}.${String(d.getMilliseconds()).padStart(3, '0')}`
+}
+
+function render() {
+  let result
+  try {
+    result = analyze({ log, onsets, markers, rate: rate || 48000 })
+  } catch (e) {
+    $('summary').textContent = `analysis failed: ${e.message}`
+    return
+  }
+  const rows = result.turns
+  const count = status => rows.filter(r => r.status === status).length
+  const degraded = result.states.filter(s => s.status === 'STATUS_DEGRADED').length
+  $('summary').innerHTML = ''
+  const summary = document.createElement('span')
+  summary.textContent = `${rows.length} turns: ${count('pass')} pass, ${count('fail')} fail, ${count('pending')} pending. ` +
+    `state degraded: ${degraded}. contract problems: ${result.problems.length}. stray onsets: ${result.strays.length}.`
+  summary.className = count('fail') || degraded || result.problems.length || result.strays.length ? 'bad' : count('pass') ? 'ok' : 'muted'
+  $('summary').append(summary)
+
+  const body = $('turns').tBodies[0]
+  body.replaceChildren()
+  for (const r of rows) {
+    const tr = document.createElement('tr')
+    const seg = r.seg0
+    tr.append(
+      cell(r.short, 'l'),
+      cell(r.lead == null ? '-' : signed(r.lead), r.lead == null ? '' : r.lead >= LEAD_MIN_MS ? 'ok' : 'bad'),
+      cell(seg ? `${seg.chunks}/${seg.count} chunks, ${seg.bytes} B, ${seg.margin >= 0 ? `${Math.round(seg.margin)} ms before` : `${Math.round(-seg.margin)} ms AFTER`}` : '-', seg ? (seg.complete && seg.margin >= 0 ? 'ok' : 'bad') : ''),
+      cell(r.o0 == null ? '-' : r.o0.toFixed(1)),
+      cell(r.skew == null ? '-' : signed(r.skew)),
+      cell(onsetDelta(r), onsetDeltaClass(r)),
+      cell(r.end ? `end +${Math.round(r.end.at)} ms, pcm ${r.end.pcmMs} ms, ${r.end.segments} seg` : r.abort ? `abort +${Math.round(r.abort.at)} ms` : '-', 'l'),
+      cell(r.abort && r.abort.sinceUser != null ? signed(r.abort.sinceUser) : '-', r.abort && r.abort.sinceUser != null ? (r.abort.sinceUser <= ABORT_MAX_MS ? 'ok' : 'bad') : ''),
+      cell(r.status === 'fail' ? `fail: ${r.fails.join('; ')}` : r.status + (r.notes.length ? ` (${r.notes.join('; ')})` : ''), r.status === 'pass' ? 'l ok' : r.status === 'fail' ? 'l bad' : 'l'),
+    )
+    body.append(tr)
+  }
+
+  const problems = $('problems')
+  problems.replaceChildren()
+  if (!result.problems.length) problems.append(Object.assign(document.createElement('li'), { textContent: 'none', className: 'muted' }))
+  for (const p of result.problems) problems.append(Object.assign(document.createElement('li'), { textContent: `${clock(p.t)}  ${p.text}` }))
+
+  const first = result.events.length ? result.events[0].t : 0
+  $('timeline').textContent = result.events.map(e => `${((e.t - first) / 1000).toFixed(3).padStart(9)} s  ${e.text}`).join('\n')
+
+  $('dl-jsonl').disabled = !log.length
+  $('dl-wav').disabled = !recorder || !recorder.length
+}
+
+function onsetDelta(r) {
+  const parts = r.laterErrs.map(e => signed(e))
+  if (r.chainErr != null) parts.push(`chain ${signed(r.chainErr)}`)
+  return parts.length ? parts.join(', ') : '-'
+}
+function onsetDeltaClass(r) {
+  const all = r.laterErrs.concat(r.chainErr == null ? [] : [r.chainErr])
+  return all.length ? (all.every(e => Math.abs(e) <= ONSET_TOL_MS) ? 'ok' : 'bad') : ''
+}
+
+// A live reading of the tapped track, so a silent probe still shows when the bot is talking.
+setInterval(() => {
+  if (!botTrackId) return
+  const heard = Date.now() - lastAudible < 300
+  $('live').textContent = `| bot audio: ${heard ? 'SOUND' : 'quiet'}, ${log.length} messages, ${onsets.length} onsets`
+}, 250)
+
+render()
+window.probe = { log, onsets, markers, analyze: () => analyze({ log, onsets, markers, rate }) }
+</script>
+</body>
+</html>

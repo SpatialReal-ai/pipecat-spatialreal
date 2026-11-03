@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpatialReal avatar on Pipecat</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0; padding: 16px; display: flex; justify-content: center; }
+  main { width: min(480px, 100%); display: grid; gap: 12px; }
+  #avatar { width: 100%; aspect-ratio: 3 / 4; border-radius: 12px; background: #1b1d22; overflow: hidden; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button { font: inherit; padding: 6px 14px; }
+  #status { opacity: 0.75; }
+  #log { font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; max-height: 14em; overflow: auto; margin: 0; opacity: 0.85; }
+</style>
+</head>
+<body>
+<main>
+  <div id="avatar"></div>
+  <div class="row">
+    <button id="start">Start</button>
+    <button id="stop" disabled>Stop</button>
+    <span id="status" aria-live="polite"></span>
+  </div>
+  <pre id="log"></pre>
+</main>
+
+<script type="module">
+// A Pipecat bot (examples/bot.py) with the SpatialReal avatar in the browser. pipecat-client-js
+// carries the microphone, the bot's audio track and the bot's RTVI messages; the SpatialReal web
+// SDK draws the avatar and plays the bot's voice in step with it.
+import { PipecatClient } from 'https://esm.sh/@pipecat-ai/client-js@1.16.0'
+import { DailyTransport } from 'https://esm.sh/@pipecat-ai/daily-transport@1.7.2?deps=@pipecat-ai/client-js@1.16.0'
+
+const $ = id => document.getElementById(id)
+const params = new URLSearchParams(location.search)
+const RUNNER = (params.get('runner') || '').replace(/\/$/, '')        // the bot's web server; default: this origin
+const TRANSPORT = params.get('transport') === 'livekit' ? 'livekit' : 'daily'  // must match the bot's -t
+
+const say = text => {
+  $('status').textContent = text
+  $('log').textContent += `${new Date().toTimeString().slice(0, 8)}  ${text}\n`
+  $('log').scrollTop = $('log').scrollHeight
+}
+
+// The web SDK's Pipecat session is not on npm yet: examples/client/README.md says how to put it in vendor/.
+let sdk = null
+try {
+  sdk = await import('./vendor/spatialreal-web-sdk.js')
+} catch (e) {
+  $('start').disabled = true
+  say(`vendor/spatialreal-web-sdk.js could not be loaded (${e.message}); see examples/client/README.md`)
+}
+
+let session = null
+let client = null
+
+async function request(path, init) {
+  const response = await fetch(`${RUNNER}${path}`, init)
+  if (!response.ok) {
+    const detail = await response.json().then(body => body.detail, () => '')
+    throw new Error(`${path} answered ${response.status}${detail ? `: ${detail}` : ''}`)
+  }
+  return response.json()
+}
+
+async function makeTransport() {
+  if (TRANSPORT === 'livekit') {
+    const { LiveKitTransport } = await import('https://esm.sh/@pipecat-ai/livekit-transport@1.1.2?deps=@pipecat-ai/client-js@1.16.0')
+    return new LiveKitTransport()
+  }
+  return new DailyTransport()
+}
+
+$('start').onclick = async () => {
+  $('start').disabled = true
+  // Inside the click, before any await: the browser lets this context play. session.start()
+  // runs after the requests below, which is too late for some browsers to unlock audio.
+  const audioContext = sdk.createUnlockedAudioContext()
+  try {
+    // 1. The browser gets a session token from our own backend; the API key never leaves it.
+    say('getting a session token')
+    const { session_token, avatar_id, app_id } = await request('/spatialreal-token')
+
+    // 2. The avatar session loads the avatar into #avatar. For a SpatialReal deployment other
+    //    than production, also pass `endpoints` here.
+    const sr = new sdk.SpatialReal({ appId: app_id })
+    session = await sr.createSession({
+      avatarId: avatar_id, credential: session_token, container: $('avatar'), pipecat: {}, audioContext,
+    })
+    session.on('turn', e => say(`turn ${e.phase} ${e.turnId.slice(0, 8)}`))
+    session.on('degraded', e => say(`avatar degraded to plain audio: ${e.reason}${e.turnId ? ` (turn ${e.turnId.slice(0, 8)})` : ''}`))
+    session.on('error', e => say(`avatar error: ${e.error.message}`))
+    await session.start() // starts playback; opens no connection of its own
+
+    // 3. The bot, over Pipecat's own client.
+    client = new PipecatClient({
+      transport: await makeTransport(),
+      enableMic: true,
+      callbacks: {
+        // The SDK plays the bot's voice itself, lined up with the face. Hand it the track and
+        // never attach the track to an <audio> element (nor use PipecatClientAudio): a second
+        // player would double the voice.
+        onTrackStarted: (track, participant) => {
+          if (!participant?.local && track.kind === 'audio') session?.setBotAudioTrack(track)
+        },
+        // Every RTVI server message goes to the SDK; it takes the avatar's and ignores the rest.
+        onServerMessage: data => session?.handleServerMessage(data),
+        onBotReady: () => say('the bot is ready: say something'),
+        onDisconnected: () => { if (client) say('disconnected'); stop() },
+        onError: message => say(`bot error: ${JSON.stringify(message?.data ?? message)}`),
+      },
+    })
+    say('starting the bot')
+    const body = TRANSPORT === 'livekit' ? { transport: 'livekit' } : { transport: 'daily', createDailyRoom: true }
+    const started = await request('/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    await client.connect(TRANSPORT === 'livekit' ? { url: started.url, token: started.token } : { url: started.dailyRoom, token: started.dailyToken })
+    $('stop').disabled = false
+  } catch (e) {
+    say(`failed: ${e.message || e}`)
+    await stop()
+  }
+}
+
+async function stop() {
+  const [c, s] = [client, session]
+  client = session = null
+  if (c) await c.disconnect().catch(() => {}) // the bot sees its client leave and ends the session
+  if (s) await s.dispose().catch(() => {})
+  $('start').disabled = !sdk
+  $('stop').disabled = true
+}
+$('stop').onclick = async () => { await stop(); say('stopped') }
+</script>
+</body>
+</html>
