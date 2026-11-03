@@ -12,10 +12,18 @@ It sits between the TTS service and ``transport.output()``. Each TTS context, fr
 * When the TTS falls behind playback, the processor plays silence and sends the same silence to
   driveningress, so the audio inference saw and the audio in the room stay sample-identical.
 
-Pipecat's own frames are left alone: everything a turn carries (``TTSStartedFrame``, text,
+Pipecat's own frames keep their order: everything a turn carries (``TTSStartedFrame``, text,
 ``TTSStoppedFrame``, ...) reaches the transport in its original order, only later, so the bot
-speaks, is interrupted and records its context exactly as without the processor. Without an
-animation source (driveningress unreachable, or too slow) the audio still plays, unanimated.
+speaks, is interrupted and has its context aggregated as before, at the delayed playout.
+
+One difference stays. Frames the TTS stamped with a presentation time on its own clock (word
+``TTSTextFrame``s, and ``LLMFullResponseEndFrame`` from services with word timestamps) are past
+that time when they are released, so the transport passes them on as soon as they arrive instead
+of at their audio: up to ``min(hold, lead_ms)`` ahead of it. Transcripts and the assistant
+aggregator therefore run up to ``lead_ms`` (200 ms by default) ahead of the speech they report.
+
+Without an animation source (driveningress unreachable, or too slow) the audio still plays,
+unanimated.
 """
 
 import asyncio
