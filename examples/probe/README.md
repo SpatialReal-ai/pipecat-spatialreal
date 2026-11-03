@@ -56,7 +56,7 @@ late only changes its own row.
 | `skew ms` | `lead` minus `onsets_ms[0]`: how much slower the audio path is than the message path. `-` for a placed turn. | steady from turn to turn |
 | `onset Δ ms` | Tapped minus announced spacing: each later onset against the first, and for a chained turn (`prev_turn_id`) the first onset against where the end of the turn before it puts it (`chain +N`). | within 40 |
 | `end` | `turn_end` (or `turn_abort`) time since `turn_start`, `pcm_ms` and the segment count. | |
-| `abort Δ ms` | `turn_abort` minus Pipecat's `user-started-speaking` message. | at most 300 |
+| `abort Δ ms` | `turn_abort` minus Pipecat's `user-started-speaking` message. Blind to a delay the two messages share (see *What `abort Δ` cannot see* below). | at most 300 |
 | `result` | `pass`, `fail` with the reasons, `unverified` (a placed chained turn, see below) or `pending`. | |
 
 Above the table a line counts the turns that pass, fail, are unverified or are pending, the `state`
@@ -140,6 +140,21 @@ own onset then shows up as a stray. Read the chained turn's failure first.
 confirms speech (`start_secs`, 0.2 s by default). It times the processor's reaction, not the sound
 of the user's first syllable.
 
+### What `abort Δ` cannot see
+
+`abort Δ` is the barge-in criterion (`turn_abort` within 300 ms of `user-started-speaking`), and it
+cannot detect a delay that a burst of `frames` messages adds on the transport's send path. The
+bot's output transport sends RTVI messages one at a time, awaiting each send, in the order they
+were queued; the processor queues a segment's chunks all at once, and Pipecat queues
+`user-started-speaking`, the interruption that stops the bot's audio, and then `turn_abort` behind
+whatever is already waiting. A user who speaks while a segment's chunks are being sent therefore
+delays both messages by the same burst: the bot's audio stops and `turn_abort` arrives that much
+later, but the difference between the two messages stays small, and `abort Δ` passes whatever the
+burst cost. What would show the delay is timing on the audio tracks themselves: the user's first
+sound on the microphone track (`mic=1`) against the moment the bot's audio stops on the tapped track
+and against the arrival of `turn_abort`. The probe measures none of these: that delay is not
+measured.
+
 ## The capture
 
 **download capture.jsonl** saves one JSON object per line, one per avatar message, in arrival
@@ -175,7 +190,9 @@ whether they hold.
      within 40 ms of each other (the section above says what the probe can compare);
    * no `state` message with `STATUS_DEGRADED`;
    * after an interruption, `turn_abort` within 300 ms of Pipecat's `user-started-speaking` message,
-     which arrives about 0.2 s (the VAD's `start_secs`) after the user's first sound.
+     which arrives about 0.2 s (the VAD's `start_secs`) after the user's first sound. This cannot
+     show a delay that both messages share, such as a burst of `frames` queued ahead of them on the
+     transport (see *What `abort Δ` cannot see* above); that delay is not measured.
 
    The summary line should end in `state degraded: 0. contract problems: 0. stray onsets: 0.`
    The turns that count are the ones marked `pass`; an `unverified` turn is not one of the ten. If
