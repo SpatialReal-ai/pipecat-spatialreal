@@ -1,13 +1,27 @@
 name: Protobuf Codegen
 
-# Regenerates src/pipecat_spatialreal/proto/generated/ and commits it once the gate passes.
+# Regenerates src/pipecat_spatialreal/proto/generated/ and commits it once the gates pass.
 #
 # Trigger: shared-proto's tag CI dispatches this workflow; it can also be run by hand here.
 # Pushes and PRs do not trigger it: the contract is released only when shared-proto is tagged.
 # workflow_dispatch only finds workflows that are on the default branch.
 #
 # Auth: the org GitHub App `spatialreal-codegen` (secrets CODEGEN_APP_ID /
-# CODEGEN_APP_PRIVATE_KEY), not a personal token. The App installation must include this repo.
+# CODEGEN_APP_PRIVATE_KEY), not a personal token. The App installation must include this repo and
+# shared-proto.
+#
+# The App can reach every repository of its installation, so neither its key nor a token of its own
+# is ever in a job that runs third-party code. A job is the unit that matters: GitHub gives a job
+# every secret it names when the job starts. Three jobs, in order:
+#
+#   contract  reads the contract from shared-proto with a token that can only read that repository,
+#             and hands pipecat/v1/avatar.proto on. It runs GitHub's own actions and git, nothing
+#             else.
+#   generate  installs the dev extra (freshly resolved third-party packages), generates the code and
+#             runs the gates. It names no secret, holds a read-only token and keeps none of it in
+#             the checkout, and hands the two generated files on.
+#   publish   takes exactly those two files, and only then mints a token that can only write this
+#             repository, used by the push alone. It runs no dependency code.
 
 on:
   workflow_dispatch:
@@ -19,23 +33,24 @@ on:
         default: main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  codegen:
+  contract:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      short_sha: ${{ steps.ref.outputs.short_sha }}
     steps:
-      - name: Mint app installation token
+      - name: Mint a token that can only read shared-proto
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.CODEGEN_APP_ID }}
           private-key: ${{ secrets.CODEGEN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-
-      - uses: actions/checkout@v5
-        with:
-          token: ${{ steps.app-token.outputs.token }}
+          repositories: shared-proto
+          permission-contents: read
 
       - name: Checkout shared-proto
         uses: actions/checkout@v5
@@ -43,23 +58,56 @@ jobs:
           repository: SpatialReal-ai/shared-proto
           ref: ${{ inputs.shared_proto_ref || 'main' }}
           token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
           path: proto-src
 
+      - name: Record the commit
+        id: ref
+        run: echo "short_sha=$(git -C proto-src rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Only the file this package is generated from: the rest of shared-proto stays out of the job
+      # that runs third-party code. Should avatar.proto ever import another file, protoc names it
+      # and it is added here.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: contract
+          path: proto-src/pipecat/v1/avatar.proto
+          if-no-files-found: error
+          retention-days: 1
+
+  generate:
+    needs: contract
+    runs-on: ubuntu-latest
+    # A run takes a few minutes; a hung one is cut off here instead of at GitHub's six hours.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: contract
+          path: proto-src/pipecat/v1
+
+      # No pip cache: what a third-party package left in it would come back in later runs.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
+
+      # tests/probe_check.mjs runs the probe page's analysis under Node.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
 
       # grpcio-tools is pinned in the dev extra: it decides the gencode protobuf version, which
-      # must stay <= the runtime protobuf the package is installed alongside (pipecat-ai and
-      # spatialreal both allow protobuf 6.x). Bump it only in a commit of its own.
+      # must stay <= the `protobuf>=` floor in pyproject.toml, or an older runtime refuses to
+      # import the generated code. Bump the pin together with that floor.
       - name: Install (dev extra)
         run: python -m pip install -e ".[dev]"
 
       - name: Generate
-        id: gen
         run: |
-          echo "short_sha=$(git -C proto-src rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           out="$(mktemp -d)"
           gen=src/pipecat_spatialreal/proto/generated
           python -m grpc_tools.protoc -I proto-src \
@@ -86,18 +134,69 @@ jobs:
             exit 1
           fi
 
-      # The ref goes through env, not into the script text: a tag name is not trusted input.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: generated
+          path: |
+            src/pipecat_spatialreal/proto/generated/avatar_pb2.py
+            src/pipecat_spatialreal/proto/generated/avatar_pb2.pyi
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [contract, generate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: generated
+          path: ${{ runner.temp }}/generated
+
+      # The two generated files by name, whatever else the artifact might hold.
+      - name: Take the generated code
+        id: take
+        run: |
+          gen=src/pipecat_spatialreal/proto/generated
+          cp "$RUNNER_TEMP/generated/avatar_pb2.py" "$RUNNER_TEMP/generated/avatar_pb2.pyi" "$gen/"
+          git status --short
+          if git diff --quiet; then
+            echo "No changes."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Minted last, and with no owner given, for this repository alone.
+      - name: Mint a token that can only write this repository
+        if: steps.take.outputs.changed == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CODEGEN_APP_ID }}
+          private-key: ${{ secrets.CODEGEN_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      # The ref goes through env, not into the script text: a tag name is not trusted input. The
+      # token reaches git through a credential helper for this one push: it is never written to the
+      # git config and never appears on a command line.
       - name: Commit and push
+        if: steps.take.outputs.changed == 'true'
         env:
           SHARED_PROTO_REF: ${{ inputs.shared_proto_ref || 'main' }}
-          SHORT_SHA: ${{ steps.gen.outputs.short_sha }}
+          SHORT_SHA: ${{ needs.contract.outputs.short_sha }}
+          PUSH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add src/pipecat_spatialreal/proto/generated
-          if git diff --staged --quiet; then
-            echo "No changes."
-            exit 0
-          fi
+          git add src/pipecat_spatialreal/proto/generated/avatar_pb2.py \
+            src/pipecat_spatialreal/proto/generated/avatar_pb2.pyi
           git commit -m "chore(proto): regenerate from shared-proto@${SHARED_PROTO_REF} (${SHORT_SHA})"
-          git push
+          # shellcheck disable=SC2016 # the helper's shell expands $1 and $PUSH_TOKEN, not this one
+          git -c credential.helper= \
+            -c 'credential.helper=!f() { test "$1" = get && printf "username=x-access-token\npassword=%s\n" "$PUSH_TOKEN"; }; f' \
+            push

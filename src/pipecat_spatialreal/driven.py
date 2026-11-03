@@ -5,40 +5,55 @@ The processor streams the bot's speech to driveningress and gets the facial anim
 module narrows it to what the processor needs.
 
 * Animation returns over the same WebSocket, which is what the SDK does when no egress is
-  configured. Each server message reaches the caller as a :class:`Segment` whose ``wire`` is the
-  SDK's bytes, untouched, so the processor can forward them without serializing anything.
+  configured. Each animation message from the server reaches the caller as a :class:`Segment`
+  whose ``wire`` is the SDK's bytes, untouched, so the processor can forward them without
+  serializing anything.
 * A session that ends is reported once, through ``on_down``, with a short readable reason.
   The SDK has no reconnect and a session object cannot be reused, so this layer has none either:
   to come back, call :meth:`DrivenIngress.connect` again, which builds a new SDK session. When
   to do that, and how often, is up to the caller.
+* Nothing here waits for the socket for long. A link that stops taking data without closing (a
+  dropped flow, a server that stops reading) makes a write block in the kernel's send buffer,
+  and the SDK puts no limit on that. Every write and the closing handshake are bounded by
+  ``wire_timeout_s``; one that runs out counts as a loss, and the socket is aborted, which is
+  the only way to end a write that never returns.
 
 It decides nothing about turns: which audio belongs to which request, and when a request ends,
 is the caller's.
 """
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum, auto
 from functools import partial
+from urllib.parse import urlsplit, urlunsplit
 
 import spatialreal
 from loguru import logger
 from spatialreal.proto.generated import message_pb2
+from spatialreal.session import DRIVENINGRESS_PATH
 
 
 @dataclass(frozen=True)
 class Segment:
     """One animation message from driveningress.
 
-    The server answers a request's audio with one message per inference segment, the keyframes
-    for a stretch of that audio, and one last message when the request ends.
+    The server answers a request's audio with one message per inference segment, each carrying
+    the keyframes for a stretch of that audio.
 
     Attributes:
         req_id: The request the animation belongs to: the id :meth:`DrivenIngress.send` returned
             for its audio.
         wire: The complete serialized ``driveningress.v2.Message``, exactly as received.
-        end: True on the request's last message, the one that answers ``end=True``.
+        end: True on the last message the server sends for the request. That message is an
+            ordinary segment, usually with animation, not a marker of its own, and the server
+            may send none. It sends none when the end arrives with nothing left to infer (no
+            audio was sent, or the audio already filled its last segment exactly, and the
+            client sends the 16 kHz the inference runs at, so no resampler tail remains) or
+            when the last inference fails. A consumer must not wait for ``end`` alone to close
+            a turn.
     """
 
     req_id: str
@@ -65,7 +80,6 @@ class _Link:
 
     def __init__(self) -> None:
         self.state = _State.CONNECTING
-        self.last_req_id: str | None = None  # the request an interrupt would target
         self.error: Exception | None = None  # the last error the session reported
 
 
@@ -87,6 +101,7 @@ class DrivenIngress:
         console_endpoint_url: str = "",
         ingress_endpoint_url: str = "",
         token_ttl_s: int = 86400,
+        wire_timeout_s: float = 2.0,
         on_segment: Callable[[Segment], None],
         on_down: Callable[[str], None],
     ):
@@ -100,19 +115,29 @@ class DrivenIngress:
                 and the server accepts only some rates (8, 16, 22.05, 24, 32, 44.1 and 48 kHz).
             environment: Which SpatialReal deployment to use, when the two URLs below are not
                 given.
-            console_endpoint_url: Origin of the console API that issues session tokens; empty
-                takes it from ``environment``.
-            ingress_endpoint_url: Origin of driveningress, without the path; empty takes it from
+            console_endpoint_url: Origin of the console API that issues session tokens
+                (``https://<host>``; the SDK appends the route); empty takes it from
                 ``environment``.
+            ingress_endpoint_url: The driveningress URL, ``https://<host>/v2/driveningress``;
+                empty takes it from ``environment``. An origin alone (``https://<host>``) is
+                accepted and given that path; a URL with any other path is used as given.
             token_ttl_s: Seconds each session token stays valid.
+            wire_timeout_s: Longest wait, in seconds, for one write on the socket (audio, the end
+                of a request, an interrupt) and for the closing handshake. A write that takes
+                longer is a loss: the session's socket is aborted and ``on_down`` reports it.
             on_segment: Called with every animation message, in the order it arrived. It is not
                 called once the session is lost or closed.
             on_down: Called once for each session that ends without :meth:`close`, with a short
                 reason, for example ``creditsExhausted (4001)`` (the SDK's error code, then the
-                WebSocket close code when there is one) or ``closed``. The reason comes from the
-                last error the session reported before it ended, or is ``closed`` when it
-                reported none.
+                WebSocket close code when there is one; :func:`close_code` reads it back),
+                ``send timed out`` or ``closed``. The reason comes from the last error the
+                session reported before it ended, or is ``closed`` when it reported none.
+
+        Raises:
+            ValueError: If ``wire_timeout_s`` is not positive.
         """
+        if wire_timeout_s <= 0:
+            raise ValueError(f"wire_timeout_s must be positive, got {wire_timeout_s}")
         self._options = {
             "api_key": api_key,
             "app_id": app_id,
@@ -120,9 +145,10 @@ class DrivenIngress:
             "sample_rate": sample_rate,
             "environment": environment,
             "console_endpoint_url": console_endpoint_url,
-            "ingress_endpoint_url": ingress_endpoint_url,
+            "ingress_endpoint_url": _ingress_url(ingress_endpoint_url),
         }
         self._token_ttl = timedelta(seconds=token_ttl_s)
+        self._wire_timeout = wire_timeout_s
         self._on_segment = on_segment
         self._on_down = on_down
         self._link: _Link | None = None
@@ -142,7 +168,9 @@ class DrivenIngress:
             spatialreal.AvatarSDKError: The token exchange or the handshake failed; its ``code``
                 says why, and ``retryable`` whether trying again can help.
             ValueError: ``api_key``, ``app_id`` or ``avatar_id`` is empty.
-            RuntimeError: :meth:`close` ran while this call was waiting.
+            RuntimeError: :meth:`close` ran while this call was waiting and the call gave up.
+                A close that cuts the handshake short raises ``AvatarSDKError`` instead. Either
+                way no socket is left open.
         """
         await self.close()
         link = _Link()
@@ -157,15 +185,17 @@ class DrivenIngress:
         self._link = link  # close() can reach the session from here on
         try:
             await link.session.init()
-            await link.session.start()
+            # A close() during the token exchange must not be followed by a socket: it bills.
+            if link.state is _State.CONNECTING:
+                await link.session.start()
         except BaseException:  # also a cancellation: the half-open session must not outlive it
             link.state = _State.DOWN
             if self._link is link:
                 self._link = None
-            await link.session.close()
+            await self._close_session(link)
             raise
         if link.state is _State.DOWN:  # close() ran while this call waited
-            await link.session.close()
+            await self._close_session(link)  # closes the socket too, if start() opened one
             raise RuntimeError("driveningress closed while connecting")
         link.state = _State.UP
 
@@ -173,60 +203,102 @@ class DrivenIngress:
         """Send audio to the current request.
 
         The first call after a connect, after ``end=True`` or after an interrupt starts a new
-        request; the id is never reused.
+        request; the id is never reused. The call returns within ``wire_timeout_s``.
 
         Args:
             pcm: PCM16 little-endian mono audio at ``sample_rate``; may be empty.
-            end: True on the request's last chunk.
+            end: True on the request's last chunk. The server's reply to it is not guaranteed to
+                be a :class:`Segment` with ``end`` set; see there.
 
         Returns:
             The id of the request the audio went into.
 
         Raises:
-            RuntimeError: The session is not up, or the send failed. A failed send is a loss: it
-                is reported through ``on_down`` like any other, and the original error is the
-                exception's ``__cause__``.
+            RuntimeError: The session is not up, or the send failed or timed out. A failed or
+                timed-out send is a loss: it is reported through ``on_down`` like any other, and
+                the original error is the exception's ``__cause__``.
         """
         link = self._link
         if link is None or link.state is not _State.UP:
             raise RuntimeError("driveningress not connected")
         try:
-            req_id = await link.session.send_audio(pcm, end=end)
+            async with asyncio.timeout(self._wire_timeout):
+                return await link.session.send_audio(pcm, end=end)
         except (spatialreal.AvatarSDKError, ValueError) as exc:
             self._lose(link, _describe(exc))
             raise RuntimeError("driveningress not connected") from exc
-        link.last_req_id = req_id
-        return req_id
+        except TimeoutError as exc:
+            self._cut(link, "send timed out")
+            raise RuntimeError("driveningress not connected") from exc
 
     async def interrupt(self) -> str | None:
         """Tell the server to drop the audio it still holds for the latest request.
 
-        The next :meth:`send` starts a new request. This never raises for a missing or broken
-        session: there is then nothing left to interrupt, and the caller is usually in the
-        middle of something more urgent.
+        The next :meth:`send` starts a new request. The latest request is the SDK's: it takes the
+        id when a send starts, before the audio is written, so a send that was cancelled before
+        it returned (on a congested socket, say) is interrupted too, and the audio after the
+        interrupt cannot join it. This never raises for a missing or broken session: there is
+        then nothing left to interrupt, and the caller is usually in the middle of something
+        more urgent. The call returns within ``wire_timeout_s``; one that takes longer is a loss.
 
         Returns:
             The id of the request interrupted, or None when nothing was sent on this session or
             the session is not up.
         """
         link = self._link
-        if link is None or link.state is not _State.UP or link.last_req_id is None:
+        if link is None or link.state is not _State.UP:
             return None
         try:
-            return await link.session.interrupt()
-        except (spatialreal.AvatarSDKError, ValueError) as exc:
+            async with asyncio.timeout(self._wire_timeout):
+                return await link.session.interrupt()
+        except ValueError:
+            # Nothing was sent on this session yet. (The SDK says the same when its socket is
+            # already gone; the session's close reports that loss.)
+            return None
+        except spatialreal.AvatarSDKError as exc:
             self._lose(link, _describe(exc))
+            return None
+        except TimeoutError:
+            self._cut(link, "interrupt timed out")
             return None
 
     async def close(self) -> None:
         """Close the session; safe at any time, including when there is none, and repeatedly.
 
-        ``on_down`` is not called, because closing is not a loss.
+        ``on_down`` is not called, because closing is not a loss. The closing handshake is given
+        ``wire_timeout_s``; a link that does not complete it in that time has its socket aborted.
         """
         link, self._link = self._link, None
         if link is not None:
             link.state = _State.DOWN
-            await link.session.close()
+            await self._close_session(link)
+
+    # --- the socket, when the SDK cannot get it to answer
+
+    async def _close_session(self, link: _Link) -> None:
+        """Close the link's SDK session, aborting its socket if the handshake does not return.
+
+        The SDK's close sends a close frame and waits for the other end, with no bound on the
+        write: on a link that has stopped draining, it waits for good.
+        """
+        connection = _connection_of(link)  # the SDK forgets it before it waits
+        try:
+            async with asyncio.timeout(self._wire_timeout):
+                await link.session.close()
+            return
+        except TimeoutError:
+            logger.warning("driveningress close timed out; aborting the socket")
+        _abort(connection)
+        try:
+            async with asyncio.timeout(self._wire_timeout):
+                await link.session.close()  # idempotent: finishes what the first call began
+        except TimeoutError:
+            logger.error("driveningress session could not be closed")
+
+    def _cut(self, link: _Link, reason: str) -> None:
+        """Abort the socket of a link that does not answer, and report the loss."""
+        _abort(_connection_of(link))
+        self._lose(link, reason)
 
     # --- what the SDK reports
 
@@ -252,7 +324,58 @@ class DrivenIngress:
         if link.state is not _State.UP:
             return
         link.state = _State.DOWN
-        self._on_down(reason)
+        try:
+            self._on_down(reason)
+        except Exception:  # noqa: BLE001
+            # The callback is the caller's. Its bug must not reach the call that found the loss:
+            # send() promises RuntimeError and interrupt() promises not to raise.
+            logger.exception("on_down callback raised")
+
+
+def _connection_of(link: _Link) -> object | None:
+    """The WebSocket connection of the link's session, if it has one open.
+
+    The SDK gives no way to abort a session; its connection is the one thing this module reaches
+    into it for.
+    """
+    return getattr(link.session, "_connection", None)
+
+
+def _abort(connection: object | None) -> None:
+    """Close the connection's socket at once, without the closing handshake.
+
+    The pending writes are dropped and every call waiting on the socket returns; the SDK's read
+    loop sees the connection closed and finishes with the session.
+    """
+    transport = getattr(connection, "transport", None)
+    if transport is not None:
+        transport.abort()
+
+
+def _ingress_url(url: str) -> str:
+    """``url`` with the driveningress path, when it is an origin without one."""
+    if not url:
+        return url
+    parts = urlsplit(url)
+    if parts.path not in ("", "/"):
+        return url
+    return urlunsplit((parts.scheme, parts.netloc, DRIVENINGRESS_PATH, parts.query, parts.fragment))
+
+
+def close_code(reason: str) -> int | None:
+    """Return the WebSocket close code a reason given to ``on_down`` carries, if any.
+
+    Args:
+        reason: The reason as ``on_down`` received it, for example ``creditsExhausted (4001)``.
+
+    Returns:
+        The code, or None when the reason names no close code (``closed``, ``send timed out``,
+        an error with no close behind it).
+    """
+    _, found, tail = reason.rpartition(" (")
+    if not found or not tail.endswith(")") or not tail[:-1].isdigit():
+        return None
+    return int(tail[:-1])
 
 
 def _describe(exc: Exception) -> str:

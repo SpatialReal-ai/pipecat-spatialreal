@@ -59,8 +59,9 @@ class FakeDriveningress:
         segment_ms: Audio that fills every later segment.
         animation_bytes: Size of the animation payload in each message that has one.
         console_url: Origin of the token route, for ``console_endpoint_url``.
-        ingress_url: Origin of the WebSocket, for ``ingress_endpoint_url``. It has no
-            ``/v2/driveningress`` suffix because the SDK appends only ``/websocket``.
+        ingress_url: Origin of the WebSocket, for ``ingress_endpoint_url``. The fake serves the
+            WebSocket on every path, so the ``/v2/driveningress/websocket`` the client builds
+            from the origin and a bare ``/websocket`` both reach it.
         configure: The ``ClientConfigureSession`` of the latest connection, or None before any.
         ws_headers: Request headers of the latest connection, names lower-cased.
         ws_path: Path and query of the latest connection's request.
@@ -106,6 +107,7 @@ class FakeDriveningress:
         self.connections = 0
         self.open_connections = 0
         self._current: Any = None  # the latest connection's server-side socket
+        self._unread: Any = None  # the connection stop_reading() left half-open
         self._stack: AsyncExitStack | None = None
 
     async def __aenter__(self) -> Self:
@@ -134,12 +136,15 @@ class FakeDriveningress:
         """Stop both servers; connections still open are closed with 1001.
 
         A gate still shut is opened first: a handler waiting on it would never finish, and the
-        WebSocket server waits for its handlers.
+        WebSocket server waits for its handlers. A connection left half-open by
+        :meth:`stop_reading` is read again, so that the server sees how the client ended it.
         """
         assert self._stack is not None
         for gate in (self.token_gate, self.confirm_gate):
             if gate is not None:
                 gate.set()
+        if self._unread is not None:
+            self._unread.transport.resume_reading()
         await self._stack.aclose()
 
     # --- what a test can ask of it
@@ -184,6 +189,18 @@ class FakeDriveningress:
         """
         assert self._current is not None, "no client has connected"
         await self._current.close(code=code, reason="closed by the test")
+
+    def stop_reading(self) -> None:
+        """Stop reading the latest connection, and leave it open: it is half-open from now on.
+
+        What a dropped flow, or a server that stops taking audio, looks like from the client: no
+        close frame, no error, no animation, and no pong either. Nothing the client writes is
+        read until the fake exits, which reads the connection again to see it end. The server
+        keeps accepting new connections.
+        """
+        assert self._current is not None, "no client has connected"
+        self._unread = self._current
+        self._current.transport.pause_reading()
 
     async def send(self, message: message_pb2.Message) -> None:
         """Send a server message of the test's own making on the latest connection.

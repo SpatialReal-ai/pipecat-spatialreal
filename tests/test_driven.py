@@ -5,7 +5,7 @@ import time
 
 import pytest
 import spatialreal
-from conftest import make, pcm_ms, until
+from conftest import half_open, make, pcm_ms, until
 from fake_driveningress import SESSION_TOKEN
 from spatialreal.proto.generated.message_pb2 import (
     AUDIO_FORMAT_PCM_S16LE,
@@ -14,8 +14,9 @@ from spatialreal.proto.generated.message_pb2 import (
     MESSAGE_SERVER_RESPONSE_ANIMATION,
     Message,
 )
+from websockets.protocol import State
 
-from pipecat_spatialreal.driven import DrivenIngress, Segment
+from pipecat_spatialreal.driven import DrivenIngress, Segment, close_code
 
 
 async def test_connect_sends_configure(fake):
@@ -100,7 +101,25 @@ async def test_connect_authenticates_and_names_the_avatar(fake):
     assert fake.token_requests[-1][0] == "k"
     assert fake.ws_headers["x-app-id"] == "a"
     assert fake.ws_headers["x-session-key"] == SESSION_TOKEN
-    assert fake.ws_path == "/websocket?id=av"
+    assert fake.ws_path == "/v2/driveningress/websocket?id=av"
+
+
+@pytest.mark.parametrize(
+    ("suffix", "path"),
+    [
+        ("", "/v2/driveningress/websocket?id=av"),
+        ("/", "/v2/driveningress/websocket?id=av"),
+        ("/v2/driveningress", "/v2/driveningress/websocket?id=av"),
+        ("/v2/driveningress/", "/v2/driveningress/websocket?id=av"),
+        ("/elsewhere", "/elsewhere/websocket?id=av"),
+    ],
+    ids=["origin", "origin with slash", "full url", "full url with slash", "another path"],
+)
+async def test_ingress_endpoint_url_takes_an_origin_or_the_full_url(fake, suffix, path):
+    """The SDK needs ``https://<host>/v2/driveningress``; an origin alone is given that path."""
+    d = make(fake, ingress_endpoint_url=fake.ingress_url + suffix)
+    await d.connect()
+    assert d.connected and fake.ws_path == path
 
 
 async def test_the_session_asks_for_pcm_animation_over_the_websocket(fake):
@@ -160,6 +179,24 @@ async def test_a_close_code_is_reported_once_as_a_readable_reason(fake, code, re
     await until(lambda: downs)
     await asyncio.sleep(0.2)  # the SDK reports the error and then the close; one loss
     assert downs == [reason] and not d.connected
+    assert close_code(reason) == code
+
+
+@pytest.mark.parametrize(
+    ("reason", "code"),
+    [
+        ("creditsExhausted (4001)", 4001),
+        ("sessionDurationExceeded (4002)", 4002),
+        ("closed", None),
+        ("send timed out", None),
+        ("connectionClosed", None),
+        ("OSError: [Errno 32] Broken pipe (32)", 32),  # a code is whatever _describe wrote last
+        ("odd (x)", None),
+        ("odd (4002", None),
+    ],
+)
+def test_close_code_reads_back_what_on_down_was_given(reason, code):
+    assert close_code(reason) == code
 
 
 async def test_a_close_without_an_error_is_reported_as_closed(fake):
@@ -211,8 +248,13 @@ async def test_a_server_error_that_leaves_the_connection_open_is_not_a_loss(fake
     ids=["transport error", "session already closed"],
 )
 async def test_a_failed_send_is_a_loss(fake, monkeypatch, failure):
-    downs = []
-    d = make(fake, on_down=downs.append)
+    downs, seen = [], []
+
+    def on_down(reason):
+        downs.append(reason)
+        seen.append(d.connected)
+
+    d = make(fake, on_down=on_down)
     await d.connect()
 
     attempts = []
@@ -226,18 +268,47 @@ async def test_a_failed_send_is_a_loss(fake, monkeypatch, failure):
         await d.send(pcm_ms(40, 24000))
     assert raised.value.__cause__ is failure
     assert not d.connected and len(downs) == 1
+    assert seen == [False]  # inside on_down the link already counts as lost
     with pytest.raises(RuntimeError, match="driveningress not connected"):
         await d.send(pcm_ms(40, 24000))
     assert len(attempts) == 1 and len(downs) == 1  # a known loss does not try the wire again
-    # The socket is in fact still open. When the server later closes it, that is not a second loss.
-    await fake.close_with(4001)
+
+    # The lost session's socket is in fact still open. connect() closes it with the session, so
+    # that the new socket is the only one, and close() closes that.
+    assert fake.open_connections == 1
+    await d.connect()
+    await until(lambda: fake.open_connections == 1 and fake.connections == 2)
+    assert d.connected and len(downs) == 1
+    await d.close()
+    await until(lambda: fake.open_connections == 0)
+    assert len(downs) == 1
+
+
+async def test_a_server_close_after_a_failed_send_is_not_a_second_loss(fake, monkeypatch):
+    downs = []
+    d = make(fake, on_down=downs.append)
+    await d.connect()
+
+    async def broken(audio, end=False):
+        raise ValueError("WebSocket connection is not established")
+
+    monkeypatch.setattr(d._link.session, "send_audio", broken)
+    with pytest.raises(RuntimeError):
+        await d.send(pcm_ms(40, 24000))
+    assert len(downs) == 1
+    await fake.close_with(4001)  # the socket was still open; now the server closes it
     await asyncio.sleep(0.2)
     assert len(downs) == 1
 
 
 async def test_a_failed_interrupt_is_a_loss_and_not_an_error(fake, monkeypatch):
-    downs = []
-    d = make(fake, on_down=downs.append)
+    downs, seen = [], []
+
+    def on_down(reason):
+        downs.append(reason)
+        seen.append(d.connected)
+
+    d = make(fake, on_down=on_down)
     await d.connect()
     await d.send(pcm_ms(40, 24000))
 
@@ -248,7 +319,40 @@ async def test_a_failed_interrupt_is_a_loss_and_not_an_error(fake, monkeypatch):
 
     monkeypatch.setattr(d._link.session, "interrupt", broken)
     assert await d.interrupt() is None
-    assert not d.connected and len(downs) == 1
+    assert not d.connected and len(downs) == 1 and seen == [False]
+
+    # The socket is still open, and connect() closes it with the lost session.
+    assert fake.open_connections == 1
+    await d.connect()
+    await until(lambda: fake.open_connections == 1 and fake.connections == 2)
+    assert d.connected and len(downs) == 1
+
+
+async def test_a_raising_on_down_cannot_change_what_send_and_interrupt_do(fake, monkeypatch):
+    failure = spatialreal.AvatarSDKError(
+        spatialreal.AvatarSDKErrorCode.connectionClosed, "boom", phase="websocket_send"
+    )
+
+    def on_down(reason):
+        raise KeyError("a bug in the callback")
+
+    async def broken_send(audio, end=False):
+        raise failure
+
+    async def broken_interrupt():
+        raise failure
+
+    d = make(fake, on_down=on_down)
+    await d.connect()
+    monkeypatch.setattr(d._link.session, "send_audio", broken_send)
+    with pytest.raises(RuntimeError, match="driveningress not connected") as raised:
+        await d.send(pcm_ms(40, 24000))
+    assert raised.value.__cause__ is failure and not d.connected
+
+    await d.connect()
+    await d.send(pcm_ms(40, 24000))
+    monkeypatch.setattr(d._link.session, "interrupt", broken_interrupt)
+    assert await d.interrupt() is None and not d.connected
 
 
 async def test_nothing_to_interrupt_before_audio_or_without_a_link(fake):
@@ -276,6 +380,43 @@ async def test_nothing_to_interrupt_once_the_link_is_lost(fake, monkeypatch):
     monkeypatch.setattr(d._link.session, "interrupt", interrupt)
     assert await d.interrupt() is None
     assert attempts == []  # a known loss does not try the wire
+
+
+async def test_a_request_id_is_not_reused_after_end_or_an_interrupt(fake):
+    d = make(fake)
+    await d.connect()
+    first = await d.send(pcm_ms(40, 24000))
+    assert await d.send(pcm_ms(40, 24000)) == first  # one request until it ends
+    assert await d.send(b"", end=True) == first
+    second = await d.send(pcm_ms(40, 24000))  # the server drops a connection that reuses an id
+    assert await d.interrupt() == second
+    third = await d.send(pcm_ms(40, 24000))
+    assert len({first, second, third}) == 3
+
+
+async def test_a_first_send_cancelled_before_it_returned_is_still_interrupted(fake, monkeypatch):
+    d = make(fake)
+    await d.connect()
+    connection = d._link.session._connection
+    write = connection.send
+
+    async def congested(message):
+        await write(message)  # the audio is on the wire...
+        await asyncio.Event().wait()  # ...but the write does not return, as on a full socket
+
+    monkeypatch.setattr(connection, "send", congested)
+    sending = asyncio.create_task(d.send(pcm_ms(40, 24000)))
+    await until(lambda: fake.received)
+    sending.cancel()  # an interruption cancels the frame being processed
+    with pytest.raises(asyncio.CancelledError):
+        await sending
+    monkeypatch.undo()
+
+    first = fake.received[0].client_audio_input.req_id
+    assert await d.interrupt() == first
+    await until(lambda: len(fake.received) == 2)
+    assert fake.received[1].client_interrupt.req_id == first
+    assert await d.send(pcm_ms(40, 24000)) != first  # the next audio does not join it
 
 
 async def test_close_is_quiet_and_idempotent(fake):
@@ -328,7 +469,7 @@ async def test_connect_replaces_a_live_session(fake):
     assert {s.req_id for s in got} == {req}
 
 
-async def test_close_while_connecting_leaves_no_session(fake):
+async def test_close_during_the_token_exchange_opens_no_socket(fake):
     downs = []
     d = make(fake, on_down=downs.append)
     fake.token_gate = asyncio.Event()
@@ -338,8 +479,35 @@ async def test_close_while_connecting_leaves_no_session(fake):
     fake.token_gate.set()
     with pytest.raises(RuntimeError, match="closed while connecting"):
         await connecting
-    await until(lambda: fake.connections == 1 and fake.open_connections == 0)
+    assert fake.connections == 0  # the session was dropped before it opened a socket (it bills)
     assert not d.connected and downs == []
+
+
+async def test_close_during_the_handshake_fails_connect_and_leaves_no_socket(fake):
+    fake.confirm_gate = asyncio.Event()
+    d = make(fake)
+    connecting = asyncio.create_task(d.connect())
+    await until(lambda: fake.open_connections == 1)  # the socket is open, the handshake is not done
+    await d.close()
+    with pytest.raises(spatialreal.AvatarSDKError):  # the handshake failed under its closed socket
+        await connecting
+    await until(lambda: fake.open_connections == 0)
+    assert not d.connected
+
+
+async def test_close_during_the_socket_upgrade_closes_the_socket(fake, monkeypatch):
+    d = make(fake)
+    start = spatialreal.AvatarSession.start
+
+    async def close_then_start(session):
+        await d.close()  # a close() that lands while start() has not opened its socket yet
+        return await start(session)
+
+    monkeypatch.setattr(spatialreal.AvatarSession, "start", close_then_start)
+    with pytest.raises(RuntimeError, match="closed while connecting"):
+        await d.connect()
+    await until(lambda: fake.connections == 1 and fake.open_connections == 0)
+    assert not d.connected
 
 
 async def test_cancelling_connect_closes_the_half_open_session(fake):
@@ -352,6 +520,94 @@ async def test_cancelling_connect_closes_the_half_open_session(fake):
         await connecting
     await until(lambda: fake.open_connections == 0)
     assert not d.connected
+
+
+# --- A half-open link: the socket takes nothing more and says nothing about it. Every wait on it
+# --- is bounded by wire_timeout_s, and the socket is aborted, since no handshake can end it.
+
+WIRE_TIMEOUT_S = 0.3
+# A timer fires at its deadline or a hair early; a loaded machine only makes a wait longer.
+EARLY_S, LATE_S = 0.01, 0.5
+
+
+def bounded(awaitable):
+    """``awaitable`` with a deadline well past the wire timeout: a hang fails, it does not wait."""
+    return asyncio.wait_for(awaitable, WIRE_TIMEOUT_S + LATE_S + 1.0)
+
+
+def test_wire_timeout_must_be_positive(fake):
+    with pytest.raises(ValueError, match="wire_timeout_s"):
+        make(fake, wire_timeout_s=0)
+
+
+async def test_a_send_on_a_half_open_link_is_a_loss_within_the_wire_timeout(fake):
+    downs = []
+    d = make(fake, on_down=downs.append, wire_timeout_s=WIRE_TIMEOUT_S)
+    await d.connect()
+    await d.send(pcm_ms(40, 24000))
+    connection = d._link.session._connection
+    half_open(fake, d)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="driveningress not connected") as raised:
+        await bounded(d.send(pcm_ms(40, 24000)))
+    waited = time.monotonic() - started
+    assert WIRE_TIMEOUT_S - EARLY_S <= waited <= WIRE_TIMEOUT_S + LATE_S
+    assert isinstance(raised.value.__cause__, TimeoutError)
+    assert downs == ["send timed out"] and not d.connected
+    # The socket is aborted, not left to a closing handshake nothing would answer.
+    await until(lambda: connection.state is State.CLOSED)
+    # And a new session can be opened at once on top of it.
+    await d.connect()
+    assert d.connected and fake.connections == 2 and len(downs) == 1
+    await d.send(pcm_ms(40, 24000), end=True)
+
+
+async def test_an_interrupt_on_a_half_open_link_is_a_loss_within_the_wire_timeout(fake):
+    downs = []
+    d = make(fake, on_down=downs.append, wire_timeout_s=WIRE_TIMEOUT_S)
+    await d.connect()
+    await d.send(pcm_ms(40, 24000))
+    half_open(fake, d)
+
+    started = time.monotonic()
+    assert await bounded(d.interrupt()) is None
+    waited = time.monotonic() - started
+    assert WIRE_TIMEOUT_S - EARLY_S <= waited <= WIRE_TIMEOUT_S + LATE_S
+    assert downs == ["interrupt timed out"] and not d.connected
+
+
+async def test_close_on_a_half_open_link_returns_within_the_wire_timeout(fake):
+    downs = []
+    d = make(fake, on_down=downs.append, wire_timeout_s=WIRE_TIMEOUT_S)
+    await d.connect()
+    await d.send(pcm_ms(40, 24000))
+    connection = d._link.session._connection
+    half_open(fake, d)
+
+    started = time.monotonic()
+    await bounded(d.close())
+    waited = time.monotonic() - started
+    assert WIRE_TIMEOUT_S - EARLY_S <= waited <= WIRE_TIMEOUT_S + LATE_S
+    assert downs == [] and not d.connected  # closing is not a loss, however it went
+    await until(lambda: connection.state is State.CLOSED)
+
+
+async def test_closing_after_a_timed_out_send_does_not_wait_for_the_old_socket(fake):
+    """The socket was aborted at the timeout, so closing the lost session, which every
+    reconnect does first, is instant: it does not wait the timeout out a second time."""
+    timeout = 1.0  # long enough that a close that did wait it out is unmistakable
+    d = make(fake, wire_timeout_s=timeout)
+    await d.connect()
+    await d.send(pcm_ms(40, 24000))
+    half_open(fake, d)
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(d.send(pcm_ms(40, 24000)), timeout + LATE_S + 1.0)
+    started = time.monotonic()
+    await asyncio.wait_for(d.close(), timeout + LATE_S + 1.0)
+    assert time.monotonic() - started < timeout / 2
+    await d.connect()  # and a new session opens on top of it
+    assert d.connected and fake.connections == 2
 
 
 async def test_no_segments_after_a_loss(fake, monkeypatch):
