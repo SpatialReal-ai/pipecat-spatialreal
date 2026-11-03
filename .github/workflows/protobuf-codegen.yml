@@ -1,0 +1,103 @@
+name: Protobuf Codegen
+
+# Regenerates src/pipecat_spatialreal/proto/generated/ and commits it once the gate passes.
+#
+# Trigger: shared-proto's tag CI dispatches this workflow; it can also be run by hand here.
+# Pushes and PRs do not trigger it: the contract is released only when shared-proto is tagged.
+# workflow_dispatch only finds workflows that are on the default branch.
+#
+# Auth: the org GitHub App `spatialreal-codegen` (secrets CODEGEN_APP_ID /
+# CODEGEN_APP_PRIVATE_KEY), not a personal token. The App installation must include this repo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      shared_proto_ref:
+        description: shared-proto ref (tag / branch / sha)
+        type: string
+        required: false
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  codegen:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint app installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CODEGEN_APP_ID }}
+          private-key: ${{ secrets.CODEGEN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Checkout shared-proto
+        uses: actions/checkout@v5
+        with:
+          repository: SpatialReal-ai/shared-proto
+          ref: ${{ inputs.shared_proto_ref || 'main' }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: proto-src
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # grpcio-tools is pinned in the dev extra: it decides the gencode protobuf version, which
+      # must stay <= the runtime protobuf the package is installed alongside (pipecat-ai and
+      # spatialreal both allow protobuf 6.x). Bump it only in a commit of its own.
+      - name: Install (dev extra)
+        run: python -m pip install -e ".[dev]"
+
+      - name: Generate
+        id: gen
+        run: |
+          echo "short_sha=$(git -C proto-src rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          out="$(mktemp -d)"
+          gen=src/pipecat_spatialreal/proto/generated
+          python -m grpc_tools.protoc -I proto-src \
+            --python_out="$out" --pyi_out="$out" pipecat/v1/avatar.proto
+          rm -f "$gen/avatar_pb2.py" "$gen/avatar_pb2.pyi"
+          mv "$out/pipecat/v1/avatar_pb2.py" "$out/pipecat/v1/avatar_pb2.pyi" "$gen/"
+          rm -rf proto-src "$out"
+          git status --short "$gen"
+
+      # Gate: the package still imports (the generated module loads against the installed protobuf
+      # runtime) and the tests pass. A failure usually means plugin code relies on something the
+      # generated code no longer has — fix that first, then re-run.
+      - name: Gate — import smoke test
+        run: python -c "import pipecat_spatialreal"
+
+      - name: Gate — unit tests
+        run: python -m pytest tests -q
+
+      # The contract lives in shared-proto; this repo holds generated code only.
+      - name: Gate — generated code only
+        run: |
+          if git ls-files --others --cached --exclude-standard '*.proto' | grep .; then
+            echo "Only generated code is committed here." >&2
+            exit 1
+          fi
+
+      # The ref goes through env, not into the script text: a tag name is not trusted input.
+      - name: Commit and push
+        env:
+          SHARED_PROTO_REF: ${{ inputs.shared_proto_ref || 'main' }}
+          SHORT_SHA: ${{ steps.gen.outputs.short_sha }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add src/pipecat_spatialreal/proto/generated
+          if git diff --staged --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git commit -m "chore(proto): regenerate from shared-proto@${SHARED_PROTO_REF} (${SHORT_SHA})"
+          git push
