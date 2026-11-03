@@ -176,14 +176,20 @@ the page started tapping.
 
 ## The live run
 
-Needs the SpatialReal, Deepgram, Cartesia, Gemini and Daily keys in `.env`. The first run was done
-on 2026-11-03 with a scripted second participant (the capture is `capture.jsonl` and `capture.wav`
-next to this file): on Daily, eleven turns with a message lead of 159–306 ms over the detected
-onset, a first-segment latency of 580–965 ms (median 694 ms) from the first TTS audio, barge-ins
-aborted 83 and 170 ms after `user-started-speaking`, no degraded state; on LiveKit, eleven of
-twelve turns within tolerance (one soft attack placed 107 ms late by the Opus decode), barge-ins
-in the same data-channel burst as the trigger. The values below are the design's expectations;
-the run above is the measurement.
+Needs the SpatialReal, Deepgram, Cartesia, Gemini and Daily keys in `.env`. The first runs were done
+on 2026-11-03 with a scripted second participant, twice: once with a canned-reply stand-in for the
+language model (the capture next to this file, `capture.jsonl` and `capture.wav`, is that Daily run)
+and once with the example as shipped, Gemini included. With the shipped bot: on Daily, eleven turns
+with a message lead of 174–367 ms over the detected onset, a first-segment latency of 460–642 ms
+(median 527 ms) from the first TTS audio and 1.3–2.5 s from the LLM request (Gemini's 0.6–1.4 s to
+its first token is in it), barge-ins aborted 0 and 1 ms after `user-started-speaking` (the two
+messages arrive in one burst, so that delta measures nothing, see above), no degraded state; on
+LiveKit, eleven turns, lead 236–445 ms, first-segment latency 411–563 ms from the first TTS audio,
+barge-ins 1 and 3 ms. Each run had one onset outside the rule: on Daily a soft attack heard 40 ms
+late and a click of 334 the processor saw as quiet, on LiveKit an announced onset whose pause had
+shrunk to 144 ms in the received audio — pauses and attacks within a few ms or a few sample values
+of the rule's limits, moved across them by the Opus decode. The values below are the design's
+expectations; the runs above are the measurement.
 
 1. `uv run python examples/bot.py -t daily`, then open the probe with `?mic=1` and press Start.
 2. Talk to the bot for ten turns. Interrupt it mid-sentence once.
