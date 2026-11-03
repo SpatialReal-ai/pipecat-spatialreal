@@ -1055,9 +1055,10 @@ async def test_an_unchained_turn_is_announced_when_its_release_starts(fake):
     assert 0 < ready - end1 < WIDE_MIN_SILENCE_MS / 1000 and second["prev_turn_id"] == ""
     announced = turn_start_time(pushed, turn_id)
     # Not when its animation is in hand: when its release begins, after 440 ms of quiet. Its audio
-    # follows in the same step (the 200 ms leave room for a loaded machine between two pushes).
+    # follows in the same step (the order below pins that; the clock bound only leaves room for a
+    # loaded machine between two pushes, as any wait here may be longer).
     assert announced - end1 >= WIDE_GAP_S - GAP_SLACK_S
-    assert 0 <= t2 - announced < 0.2
+    assert 0 <= t2 - announced < LATE_S
     # At its release: turn_start, then every segment already in hand, in order, then its audio.
     at_release = [f for t, f in pushed if t >= announced]
     first_audio = next(i for i, f in enumerate(at_release) if isinstance(f, TTSAudioRawFrame))
