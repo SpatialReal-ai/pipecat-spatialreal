@@ -7,20 +7,34 @@ SDK draws the avatar and plays the bot's voice in step with it.
 Press Start and the page:
 
 1. gets a session token from `GET /spatialreal-token` (see `../bot.py`; the API key stays on the
-   server) and creates a Pipecat avatar session in the `#avatar` element;
-2. calls `session.start()` inside the click, which starts playback and opens no connection;
-3. starts the bot with `POST /start` and connects with `client.connect()`.
+   server) and creates a Pipecat avatar session in the `#avatar` element, with `new SpatialReal({
+   appId, endpoints })`: the route's `endpoints` is empty for production and names the bot's
+   SpatialReal deployment otherwise, so the avatar comes from the deployment that issued the token;
+2. calls `session.start()`, which starts playback and opens no connection;
+3. starts the bot with `POST /start` and connects with `client.connect()`, which returns once the
+   bot is ready.
+
+Stop works from the moment Start is pressed: it cancels what is still on its way and lets go of
+what the run has made. Start gives up, and says so, when a request is not answered within 15 s or
+the bot is not ready within 30 s: a bot that fails while it starts (a missing key, say) never gets
+ready, and the bot's terminal says why.
 
 The two pieces that make it work are in the client's callbacks:
 
 ```js
 callbacks: {
   onTrackStarted: (track, participant) => {
-    if (!participant?.local && track.kind === 'audio') session.setBotAudioTrack(track)
+    if (track.kind === 'audio' && !participant?.local && isBot(participant)) session.setBotAudioTrack(track)
   },
   onServerMessage: (data) => session.handleServerMessage(data), // false when it is not the avatar's
 }
 ```
+
+Hand the SDK the bot's audio track and no other: given another participant's track, it plays that
+in place of the bot's voice and anchors the face to it. `isBot` tells the bot by the name Pipecat's
+development runner gives it, `Pipecat Bot` on Daily, and on LiveKit by its identity,
+`Pipecat Agent-` and the first 8 characters of the `sessionId` that `POST /start` returns. The page
+expects one bot per room; your app tells its own bot by whatever name or identity it joins with.
 
 The page logs the session's `turn` events (a bot turn starting, ending, or cut off by an
 interruption) and `degraded` events (the avatar fell back to plain audio, with the reason).
@@ -50,8 +64,9 @@ your bundler.
 ## Run it
 
 With the bot running (`uv run python examples/bot.py -t daily`, see `../README.md`), open
-<http://localhost:7860/avatar/>: the bot serves this page, so the page and the token route share an
-origin. Or serve the page anywhere and pass the bot's origin: `index.html?runner=http://localhost:7860`.
+<http://localhost:7860/avatar/>. The bot serves this page so that the page and the token route share
+an origin: the route answers no other origin (see `../README.md`), so a copy of the page served
+from elsewhere gets no token.
 
 For a bot started with `-t livekit`, open `/avatar/?transport=livekit`. The same session code works
 on both transports.

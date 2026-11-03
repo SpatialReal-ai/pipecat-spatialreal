@@ -35,8 +35,9 @@ All of them come from the environment or `.env`.
 | Variable | Used for |
 |---|---|
 | `SPATIALREAL_API_KEY`, `SPATIALREAL_APP_ID`, `SPATIALREAL_AVATAR_ID` | The avatar. The API key stays on the server. |
-| `SPATIALREAL_CONSOLE_ENDPOINT`, `SPATIALREAL_INGRESS_ENDPOINT` | Optional: another SpatialReal deployment than production (`us-west`). |
+| `SPATIALREAL_CONSOLE_ENDPOINT`, `SPATIALREAL_INGRESS_ENDPOINT` | Optional, set together: another SpatialReal deployment than production (`us-west`). The console endpoint is the console API root, such as `https://api.spatialreal.cloud` (a value ending in `/v1/console` is read the same way). The ingress endpoint is the full driveningress URL with its path, such as `https://driven.us-west.spatialreal.cloud/v2/driveningress`; a bare origin is accepted too. |
 | `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `OPENAI_API_KEY` | Speech to text, text to speech and the language model. `CARTESIA_VOICE_ID` picks another voice. |
+| `PIPECAT_ALLOWED_ORIGINS` | The web origins allowed to read the runner's replies; `env.example` allows only the bot's own, `http://localhost:7860` (put yours there if you change the host or port). Read by Pipecat's runner, see below. |
 | `DAILY_API_KEY` | `-t daily`: the runner creates a room per session. `DAILY_ROOM_URL` reuses one room instead. |
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | `-t livekit`. |
 
@@ -46,12 +47,22 @@ Pipecat's runner serves `POST /start`, which starts a bot session and returns th
 joins. For Daily the request must ask for a room, `{"transport": "daily", "createDailyRoom":
 true}`, unless `DAILY_ROOM_URL` is set; the example pages do. `bot.py` adds:
 
-* `GET /spatialreal-token` returns `{"session_token", "avatar_id", "app_id"}`. The web SDK needs
-  the session token to download the avatar. The route mints it with the API key, the way the
-  `spatialreal` Python SDK does (`POST {console}/v1/auth/session-token`, header `X-Api-Key`, a token
-  valid for one hour), so the key never reaches the browser. It has no authentication: your own app
-  serves such a route behind its own login.
+* `GET /spatialreal-token` returns `{"session_token", "avatar_id", "app_id", "endpoints"}`. The web
+  SDK needs the session token to download the avatar. The route mints it with the API key, the way
+  the `spatialreal` Python SDK does (`POST {console}/v1/auth/session-token`, header `X-Api-Key`, a
+  token valid for one hour), from the console the processor uses, so the key never reaches the
+  browser. `endpoints` is what the page passes to `new SpatialReal()`: empty for production, and
+  `{"api": <console root>}` when `SPATIALREAL_CONSOLE_ENDPOINT` points the bot at another
+  deployment, so that the page loads the avatar from the deployment that issued the token.
 * `/avatar/` and `/probe/`: the two pages above, so that one process is enough.
+
+The token route has no authentication, and it is same-origin only: it answers the pages this
+server serves (and callers that are not web pages, such as `curl`) and refuses, with 403, a request
+that another site or another origin made (`Sec-Fetch-Site: cross-site`, or an `Origin` that is not
+the server's own). Without that, any page open in your browser could take session tokens billed to
+you: the runner lets every web origin read its routes unless `PIPECAT_ALLOWED_ORIGINS` narrows it,
+which `env.example` does. So open the pages from the bot's server; a copy served from elsewhere
+gets no token. Your own app's token route needs a login, and the same origin rule.
 
 The avatar needs RTVI, which Pipecat's `PipelineWorker` enables by default: the animation reaches
 the browser as RTVI server messages, and the bot's audio keeps playing through the transport.

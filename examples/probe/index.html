@@ -53,7 +53,7 @@
     <th title="lead minus onsets_ms[0]: the audio path's delay over the message path's; should stay put from turn to turn">skew ms</th>
     <th title="tapped minus announced spacing of the later onsets, or of a chained turn's first onset; at most 40 ms">onset &Delta; ms</th>
     <th class="l">end</th>
-    <th title="turn_abort minus the user-started-speaking message; at most 300 ms">abort &Delta; ms</th>
+    <th title="turn_abort minus the user-started-speaking message; at most 300 ms. Blind to a delay the two messages share, such as a burst of frames queued ahead of both on the bot's transport: that delay is not measured (README, What abort &Delta; cannot see)">abort &Delta; ms</th>
     <th class="l">result</th>
   </tr></thead>
   <tbody></tbody>

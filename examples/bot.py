@@ -9,13 +9,15 @@ development runner, on Daily or LiveKit::
 Pipecat's development runner serves the bot on http://localhost:7860: ``POST /start`` starts a
 session and returns the room the browser joins. This file adds three things to that server:
 
-* ``GET /spatialreal-token``: a session token for the browser, minted with the SpatialReal API key
-  (see :func:`mint_session_token`). The web SDK needs it to download the avatar, and the key
-  itself must never reach the browser. Your own app serves such a route too; this one has no
-  authentication, so it is for local use.
-* ``/avatar/``: the example web page, ``examples/client`` (run it from here: the page and the
-  route then share an origin).
-* ``/probe/``: ``examples/probe/receiver.html``, the silent receiver that measures how the
+* ``GET /spatialreal-token``: what the web SDK needs to show the avatar: a session token minted
+  with the SpatialReal API key (see :func:`mint_session_token`), the avatar and app ids, and the
+  SpatialReal deployment when the bot is pointed at another one than production. The key itself
+  never reaches the browser. The route has no login, and it answers only the pages this server
+  serves and callers that are not web pages (see :func:`refuse_other_origins`). Your own app
+  serves such a route too, behind its login and with the same origin rule.
+* ``/avatar/``: the example web page, ``examples/client``. Open it from here: the token route
+  answers no other origin.
+* ``/probe/``: the probe page, ``examples/probe``: the silent receiver that measures how the
   envelope and the bot's audio line up in a Daily room. A developer tool for this package.
 
 Settings come from the environment or a ``.env`` file; ``env.example`` lists them. The runner
@@ -26,10 +28,11 @@ import json
 import os
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 from dotenv import load_dotenv
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -52,14 +55,16 @@ from pipecat.transports.base_transport import BaseTransport
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.livekit.transport import LiveKitParams
 from pipecat.workers.runner import WorkerRunner
+from spatialreal import environments
+from spatialreal.session import LEGACY_CONSOLE_SUFFIX, SESSION_TOKEN_PATH
 
 from pipecat_spatialreal import SpatialRealAvatarProcessor
 
 load_dotenv(override=True)
 
-# Where session tokens come from unless SPATIALREAL_CONSOLE_ENDPOINT says otherwise.
-DEFAULT_CONSOLE_ENDPOINT = "https://api.spatialreal.cloud"
-SESSION_TOKEN_PATH = "/v1/auth/session-token"
+# The SpatialReal deployment the processor and the token route use, unless
+# SPATIALREAL_CONSOLE_ENDPOINT and SPATIALREAL_INGRESS_ENDPOINT name another one.
+ENVIRONMENT = "us-west"
 
 # A Cartesia voice that Pipecat's own documentation uses; CARTESIA_VOICE_ID replaces it.
 DEFAULT_VOICE_ID = "71a7ad14-091c-4e8e-a314-022ece01c121"
@@ -82,6 +87,39 @@ class SessionTokenError(RuntimeError):
     """The console would not issue a session token, or could not be reached."""
 
 
+def console_root(console_endpoint_url: str) -> str:
+    """Return the console API root that the ``spatialreal`` SDK makes of a console URL.
+
+    The SDK drops a trailing slash and the legacy ``/v1/console`` suffix before it adds the token
+    path, so ``https://api.spatialreal.cloud/v1/console/`` and ``https://api.spatialreal.cloud``
+    name the same console. This applies the same rule, with the SDK's own constants.
+
+    Args:
+        console_endpoint_url: A console URL in any form the SDK accepts.
+
+    Returns:
+        The root, for example ``https://api.spatialreal.cloud``.
+    """
+    return console_endpoint_url.rstrip("/").removesuffix(LEGACY_CONSOLE_SUFFIX)
+
+
+async def resolve_console_root() -> str:
+    """Return the console the processor's sessions get their tokens from.
+
+    That is ``SPATIALREAL_CONSOLE_ENDPOINT`` when it is set, and otherwise the API root of
+    :data:`ENVIRONMENT` as the ``spatialreal`` SDK resolves it: its config service, then its
+    built-in preset. It is the SDK's own lookup, cached once per process, so the token route and the
+    processor always ask the same console.
+
+    Returns:
+        The console API root.
+    """
+    override = os.getenv("SPATIALREAL_CONSOLE_ENDPOINT", "")
+    if override:
+        return console_root(override)
+    return console_root((await environments.resolve(ENVIRONMENT)).api)
+
+
 async def mint_session_token(console_url: str, api_key: str, ttl_s: int = 3600) -> dict:
     """Exchange the SpatialReal API key for a short-lived session token.
 
@@ -89,7 +127,8 @@ async def mint_session_token(console_url: str, api_key: str, ttl_s: int = 3600) 
     takes the token as its ``credential``, so a browser never needs the API key.
 
     Args:
-        console_url: Origin of the console API, for example ``https://api.spatialreal.cloud``.
+        console_url: The console API root, for example ``https://api.spatialreal.cloud``. A
+            trailing slash or the legacy ``/v1/console`` suffix is dropped, as the SDK does.
         api_key: The SpatialReal API key. It is sent to the console and nowhere else.
         ttl_s: Seconds the token stays valid.
 
@@ -100,7 +139,7 @@ async def mint_session_token(console_url: str, api_key: str, ttl_s: int = 3600) 
         SessionTokenError: If the console cannot be reached, answers with anything but 200, or
             leaves the token out of its reply.
     """
-    url = console_url.rstrip("/") + SESSION_TOKEN_PATH
+    url = console_root(console_url) + SESSION_TOKEN_PATH
     payload = {"expireAt": int(time.time()) + ttl_s}
     headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
     timeout = aiohttp.ClientTimeout(total=10)
@@ -141,30 +180,88 @@ def _require_env(name: str) -> str:
     return value
 
 
-@app.get("/spatialreal-token")
-async def spatialreal_token() -> dict[str, str]:
-    """Give the browser what the web SDK needs to show the avatar.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
-    Returns:
-        ``session_token`` (the web SDK's ``credential``), ``avatar_id`` and ``app_id``. The API
-        key stays here.
+
+def _origin_of(url: str) -> tuple[str, str, int] | None:
+    """Return the web origin of ``url`` as (scheme, host, port), or None if it has none."""
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    if scheme not in _DEFAULT_PORTS or not parts.hostname:
+        return None
+    try:
+        port = parts.port or _DEFAULT_PORTS[scheme]
+    except ValueError:
+        return None
+    return scheme, parts.hostname.lower(), port
+
+
+def refuse_other_origins(request: Request) -> None:
+    """Refuse a request that a web page of another origin made.
+
+    The runner lets every web origin read every route: its CORS policy allows any origin, with
+    credentials, unless ``PIPECAT_ALLOWED_ORIGINS`` narrows it. Without this check, any page open in
+    the developer's browser could take session tokens billed to the developer. Browsers say where
+    a request comes from: ``Sec-Fetch-Site: cross-site`` for one another site made, and an
+    ``Origin`` header on every read from another origin (scheme, host and port). A page this server
+    serves is answered, and so are ``curl`` and servers, which send neither header.
+
+    Args:
+        request: The incoming request.
 
     Raises:
-        HTTPException: 500 if a SpatialReal setting is missing, 502 if the console refuses.
+        HTTPException: 403 if another site or another origin made the request.
     """
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        raise HTTPException(status_code=403, detail="refused: a request from another site")
+    origin = request.headers.get("origin")
+    own = _origin_of(str(request.url))
+    if origin is not None and (own is None or _origin_of(origin) != own):
+        raise HTTPException(status_code=403, detail=f"refused: a request from {origin}")
+
+
+@app.get("/spatialreal-token")
+async def spatialreal_token(request: Request) -> dict:
+    """Give the browser what the web SDK needs to show the avatar.
+
+    It answers the pages this server serves and callers that are not web pages, never another
+    origin's page (:func:`refuse_other_origins`).
+
+    Args:
+        request: The incoming request.
+
+    Returns:
+        ``session_token`` (the web SDK's ``credential``), ``avatar_id``, ``app_id`` and
+        ``endpoints``, which the page passes to ``new SpatialReal()``: ``{"api": <console root>}``
+        when ``SPATIALREAL_CONSOLE_ENDPOINT`` points the bot at another SpatialReal deployment, so
+        that the page loads the avatar from the deployment that minted the token, and ``{}``
+        otherwise. The API key stays here.
+
+    Raises:
+        HTTPException: 403 for another origin's page, 500 if a SpatialReal setting is missing, 502
+            if the console refuses.
+    """
+    refuse_other_origins(request)
     try:
         api_key = _require_env("SPATIALREAL_API_KEY")
         app_id = _require_env("SPATIALREAL_APP_ID")
         avatar_id = _require_env("SPATIALREAL_AVATAR_ID")
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
-    console_url = os.getenv("SPATIALREAL_CONSOLE_ENDPOINT") or DEFAULT_CONSOLE_ENDPOINT
+    console = await resolve_console_root()
     try:
-        minted = await mint_session_token(console_url, api_key)
+        minted = await mint_session_token(console, api_key)
     except SessionTokenError as e:
         logger.error(f"Could not mint a SpatialReal session token: {e}")
         raise HTTPException(status_code=502, detail=str(e)) from e
-    return {"session_token": minted["session_token"], "avatar_id": avatar_id, "app_id": app_id}
+    # The web SDK's own default is production; it needs the console only for another deployment.
+    endpoints = {"api": console} if os.getenv("SPATIALREAL_CONSOLE_ENDPOINT") else {}
+    return {
+        "session_token": minted["session_token"],
+        "avatar_id": avatar_id,
+        "app_id": app_id,
+        "endpoints": endpoints,
+    }
 
 
 def _serve_page(route: str, directory: Path) -> None:
@@ -223,6 +320,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         api_key=_require_env("SPATIALREAL_API_KEY"),
         app_id=_require_env("SPATIALREAL_APP_ID"),
         avatar_id=_require_env("SPATIALREAL_AVATAR_ID"),
+        environment=ENVIRONMENT,
         console_endpoint_url=os.getenv("SPATIALREAL_CONSOLE_ENDPOINT", ""),
         ingress_endpoint_url=os.getenv("SPATIALREAL_INGRESS_ENDPOINT", ""),
     )
