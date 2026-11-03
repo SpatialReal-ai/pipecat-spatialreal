@@ -5,10 +5,11 @@ It sits between the TTS service and ``transport.output()``. Each TTS context, fr
 (``pipecat/v1/avatar.proto``) and one driveningress request:
 
 * The turn's audio goes to driveningress as it arrives, at TTS speed, and is held back here.
-* When the first animation segment comes back, the turn is announced to the browser
-  (``turn_start``, then the segment's keyframes, as RTVI server messages) and the held audio is
-  released downstream at real time, ``lead_ms`` ahead so the transport never runs dry. Keyframes
-  that come later are pushed at once, ahead of the audio they belong to.
+* Once the first animation segment is back, the held audio is released downstream at real time,
+  ``lead_ms`` ahead so the transport never runs dry, right after the turn is announced to the
+  browser (``turn_start``, then the keyframes in hand, as RTVI server messages). A turn that
+  follows the previous one back to back is announced earlier, as soon as its animation is in
+  hand. Keyframes that come later are pushed at once, ahead of the audio they belong to.
 * When the TTS falls behind playback, the processor plays silence and sends the same silence to
   driveningress, so the audio inference saw and the audio in the room stay sample-identical.
 
@@ -96,6 +97,7 @@ class _Turn:
         self.sends = sends  # its audio still goes to driveningress
         self.sent = False  # it has a request on the current session
         self.degraded = not sends  # no animation is expected for it, or no more of it
+        self.ready = False  # its animation is in hand (or given up on): it may be announced
         self.announced = False  # turn_start pushed, or released without one (silent)
         self.chained = False  # its turn_start names the turn it follows back to back
         self.release_at: float | None = None  # loop time its release may start, once decided
@@ -692,15 +694,30 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             await self._push_message(envelope.state(self._status, self._status_reason))
 
     async def _announce_and_forward(self, deadlines: list[float]) -> None:
-        """Announce the turns that are ready, in order, and push the segments that arrived."""
+        """Announce the turns that are due, in order, and push the segments that arrived.
+
+        A turn that follows the previous one back to back is announced as soon as its animation
+        is in hand, well ahead of its audio. Any other is announced only when its release starts
+        (see ``_release``): the browser takes the first onset after an unchained turn_start as
+        the turn's own, so nothing the room plays before the turn's audio may come after it.
+        """
         for turn in list(self._turns):
-            if not turn.announced:
+            if not turn.ready:
                 due = self._announcement_due(turn)
                 if due is not True:
                     if due is not None:
                         deadlines.append(due)
                     return  # a later turn is never announced before this one
-                await self._announce(turn)
+                turn.ready = True
+                if turn.silent:
+                    turn.announced = True  # nothing to announce: it is only released in order
+                else:
+                    prev_turn_id, prev_turn_pcm_ms = self._follows()
+                    if prev_turn_id:
+                        turn.chained = True
+                        await self._announce(turn, prev_turn_id, prev_turn_pcm_ms)
+            if not turn.announced:
+                return  # unchained: announced when its release starts; later turns wait
             await self._forward_segments(turn)
 
     def _announcement_due(self, turn: _Turn) -> bool | float | None:
@@ -723,14 +740,12 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             turn.sends = False  # nothing reached driveningress: no request to close there
         return True
 
-    async def _announce(self, turn: _Turn) -> None:
+    async def _announce(
+        self, turn: _Turn, prev_turn_id: str = "", prev_turn_pcm_ms: float = 0.0
+    ) -> None:
         turn.announced = True
-        if turn.silent:
-            return
         if not turn.turn_id:
             turn.turn_id = spatialreal.generate_log_id()  # it never reached driveningress
-        prev_turn_id, prev_turn_pcm_ms = self._follows()
-        turn.chained = bool(prev_turn_id)
         turn.onsets_sent = len(turn.onsets)
         self._chain = turn
         await self._push_message(
@@ -756,9 +771,11 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         Any gap, or other audio between the two, would make that placement wrong by its
         length, and it cannot be corrected: the gap is only known once the turn is released,
         and by then its audio has long gone to inference at TTS speed, so no silence can be put
-        in front of it there. A turn that does not follow back to back is therefore announced
-        unchained, and its release waits until the room has been quiet for ``min_silence_ms``
-        and one chunk (see ``_release_start``), which lets the browser find its onset itself.
+        in front of it there. A turn that does not follow back to back is therefore unchained:
+        its release waits until the room has been quiet for ``min_silence_ms`` and one chunk
+        (see ``_release_start``), which lets the browser find its onset itself, and it is
+        announced only as that release starts, so that no sound the room plays before it can be
+        taken for that onset.
 
         Returns:
             ``(prev_turn_id, prev_turn_pcm_ms)``, or ``("", 0.0)`` when the turn is not chained.
@@ -805,13 +822,17 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         for turn in list(self._turns):
             if turn.drained:
                 continue
-            if not turn.announced:
-                return  # it holds everything behind it until it is announced
+            if not turn.ready:
+                return  # it holds everything behind it until its animation is in hand
             if turn.release_at is None:  # its turn to release has come: decide when it starts
                 turn.release_at = self._release_start(turn)
             if turn.release_at > self._now() + _TOLERANCE_S:
                 deadlines.append(turn.release_at)  # no silence for the gap: the room plays it
                 return
+            if not turn.announced:  # unchained: announced now, with the animation in hand
+                await self._announce(turn)
+                await self._forward_segments(turn)
+                self._wake.set()  # the turn after it may be announced now
             while turn.hold or not turn.finished:
                 if not turn.hold:  # the TTS is behind playback: play silence meanwhile
                     due = self._next_release(self._stall_ahead_s)

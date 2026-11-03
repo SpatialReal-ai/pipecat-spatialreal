@@ -88,6 +88,19 @@ def record_pushes(proc):
     return pushed
 
 
+def record_segments(proc):
+    """``(loop time, req_id)`` of every segment ``proc`` receives, in order."""
+    received = []
+    receive = proc._on_segment
+
+    def recorded(segment):
+        received.append((asyncio.get_running_loop().time(), segment.req_id))
+        receive(segment)
+
+    proc._on_segment = recorded  # setup() hands it to the driveningress client
+    return received
+
+
 @pytest.fixture(autouse=True)
 def pipecat_log():
     """Fail a test whose pipeline reported an error or left a task running.
@@ -515,6 +528,7 @@ def audio_pushes(pushed):
 async def test_a_turn_after_a_short_gap_is_not_chained_and_waits_for_a_findable_onset(fake):
     proc = make_proc(fake)
     pushed = record_pushes(proc)
+    segments = record_segments(proc)
     down, _ = await run_test(
         proc,
         frames_to_send=[
@@ -531,11 +545,9 @@ async def test_a_turn_after_a_short_gap_is_not_chained_and_waits_for_a_findable_
     )
     (t1, _), (t2, second_audio) = audio_pushes(pushed)
     end1 = t1 + 0.3  # turn 1's playout end
-    announced = [
-        t for t, f in pushed if isinstance(f, RTVIServerMessageFrame) and "turn_start" in f.data
-    ]
-    assert 0 < announced[1] - end1 < 0.15  # ready inside the gap the browser could not see
     _, second = messages(down, "turn_start")
+    ready = min(t for t, req_id in segments if req_id == second["turn_id"])
+    assert 0 < ready - end1 < 0.15  # ready inside the gap the browser could not see
     assert second["prev_turn_id"] == "" and second["prev_turn_pcm_ms"] == 0
     assert t2 - end1 >= GAP_S - 0.002
     assert type(second_audio) is TTSAudioRawFrame  # no silence was pushed for the gap
@@ -557,6 +569,7 @@ async def test_a_turn_ready_only_after_the_previous_one_played_out_is_not_chaine
     monkeypatch.setattr(fake, "_animate", slow)
     proc = make_proc(fake)
     pushed = record_pushes(proc)
+    segments = record_segments(proc)
     down, _ = await run_test(
         proc,
         frames_to_send=[
@@ -573,11 +586,9 @@ async def test_a_turn_ready_only_after_the_previous_one_played_out_is_not_chaine
     )
     (t1, _), (t2, second_audio) = audio_pushes(pushed)
     end1 = t1 + 0.3
-    announced = [
-        t for t, f in pushed if isinstance(f, RTVIServerMessageFrame) and "turn_start" in f.data
-    ]
-    assert 0 < announced[1] - end1 < 0.15  # ...but its animation only comes back after
     _, second = messages(down, "turn_start")
+    ready = min(t for t, req_id in segments if req_id == second["turn_id"])
+    assert 0 < ready - end1 < 0.15  # ...but its animation only comes back after
     assert second["prev_turn_id"] == "" and second["prev_turn_pcm_ms"] == 0
     assert t2 - end1 >= GAP_S - 0.002 and type(second_audio) is TTSAudioRawFrame
     assert_turn_lifecycle(down)
@@ -609,6 +620,113 @@ async def test_audio_between_two_turns_breaks_the_chain(fake):
     assert t2 - (t1 + 0.3 + 0.1) >= GAP_S - 0.002  # quiet long enough after the chime
     assert fake.received_audio_ms(first["turn_id"]) == 300  # the chime is in neither turn
     assert_turn_lifecycle(down)
+
+
+def turn_start_time(pushed, turn_id):
+    """When the ``turn_start`` of ``turn_id`` was pushed."""
+    return next(
+        t
+        for t, f in pushed
+        if isinstance(f, RTVIServerMessageFrame)
+        and f.data.get("turn_start", {}).get("turn_id") == turn_id
+    )
+
+
+async def test_an_unchained_turn_is_announced_when_its_release_starts(fake):
+    # A min_silence_ms of 400 widens the window turn 2 must be ready in (after turn 1 has played
+    # out, before the room has been quiet that long) so the case holds on a loaded machine.
+    proc = make_proc(fake, min_silence_ms=400)
+    pushed = record_pushes(proc)
+    segments = record_segments(proc)
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            SleepFrame(0.2),
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(0.5),  # turn 2 is ready ~200 ms after turn 1 has played out
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(1.2),
+        ],
+    )
+    _, second = messages(down, "turn_start")
+    turn_id = second["turn_id"]
+    (t1, _), (t2, _) = audio_pushes(pushed)
+    end1 = t1 + 0.3
+    ready = min(t for t, req_id in segments if req_id == turn_id)
+    assert 0 < ready - end1 < 0.4 and second["prev_turn_id"] == ""  # the case under test
+    announced = turn_start_time(pushed, turn_id)
+    # Not when its animation is in hand: when its release begins, after 440 ms of quiet.
+    assert announced - end1 >= (400 + 40) / 1000 - 0.002
+    assert 0 <= t2 - announced < 0.05
+    # At its release: turn_start, then every segment already in hand, in order, then its audio.
+    at_release = [f for t, f in pushed if t >= announced]
+    first_audio = next(i for i, f in enumerate(at_release) if isinstance(f, TTSAudioRawFrame))
+    head = kinds(at_release[: first_audio + 1])
+    assert head[0] == ("rtvi", "turn_start") and head[-1] == "TTSAudioRawFrame"
+    assert set(head[1:-1]) == {("rtvi", "frames"), "TTSStartedFrame"}
+    assert head.index("TTSStartedFrame") == len(head) - 2  # all the frames go first
+    seqs = [
+        f.data["frames"]["segment_seq"]
+        for f in at_release[1:first_audio]
+        if isinstance(f, RTVIServerMessageFrame) and "frames" in f.data
+    ]
+    in_hand = len([t for t, req_id in segments if req_id == turn_id and t < announced])
+    assert in_hand >= 1 and sorted(set(seqs)) == list(range(in_hand)) and seqs == sorted(seqs)
+
+
+async def test_audio_released_before_an_unchained_turn_comes_before_its_announcement(fake):
+    chime = OutputAudioRawFrame(
+        audio=pcm16(sine(100, 24000, 880)), sample_rate=24000, num_channels=1
+    )
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    segments = record_segments(proc)
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(600),  # the chime goes out ~400 ms in, long after turn 2's animation
+            TTSStoppedFrame(),
+            chime,
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(1.8),
+        ],
+    )
+    _, second = messages(down, "turn_start")
+    assert second["prev_turn_id"] == ""
+    chime_pushed = next(t for t, f in pushed if f is chime)
+    # Turn 2's animation was in hand before the chime played...
+    assert min(t for t, req_id in segments if req_id == second["turn_id"]) < chime_pushed
+    # ...and still the browser hears of turn 2 only after the chime, which it could otherwise
+    # take for turn 2's onset.
+    assert turn_start_time(pushed, second["turn_id"]) > chime_pushed
+
+
+async def test_a_chained_turn_is_still_announced_ahead_of_the_previous_turns_end(fake):
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await run_test(
+        proc,
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(600),
+            TTSStoppedFrame(),
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(1.8),
+        ],
+    )
+    first, second = messages(down, "turn_start")
+    assert second["prev_turn_id"] == first["turn_id"]
+    (t1, _), _ = audio_pushes(pushed)
+    assert turn_start_time(pushed, second["turn_id"]) < t1 + 0.6  # before turn 1 has played out
 
 
 async def test_end_frame_waits_for_the_open_turn(fake):
