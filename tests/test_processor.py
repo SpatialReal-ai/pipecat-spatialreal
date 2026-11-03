@@ -353,6 +353,30 @@ async def test_turn_start_reports_the_onsets_found_so_far(fake):
     assert start["onsets_ms"] + later == [4801 * 1000 / 24000]
 
 
+async def test_a_mid_turn_onset_is_reported_once(fake):
+    silence = TTSAudioRawFrame(audio=bytes(2 * 4800), sample_rate=24000, num_channels=1)
+    down, _ = await run_test(
+        make_proc(fake),
+        frames_to_send=[
+            TTSStartedFrame(),
+            tone_frame(300),
+            SleepFrame(0.1),  # the turn is announced before the rest comes
+            silence,  # 200 ms, more than min_silence_ms (150)
+            tone_frame(300),
+            TTSStoppedFrame(),
+            SleepFrame(1.0),
+        ],
+    )
+    (start,) = messages(down, "turn_start")
+    assert start["onsets_ms"] == [1 * 1000 / 24000]
+    # The second tone starts at sample 12000 (500 ms), audible from the next one. It is reported
+    # once, with the next segment; the segments after that bring no new onset and no message.
+    assert messages(down, "turn_onsets") == [
+        {"turn_id": start["turn_id"], "onsets_ms": [12001 * 1000 / 24000]}
+    ]
+    assert len({p["segment_seq"] for m, p in avatar_messages(down) if m == "frames"}) > 2
+
+
 async def test_frames_in_a_turn_keep_their_order(fake):
     text = TextFrame("hello")
     down, _ = await run_test(
