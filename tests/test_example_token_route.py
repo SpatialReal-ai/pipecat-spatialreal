@@ -6,6 +6,7 @@ console and nowhere else. The console is a local aiohttp server here; nothing le
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -220,14 +221,25 @@ async def test_the_route_answers_502_when_the_console_refuses(
     assert API_KEY not in raised.value.detail
 
 
+# --- the pages
+
+
+def test_the_pages_are_served_from_the_runner_app(bot):
+    from pipecat.runner.run import app
+
+    mounted = {route.path for route in app.routes if type(route).__name__ == "Mount"}
+
+    assert {"/avatar", "/probe"} <= mounted
+
+
 # --- the file as a program
 
 
-def test_the_bot_starts_and_prints_its_help_without_any_keys():
+def _run_help(script: Path) -> subprocess.CompletedProcess:
+    """Run ``script --help`` the way a developer would, with no SpatialReal or service keys set."""
     env = {k: v for k, v in os.environ.items() if not k.endswith(("_API_KEY", "_APP_ID"))}
-
-    done = subprocess.run(
-        [sys.executable, str(BOT_PATH), "--help"],
+    return subprocess.run(
+        [sys.executable, str(script), "--help"],
         check=False,
         capture_output=True,
         text=True,
@@ -235,5 +247,21 @@ def test_the_bot_starts_and_prints_its_help_without_any_keys():
         timeout=120,
     )
 
+
+def test_the_bot_starts_and_prints_its_help_without_any_keys():
+    done = _run_help(BOT_PATH)
+
     assert done.returncode == 0, done.stderr
     assert "--transport" in done.stdout
+
+
+def test_a_copy_of_bot_py_alone_still_starts_and_says_which_pages_it_does_not_serve(tmp_path):
+    alone = tmp_path / "bot.py"  # no client/ or probe/ beside it
+    shutil.copy(BOT_PATH, alone)
+
+    done = _run_help(alone)
+
+    assert done.returncode == 0, done.stderr
+    assert "--transport" in done.stdout
+    assert "Not serving /avatar/" in done.stderr
+    assert "Not serving /probe/" in done.stderr

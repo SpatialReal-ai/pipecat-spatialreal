@@ -80,6 +80,7 @@ const APP_MESSAGE_MAX = 4096 // Daily's cap on one app message, in bytes
 const LATE_START_MS = 1500  // an onset may precede the arrival of its turn_start by this much
 const AFTER_CLOSE_MS = 800  // ... or follow its turn_end / turn_abort (audio trails the messages)
 const LATER_TOL_MS = 120    // how far from its announced place a later onset is still looked for
+const CHAIN_TOL_MS = 200    // ... and a chained turn's first onset from where the previous turn puts it
 
 // Every key of a payload member is present (avatar.proto, JSON rules); a missing key is a bug.
 const PAYLOAD_KEYS = {
@@ -222,8 +223,9 @@ function markerNear(markers, type, t, back, ahead) {
  * onsets:  [{ pos, wall, level }]    onsets found in the tapped track (pos = tap sample, wall = ms)
  * markers: [{ t, type }]             RTVI messages about the conversation (user-started-speaking, ...)
  * rate:    the AudioContext's sample rate, which is the rate of `pos`
+ * notes:   [{ t, text }]              what the page itself did (tapped a track, replaced it)
  */
-function analyze({ log, onsets, markers, rate }) {
+function analyze({ log, onsets, markers, rate, notes = [] }) {
   const problems = []
   const states = []
   const events = []
@@ -324,22 +326,51 @@ function analyze({ log, onsets, markers, rate }) {
   }
 
   // 3. Pair the tapped onsets with the turns, in time order. An onset is first a later onset of
-  //    a turn already placed (it falls where onsets_ms says one should), else the first onset of
-  //    the oldest turn that can still own it, else a stray.
+  //    a turn that is already placed (it falls where onsets_ms says one should), else the first
+  //    onset of the oldest turn that can still own it, else a stray.
+  //
+  //    A turn is placed by its first onset heard in the tap. A chained turn (prev_turn_id: it
+  //    follows the previous one without a pause) can have none. The processor counts a turn's
+  //    leading silence from the turn's own first sample, so it always announces onsets_ms[0]; the
+  //    tap runs on across the join and needs min_silence_ms of quiet before it finds a sound, so
+  //    when the end of the previous turn, any gap and the new turn's own silence add up to less,
+  //    there is nothing to find and nothing is wrong. Such a turn is placed where the previous
+  //    turn's exact length puts it, as the web SDK does.
+  function chainPlace(turn, seen = new Set()) {
+    if (!turn.start) return null
+    const start = turn.startBody
+    if (!start.prev_turn_id || !turn.onsetsMs.length || seen.has(turn.id)) return null
+    seen.add(turn.id)
+    const prev = turns.get(start.prev_turn_id)
+    const from = prev && prev.onsetsMs.length ? placeOf(prev, seen) : null
+    if (!from || !Number.isFinite(start.prev_turn_pcm_ms)) return null
+    const shift = toSamples(start.prev_turn_pcm_ms + turn.onsetsMs[0] - prev.onsetsMs[0])
+    return { pos: from.pos + shift, wall: from.wall + toMs(shift) }
+  }
+  /** Where the turn's first onset is in the tap: the onset heard, else where the chain puts it, else null. */
+  function placeOf(turn, seen = new Set()) {
+    if (turn.primary) return { pos: turn.primary.pos, wall: turn.primary.wall, heard: true }
+    const place = chainPlace(turn, seen)
+    return place && { ...place, heard: false }
+  }
   const strays = []
   const canOwn = (turn, onset) => {
     if (!turn.start) return false
     const closed = turn.end ? turn.end.t : turn.abort ? turn.abort.t : Infinity
-    return onset.wall >= turn.start.t - LATE_START_MS && onset.wall <= closed + AFTER_CLOSE_MS
+    if (onset.wall < turn.start.t - LATE_START_MS || onset.wall > closed + AFTER_CLOSE_MS) return false
+    // A turn whose place is known takes an onset near it only, so it cannot take a later turn's.
+    const place = placeOf(turn)
+    return !place || Math.abs(onset.pos - place.pos) <= toSamples(CHAIN_TOL_MS)
   }
   const owner = new Map()
   for (const onset of onsets) {
     let claimed = false
     for (const turn of list) {
-      if (!turn.primary) continue
+      const place = placeOf(turn)
+      if (!place) continue
       for (let k = 1; k < turn.onsetsMs.length && !claimed; k++) {
         if (turn.later[k]) continue
-        const expected = turn.primary.pos + toSamples(turn.onsetsMs[k] - turn.onsetsMs[0])
+        const expected = place.pos + toSamples(turn.onsetsMs[k] - turn.onsetsMs[0])
         if (Math.abs(onset.pos - expected) <= toSamples(LATER_TOL_MS)) {
           turn.later[k] = onset
           owner.set(onset, { turn, k })
@@ -374,13 +405,17 @@ function analyze({ log, onsets, markers, rate }) {
     row.degraded = !!start.degraded
     row.o0 = turn.onsetsMs.length ? turn.onsetsMs[0] : null
     if (start.degraded) row.fails.push('turn_start.degraded')
-    if (turn.primary) {
-      row.lead = turn.primary.wall - turn.start.t
+    const place = placeOf(turn)
+    if (place) {
+      // placed: no onset of its own was heard, the previous turn's length gives the position
+      row.placed = !place.heard
+      if (row.placed) row.notes.push('chained: no onset of its own to hear, placed from the previous turn')
+      row.lead = place.wall - turn.start.t
       if (row.lead < LEAD_MIN_MS) row.fails.push(`turn_start only ${Math.round(row.lead)} ms ahead of the onset`)
-      row.skew = row.o0 == null ? null : row.lead - row.o0
+      row.skew = row.placed || row.o0 == null ? null : row.lead - row.o0
       const segment = turn.segments.get(0)
       if (segment) {
-        row.seg0 = { chunks: segment.chunks.size, count: segment.count, bytes: segment.bytes, margin: turn.primary.wall - segment.lastT, complete: segment.complete }
+        row.seg0 = { chunks: segment.chunks.size, count: segment.count, bytes: segment.bytes, margin: place.wall - segment.lastT, complete: segment.complete }
         if (!segment.complete || row.seg0.margin < 0) row.fails.push('segment 0 was not whole before the onset')
       } else if (!start.degraded) {
         row.fails.push('no segment 0 before the onset')
@@ -388,26 +423,26 @@ function analyze({ log, onsets, markers, rate }) {
       for (let k = 1; k < turn.onsetsMs.length; k++) {
         const heard = turn.later[k]
         if (heard) {
-          const err = toMs(heard.pos - turn.primary.pos) - (turn.onsetsMs[k] - turn.onsetsMs[0])
+          const err = toMs(heard.pos - place.pos) - (turn.onsetsMs[k] - turn.onsetsMs[0])
           row.laterErrs.push(err)
           if (Math.abs(err) > ONSET_TOL_MS) row.fails.push(`onset ${k} is ${Math.round(err)} ms off`)
         } else if (turn.end) {
           row.fails.push(`onset ${k} (${turn.onsetsMs[k]} ms) was not heard`)
         }
       }
-      if (start.prev_turn_id) {
+      if (start.prev_turn_id && place.heard) {
         // A chained turn begins where the previous one's audio ends, which fixes its first onset.
-        const prev = turns.get(start.prev_turn_id)
-        if (prev && prev.primary && prev.onsetsMs.length && row.o0 != null) {
-          const expected = prev.primary.pos - toSamples(prev.onsetsMs[0]) + toSamples(start.prev_turn_pcm_ms) + toSamples(row.o0)
-          row.chainErr = toMs(turn.primary.pos - expected)
+        const chain = chainPlace(turn)
+        if (chain) {
+          row.chainErr = toMs(turn.primary.pos - chain.pos)
           if (Math.abs(row.chainErr) > ONSET_TOL_MS) row.fails.push(`chained onset is ${Math.round(row.chainErr)} ms off`)
         } else {
           row.notes.push('chained to a turn that was not measured')
         }
       }
     } else if (turn.end) {
-      row.fails.push('no audible onset was heard')
+      // Nothing explains the missing onset: a chained turn is excused only where the chain can place it.
+      row.fails.push(start.prev_turn_id ? 'no onset was heard, and the previous turn it follows was not measured, so it cannot be placed' : 'no audible onset was heard')
     }
     if (turn.end) row.end = { at: turn.end.t - turn.start.t, pcmMs: turn.endBody.pcm_ms, segments: turn.endBody.segment_count }
     if (turn.abort) {
@@ -445,7 +480,12 @@ function analyze({ log, onsets, markers, rate }) {
     const where = o ? `[${short(o.turn.id)}] ${o.k === 0 ? `first onset, ${Math.round(onset.wall - o.turn.start.t)} ms after turn_start` : `onset ${o.k}`}` : 'no turn accounts for it'
     events.push({ t: onset.wall, text: `tap onset at sample ${onset.pos}, level ${onset.level.toFixed(3)}: ${where}` })
   }
+  for (const turn of list) {
+    const place = turn.start && !turn.primary ? placeOf(turn) : null
+    if (place) events.push({ t: place.wall, text: `[${short(turn.id)}] first onset placed from the previous turn's length, ${Math.round(place.wall - turn.start.t)} ms after turn_start (none heard)` })
+  }
   for (const m of markers) events.push({ t: m.t, text: `rtvi ${m.type}` })
+  for (const n of notes) events.push({ t: n.t, text: `page: ${n.text}` })
   events.sort((a, b) => a.t - b.t)
 
   return { turns: list.map(turn => turn.row), problems, states, strays, events }
@@ -469,6 +509,7 @@ const $ = id => document.getElementById(id)
 const log = []        // accepted avatar messages: { t, tap, size, data }
 const onsets = []     // onsets found in the tapped track: { pos, wall, level }
 const markers = []    // RTVI messages that time a barge-in: { t, type }
+const notes = []      // what the page itself did, for the timeline: { t, text }
 
 let ctx = null
 let rate = 0
@@ -477,9 +518,15 @@ let detector = null
 let botTrackId = null
 let tapPos = 0        // samples of the bot track received so far
 let lastAudible = 0   // wall time of the latest block with sound
-const keepalive = []  // the silent media elements Chrome needs (see tap())
+let tapGraph = null   // what tap() built for the bot's track, so that a replaced track can be let go
 
 const status = text => { $('status').textContent = text }
+/** Say what the page did: on the status line and on the timeline. */
+function note(text) {
+  notes.push({ t: Date.now(), text })
+  status(text)
+  schedule()
+}
 
 /** Samples tapped from the bot track, as PCM16 pages: the source of capture.wav. */
 class Recorder {
@@ -520,8 +567,24 @@ const WORKLET = `class Tap extends AudioWorkletProcessor {
 }
 registerProcessor('tap', Tap)`
 
+/** Release the graph tap() built, so that nothing more reaches onBlock from the old track. */
+function stopTap() {
+  if (!tapGraph) return
+  const { element, source, node, mute } = tapGraph
+  tapGraph = null
+  node.port.onmessage = null
+  source.disconnect()
+  node.disconnect()
+  mute.disconnect()
+  element.pause()
+  element.srcObject = null
+  element.remove()
+}
+
 /** Route the bot's track into a muted worklet. Nothing here is audible. */
 function tap(track) {
+  const replaced = !!tapGraph
+  stopTap() // a second graph would feed the same detector and recorder: twice the samples, a garbled wav
   const stream = new MediaStream([track])
   // Chrome feeds a remote WebRTC track to Web Audio only while a media element holds it. This
   // one plays at volume 0, and the graph below ends in a gain of 0: the track is never heard.
@@ -530,18 +593,21 @@ function tap(track) {
   element.volume = 0
   element.hidden = true
   document.body.appendChild(element)
-  keepalive.push(element)
   element.play().catch(e => status(`the keep-alive element was refused: ${e.message}`))
 
   const node = new AudioWorkletNode(ctx, 'tap')
   const mute = ctx.createGain()
   mute.gain.value = 0
-  ctx.createMediaStreamSource(stream).connect(node)
+  const source = ctx.createMediaStreamSource(stream)
+  source.connect(node)
   node.connect(mute)
   mute.connect(ctx.destination)
   node.port.onmessage = e => onBlock(e.data, Date.now())
-  detector = new OnsetDetector(rate, THRESHOLD, MIN_SILENCE_MS)
-  status(`tapping the bot's track at ${rate} Hz, silently; waiting for speech`)
+  tapGraph = { element, source, node, mute }
+  detector = new OnsetDetector(rate, THRESHOLD, MIN_SILENCE_MS) // a new stream: its first sound is a first onset
+  note(replaced
+    ? "the bot's audio track was replaced: tapping the new one, the old one is let go (capture.wav carries on across the swap)"
+    : `tapping the bot's track at ${rate} Hz, silently; waiting for speech`)
 }
 
 function onBlock(block, wall) {
@@ -680,7 +746,7 @@ const clock = t => {
 function render() {
   let result
   try {
-    result = analyze({ log, onsets, markers, rate: rate || 48000 })
+    result = analyze({ log, onsets, markers, rate: rate || 48000, notes })
   } catch (e) {
     $('summary').textContent = `analysis failed: ${e.message}`
     return
@@ -702,8 +768,8 @@ function render() {
     const seg = r.seg0
     tr.append(
       cell(r.short, 'l'),
-      cell(r.lead == null ? '-' : signed(r.lead), r.lead == null ? '' : r.lead >= LEAD_MIN_MS ? 'ok' : 'bad'),
-      cell(seg ? `${seg.chunks}/${seg.count} chunks, ${seg.bytes} B, ${seg.margin >= 0 ? `${Math.round(seg.margin)} ms before` : `${Math.round(-seg.margin)} ms AFTER`}` : '-', seg ? (seg.complete && seg.margin >= 0 ? 'ok' : 'bad') : ''),
+      cell(r.lead == null ? '-' : (r.placed ? '~' : '') + signed(r.lead), r.lead == null ? '' : r.lead >= LEAD_MIN_MS ? 'ok' : 'bad'),
+      cell(seg ? `${seg.chunks}/${seg.count} chunks, ${seg.bytes} B, ${seg.margin >= 0 ? `${r.placed ? '~' : ''}${Math.round(seg.margin)} ms before` : `${Math.round(-seg.margin)} ms AFTER`}` : '-', seg ? (seg.complete && seg.margin >= 0 ? 'ok' : 'bad') : ''),
       cell(r.o0 == null ? '-' : r.o0.toFixed(1)),
       cell(r.skew == null ? '-' : signed(r.skew)),
       cell(onsetDelta(r), onsetDeltaClass(r)),
@@ -744,7 +810,7 @@ setInterval(() => {
 }, 250)
 
 render()
-window.probe = { log, onsets, markers, analyze: () => analyze({ log, onsets, markers, rate }) }
+window.probe = { log, onsets, markers, notes, analyze: () => analyze({ log, onsets, markers, rate, notes }) }
 </script>
 </body>
 </html>

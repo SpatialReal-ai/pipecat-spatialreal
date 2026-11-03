@@ -28,7 +28,8 @@ interruption) and `degraded` events (the avatar fell back to plain audio, with t
 **Never play the bot's track yourself.** Do not attach it to an `<audio>` element and do not use
 `PipecatClientAudio`: the SDK plays it, and a second player doubles the voice and breaks the lip
 sync. The page creates its audio context inside the click, before any request, because some
-browsers unlock audio only there.
+browsers unlock audio only there, and closes it when the run ends: the SDK plays through a context
+it is handed but never closes it, and browsers cap how many stay open.
 
 ## Get the web SDK's Pipecat session
 

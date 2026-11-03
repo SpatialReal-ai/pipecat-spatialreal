@@ -276,8 +276,104 @@ test('no onset ever heard: ended turns fail, an aborted one does not', () => {
   s.onsets.length = 0
   const rows = analyze(s).turns
   assert.equal(rows[0].status, 'fail')       // A already ended without ever being heard
-  assert.equal(rows[1].status, 'fail')
+  assert.equal(rows[1].status, 'fail')       // B is chained to A, which was not heard either: nothing places it
+  assert(rows[1].fails.some(f => /cannot be placed/.test(f)), rows[1].fails.join('|'))
   assert.equal(rows[2].status, 'pass')       // C was cut off by a barge-in before anything was heard
+})
+
+// --- Chained turns. The processor starts a fresh onset tracker for every turn and so announces
+// onsets_ms[0] for a turn that begins inside the previous one's sound; the tap runs on across the
+// join and finds an onset only after min_silence_ms of quiet, so there may be none to hear.
+
+/** goodSession() in which the tap hears no onset at the join with turn B (its own is not found). */
+function sessionWithoutBsOnset() {
+  const s = goodSession()
+  const [heard] = s.onsets.splice(2, 1)
+  assert.equal(heard.wall, s.T0 + 4000)          // that was B's first onset
+  return s
+}
+const turnStart = (s, id) => s.log.find(r => r.data.turn_start && r.data.turn_start.turn_id === id).data.turn_start
+
+test('a chained turn with no onset of its own is placed from the previous turn, not failed', () => {
+  const r = analyze(sessionWithoutBsOnset())
+  const b = r.turns[1]
+  assert.equal(b.status, 'pass', b.fails.join('; '))
+  assert.equal(b.placed, true)
+  assert.equal(Math.round(b.lead), 850)            // turn_start at 3150, where A's length puts the onset: 4000
+  assert.equal(b.skew, null)
+  assert(b.notes.some(n => /placed from the previous turn/.test(n)), b.notes.join('|'))
+  assert.equal(b.seg0.complete, true)
+  assert(b.seg0.margin > 0)
+  assert.equal(r.strays.length, 0)
+  assert.deepEqual(plain(r.problems), [])
+  assert(r.events.some(e => /\[bbbbbbbb\] first onset placed from the previous turn's length, 850 ms after turn_start/.test(e.text)))
+  assert.equal(r.turns[2].lead, 300)               // C keeps its own onset
+})
+
+test('a placed chained turn keeps its later onsets: they are not taken for its first', () => {
+  const s = sessionWithoutBsOnset()
+  turnStart(s, B).onsets_ms = [0.0, 600.0]        // a second onset 600 ms in, which the tap does hear
+  s.onsets.splice(2, 0, { pos: 480000 - samples(180) + samples(3000) + samples(600), wall: s.T0 + 4600, level: 0.1 })
+  const r = analyze(s)
+  const b = r.turns[1]
+  assert.equal(b.placed, true)
+  assert.deepEqual(plain(b.laterErrs.map(Math.round)), [0])
+  assert.equal(b.status, 'pass', b.fails.join('; '))
+  assert.equal(r.strays.length, 0)
+  assert.equal(r.turns[2].lead, 300)
+})
+
+test('a placed turn takes an onset near its place only, not the next turn\'s', () => {
+  const s = sessionWithoutBsOnset()
+  // Turn D starts 100 ms after B's turn_end and its onset comes 300 ms after that: inside B's window,
+  // but 3.4 s away from where A's length puts B's onset.
+  const D = 'dddddddd-4444-4444-8444-444444444444'
+  const start = clone(E.C_start); start.turn_start.turn_id = D; start.turn_start.onsets_ms = [100]
+  const seg = clone(E.C_seg0[0]); seg.frames.turn_id = D; seg.frames.chunk_count = 1
+  s.log.push({ t: s.T0 + 5100, tap: 0, size: 3000, data: start }, { t: s.T0 + 5102, tap: 0, size: 3000, data: seg })
+  s.log.sort((a, b) => a.t - b.t)
+  s.onsets.splice(2, 0, { pos: 480000 + 300000, wall: s.T0 + 5400, level: 0.2 })
+  const r = analyze(s)
+  const [, b, , d] = [r.turns[0], r.turns[1], r.turns[2], r.turns.find(t => t.id === D)]
+  assert.equal(b.placed, true)
+  assert.equal(d.lead, 300)
+  assert.equal(d.placed, false)                   // D's own onset, heard
+  assert.equal(r.strays.length, 0)
+})
+
+test('a chained onset that is heard but off its place is paired and failed; far off it is a stray', () => {
+  for (const off of [60, 150]) {
+    const s = goodSession()
+    s.onsets[2].pos += samples(off)
+    s.onsets[2].wall += off
+    const r = analyze(s)
+    assert.equal(r.strays.length, 0, `${off} ms`)
+    assert.equal(Math.round(r.turns[1].chainErr), off)
+    assert(r.turns[1].fails.some(f => new RegExp(`chained onset is ${off} ms off`).test(f)), `${off} ms: ${r.turns[1].fails}`)
+  }
+  const far = goodSession()
+  far.onsets[2].pos += samples(260)
+  far.onsets[2].wall += 260
+  const r = analyze(far)
+  assert.equal(r.strays.length, 1)
+  assert.equal(r.turns[1].placed, true)
+})
+
+test('a chain that points at itself or loops does not hang the analysis', () => {
+  const s = sessionWithoutBsOnset()
+  turnStart(s, A).prev_turn_id = A                // itself
+  turnStart(s, B).prev_turn_id = C                // B -> C -> B
+  turnStart(s, C).prev_turn_id = B
+  const r = analyze(s)
+  assert.equal(r.turns.length, 3)
+})
+
+test('the page\'s own notes are on the timeline', () => {
+  const s = goodSession()
+  s.notes = [{ t: s.T0 + 500, text: "tapping the bot's track" }, { t: s.T0 + 2000, text: "the bot's audio track was replaced" }]
+  const lines = analyze(s).events.map(e => e.text)
+  assert(lines.includes("page: tapping the bot's track"))
+  assert(lines.indexOf("page: the bot's audio track was replaced") > lines.findIndex(l => /\[aaaaaaaa\] turn_start/.test(l)))
 })
 
 test('detector: finds the onsets the processor\'s OnsetTracker finds, block by block', () => {

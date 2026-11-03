@@ -1,6 +1,6 @@
 # Example: a Pipecat voice bot with a SpatialReal avatar
 
-Tested with Pipecat v1.15.0.
+Written for Pipecat v1.15.0.
 
 | Path | What it is |
 |---|---|
@@ -56,18 +56,19 @@ true}`, unless `DAILY_ROOM_URL` is set; the example pages do. `bot.py` adds:
 The avatar needs RTVI, which Pipecat's `PipelineWorker` enables by default: the animation reaches
 the browser as RTVI server messages, and the bot's audio keeps playing through the transport.
 
-## What to expect from a good run
+## Checking a run
 
-Measured with the [probe](probe/README.md) over ten consecutive turns on Daily:
+The [probe](probe/README.md) checks a Daily session: start the bot with `-t daily`, open
+<http://localhost:7860/probe/receiver.html?mic=1>, press Start, talk for ten turns and interrupt the
+bot once. On every turn a good run should show:
 
-* `turn_start` arrives at least 100 ms before the audible onset of its speech;
-* every chunk of a turn's first segment has arrived before that onset;
-* the onsets the processor announces and the onsets found in the audio the browser receives agree
-  to within 40 ms (the probe's README says what it can compare);
+* `turn_start` arriving at least 100 ms before the audible onset of its speech;
+* every chunk of the turn's first segment arrived before that onset;
+* the onsets the processor announces and the onsets found in the audio the browser receives within
+  40 ms of each other (the probe's README says what it can compare);
 * no `state` message with `STATUS_DEGRADED`;
-* interrupting the bot mid-sentence gives `turn_abort` within 300 ms of the user starting to speak.
+* after an interruption, `turn_abort` within 300 ms of Pipecat's `user-started-speaking` message,
+  which arrives about 0.2 s (the VAD's `start_secs`) after the user's first sound.
 
-If the onsets differ by more than 40 ms on real speech (a soft attack or breath noise right at the
-threshold), change `threshold` and, if needed, `min_silence_ms` until ten turns pass, then make
-that the constructor default. Both ends must use the same rule: the probe takes the two values as
-URL parameters, and the web SDK's detector must be changed with them.
+These are the values to expect, to be confirmed by the first live run on Daily, which has not been
+done yet.

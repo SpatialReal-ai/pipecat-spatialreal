@@ -55,6 +55,7 @@ try {
 
 let session = null
 let client = null
+let audioContext = null // one per run: made in the click, closed by stop()
 
 async function request(path, init) {
   const response = await fetch(`${RUNNER}${path}`, init)
@@ -75,10 +76,11 @@ async function makeTransport() {
 
 $('start').onclick = async () => {
   $('start').disabled = true
-  // Inside the click, before any await: the browser lets this context play. session.start()
-  // runs after the requests below, which is too late for some browsers to unlock audio.
-  const audioContext = sdk.createUnlockedAudioContext()
   try {
+    // Inside the click, before any await: the browser lets this context play. session.start()
+    // runs after the requests below, which is too late for some browsers to unlock audio.
+    audioContext ??= sdk.createUnlockedAudioContext()
+
     // 1. The browser gets a session token from our own backend; the API key never leaves it.
     say('getting a session token')
     const { session_token, avatar_id, app_id } = await request('/spatialreal-token')
@@ -124,10 +126,11 @@ $('start').onclick = async () => {
 }
 
 async function stop() {
-  const [c, s] = [client, session]
-  client = session = null
+  const [c, s, a] = [client, session, audioContext]
+  client = session = audioContext = null
   if (c) await c.disconnect().catch(() => {}) // the bot sees its client leave and ends the session
   if (s) await s.dispose().catch(() => {})
+  if (a) await a.close().catch(() => {}) // the SDK plays through it but never closes it; browsers cap live contexts
   $('start').disabled = !sdk
   $('stop').disabled = true
 }

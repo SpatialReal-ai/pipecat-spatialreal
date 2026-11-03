@@ -9,8 +9,12 @@ ships.
 
 The page never plays the bot. The track goes into a muted AudioWorklet, held by a media element at
 volume 0 (Chrome feeds a remote track to Web Audio only while an element holds it), and the graph
-ends in a gain of 0. Onsets are found with the processor's own rule, `threshold` and `min_silence_ms`,
-on the same PCM16 quantisation as the web SDK.
+ends in a gain of 0. If the room later hands over another audio track for the bot, the first graph
+is released and the new track tapped in its place, with a line on the timeline; `capture.wav`
+carries on across the swap.
+
+Onsets are found with the processor's own rule, `threshold` and `min_silence_ms`, on the same PCM16
+quantisation as the web SDK.
 
 ## Run it
 
@@ -46,7 +50,7 @@ late only changes its own row.
 | Column | Meaning | Passes when |
 |---|---|---|
 | `turn` | First 8 characters of `turn_id`. | |
-| `lead ms` | The detected audible onset minus the arrival of `turn_start`. | at least 100 |
+| `lead ms` | The detected audible onset minus the arrival of `turn_start`. A `~` marks a chained turn with no onset of its own, placed from the previous turn (see below). | at least 100 |
 | `segment 0` | Chunks arrived of `chunk_count`, the segment's bytes once joined in `chunk_index` order, and how long before the onset the last chunk arrived. | whole, and before the onset |
 | `onsets_ms[0]` | The processor's first onset for the turn. | |
 | `skew ms` | `lead` minus `onsets_ms[0]`: how much slower the audio path is than the message path. | steady from turn to turn |
@@ -72,6 +76,20 @@ not depend on where the turn starts: the spacing of onsets inside a turn, and th
 chained turn, which the previous turn fixes. A turn with a single onset is checked on `lead`,
 `segment 0` and `skew` only; `skew` is `lead` minus `onsets_ms[0]`, so an onset found early or late
 shows as skew that moves between turns.
+
+**A chained turn can have no onset to hear.** A turn with `prev_turn_id` follows the previous one
+without a pause longer than `min_silence_ms`. The processor starts a fresh onset tracker for every
+turn and counts a turn's leading silence from the turn's own first sample, so it always announces
+`onsets_ms[0]`. The receiver's detector runs on across the join and needs `min_silence_ms` (150 ms)
+of quiet before it finds a sound: when the end of the previous turn, any gap and the new turn's own
+leading silence add up to less, there is nothing to find, and nothing is wrong. The probe does not
+fail such a turn for it. It places the turn's first onset where the previous turn's exact length
+puts it, which is what the web SDK does, marks `lead` with `~`, and checks what that position
+allows: `lead`, segment 0 and the spacing of later onsets. It cannot confirm that the audio is
+there, because there is no onset to confirm it with. When the join is quiet enough for an onset to
+be found, that onset is compared with the chain's position instead (`onset Δ` shows `chain +N`,
+within 40 ms). A chained turn whose predecessor was not measured cannot be placed, so a missing
+onset is a failure there.
 
 `abort Δ` counts from Pipecat's `user-started-speaking` message, which the bot sends once its VAD
 confirms speech (`start_secs`, 0.2 s by default). It times the processor's reaction, not the sound

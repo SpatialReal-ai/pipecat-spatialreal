@@ -167,10 +167,26 @@ async def spatialreal_token() -> dict[str, str]:
     return {"session_token": minted["session_token"], "avatar_id": avatar_id, "app_id": app_id}
 
 
+def _serve_page(route: str, directory: Path) -> None:
+    """Serve a directory of this example at ``route``, if this copy of the file has it.
+
+    The pages are optional: a copy of ``bot.py`` on its own still gives the bot and the token
+    route, and the log says which pages are not served.
+
+    Args:
+        route: The URL path to serve the page at, for example ``/avatar``.
+        directory: The directory beside this file that holds the page.
+    """
+    if directory.is_dir():
+        app.mount(route, StaticFiles(directory=directory, html=True), name=route.strip("/"))
+    else:
+        logger.info(f"Not serving {route}/: {directory} does not exist")
+
+
 # The pages, served by this process so that one command is enough. Register them before main().
 _EXAMPLES = Path(__file__).resolve().parent
-app.mount("/avatar", StaticFiles(directory=_EXAMPLES / "client", html=True), name="avatar")
-app.mount("/probe", StaticFiles(directory=_EXAMPLES / "probe", html=True), name="probe")
+_serve_page("/avatar", _EXAMPLES / "client")
+_serve_page("/probe", _EXAMPLES / "probe")
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> None:
@@ -228,6 +244,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         pipeline,
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        # An unusable STT, LLM or TTS ends the session; the avatar processor never pushes errors.
         processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
 
