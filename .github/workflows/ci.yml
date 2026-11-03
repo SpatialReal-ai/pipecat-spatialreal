@@ -12,6 +12,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A run takes about two minutes; a hung one is cut off here instead of at GitHub's six hours.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +25,12 @@ jobs:
       - uses: astral-sh/setup-uv@v4
         with:
           python-version: ${{ matrix.python-version }}
+
+      # tests/probe_check.mjs runs the probe page's analysis under Node, so the test that calls it
+      # needs one; the runner image's own Node is not something to count on.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
 
       # The example extra brings FastAPI and the Pipecat runner, which the token-route tests of
       # examples/bot.py import: without it they are skipped.
