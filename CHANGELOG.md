@@ -28,14 +28,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The probe page (`examples/probe`) runs the alignment live on the tapped track, prints its
   alignment columns (`first lock ms`, `offset ms`, `p95 err ms`, `held / acc` and the four checks)
   and saves paired captures: the bot's track, the server's envelope and every message. Two clean
-  captures, one on Daily and one on LiveKit, are fixtures in `tests/fixtures/sync/`.
+  captures, one on Daily and one on LiveKit, and a Daily run with spliced turns (chained, and with
+  a gap) are fixtures in `tests/fixtures/sync/`.
 - `hack/sync-sim/`: the simulation behind the alignment rule and its thresholds (`dsp.py` is the
   normative definition the web SDK ports), and `replay_capture.py`, which replays the rule over a
   paired capture and prints the design's validation minimum.
 - `tests/test_sync_replay.py` replays the rule over the committed paired captures and asserts the
   minimum: no accepted alignment more than 20 ms off, every turn locked within 750 ms of speech, the
   onset prior within 10 ms of the truth before the lock on at least 95 % of turns, and a p95 error
-  of at most 5 ms against each phrase's own alignment.
+  of at most 5 ms, all against the received content (400 ms windows aligned on their own); on the
+  splice run, every join holds its `gap_ms` within one hop.
 
 ### Changed
 

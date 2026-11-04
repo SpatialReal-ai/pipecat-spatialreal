@@ -1,20 +1,39 @@
 """The alignment rule replayed over the committed paired captures: the restated design 4.1 minimum.
 
-``tests/fixtures/sync/*-clean`` hold paired captures (the bot's track as Chrome decoded it, the
-server's envelope and every message), one per transport. ``hack/sync-sim/replay_capture.py``
-replays the web SDK's rule over each and measures it against each phrase's own alignment, which
-is the truth the criteria use: the jitter buffer moves the audio by a few ms inside a call and
-the rule tracks it. The criteria are the ones design 4.1 restates after the first measurement
-(rulings R62/R63):
+``tests/fixtures/sync/`` holds paired captures (the bot's track as Chrome decoded it, the server's
+envelope and every message):
 
-* zero false locks: no accepted tick more than 20 ms off the phrase truth;
+* ``daily-clean``, ``livekit-clean``: one per transport, every turn after an idle (no splice);
+* ``daily-splice``: 20 whole turns of a Daily run with chained turns (one TTS context per
+  sentence) and follow-ups after 100-400 ms, so most turns are spliced onto the one before
+  (design 3.3);
+* ``daily-splice-failures``: one turn of the same run whose first 240 ms reached the browser
+  65 ms ahead of the rest of it (below).
+
+``hack/sync-sim/replay_capture.py`` replays the web SDK's rule over each the way the probe page
+runs it (ticks from the turn's first ``turn_envelope``, the reference as it had arrived, the
+page's prior) and measures every accepted tick against the **window content**: 400 ms windows of
+the reference aligned on their own, so that the truth follows the received audio where Chrome's
+jitter buffer moved it inside a turn (5-60 ms in the splice run) and the rule is not charged for
+tracking it. The criteria are design 4.1's restated minimum (rulings R62/R63):
+
+* zero false locks: no accepted tick more than 20 ms off the window-content truth;
 * every turn locks within 750 ms of received speech;
 * until its first lock a turn's frames follow the onset prior, which is within 10 ms of the truth
   on at least 95 % of the turns;
-* p95 of the accepted ticks' error against the phrase truth is at most 5 ms.
+* p95 of the accepted ticks' error against the window-content truth is at most 5 ms.
 
 "Every turn" means every turn the rule saw with at least 300 ms of received speech. Each capture
 is replayed twice: with the oracle's zero-phase 30 Hz high-pass and with the browser's causal one.
+On the splice fixture, the joins themselves are checked too: the received distance between a
+turn's last sample and the next one's first is the ``gap_ms`` the splice assumes, within a hop.
+
+``daily-splice-failures`` fails two criteria, and those cases are ``xfail(strict=True)``: the
+turn's lead-in and first syllable came out 65 ms early, the page's onset rule fired on them (so
+the onset prior is 68 ms off the rest of the turn), and the rule, correctly, did not lock while its
+1 s window straddled that step, so its first lock came after 1065 ms of speech. That is the
+re-lock delay design 3.2 accepts after a jitter-buffer jump, here at the very start of a turn.
+The thresholds are not changed for it.
 
 The truth shares the reference with the rule: both correlate the same reassembled reference
 envelope, so a wrong index origin in that reference would move both alike and not show here. The
@@ -37,14 +56,30 @@ np = pytest.importorskip("numpy")
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _ROOT / "hack" / "sync-sim" / "replay_capture.py"
-_FIXTURES = sorted((_ROOT / "tests" / "fixtures" / "sync").glob("*-clean"))
+_DIR = _ROOT / "tests" / "fixtures" / "sync"
+# Turns with speech and accepted ticks each capture holds; fewer would mean the replay stopped
+# seeing them.
+_EXPECTED = {
+    "daily-clean": (9, 100),
+    "livekit-clean": (8, 100),
+    "daily-splice": (20, 150),
+    "daily-splice-failures": (1, 20),
+}
+_FIXTURES = [_DIR / name for name in _EXPECTED if (_DIR / name).is_dir()]
+_SPLICE = _DIR / "daily-splice"
 
 FALSE_LOCK_MS = 20.0
 FIRST_LOCK_MAX_MS = 750
 PRIOR_TOL_MS, PRIOR_SHARE = 10.0, 0.95
 P95_MAX_MS = 5.0
-# The captures hold 9 and 8 turns with speech; fewer would mean the replay stopped seeing them.
-MIN_SPEECH_TURNS = 8
+HOP_MS = 5.0
+MIN_CHAINED, MIN_GAP = 3, 3
+
+_ONSET_STEP = (
+    "daily-splice-failures: the turn's first 240 ms reached the browser 65 ms ahead of the rest; "
+    "the rule holds while its 1 s window straddles the step (design 3.2's re-lock delay after a "
+    "jitter-buffer jump) and the onset prior follows the early onset"
+)
 
 
 def _load_replay():
@@ -73,7 +108,7 @@ def _run(replay, capture: Path, causal: bool):
         results = replay.main([str(capture)] + (["--causal"] if causal else []))
     seen = [r for r in results if r["accepted"] or r["held"]]
     speech = [r for r in seen if (r["rx_ms"] or 0) >= 300]
-    return results, speech
+    return capture.name, results, speech
 
 
 _CASES = [(f, causal) for f in _FIXTURES for causal in (False, True)]
@@ -86,25 +121,40 @@ _CASES = [(f, causal) for f in _FIXTURES for causal in (False, True)]
 )
 def capture(request, replay):
     if request.param is None:
-        pytest.skip("tests/fixtures/sync/*-clean is not in the sdist")
+        pytest.skip("tests/fixtures/sync/* is not in the sdist")
     return _run(replay, *request.param)
 
 
+def _xfail_onset_step(request, name):
+    if name == "daily-splice-failures":
+        request.applymarker(pytest.mark.xfail(strict=True, reason=_ONSET_STEP))
+
+
 def test_the_capture_still_holds_its_speech_turns(capture):
-    _, speech = capture
-    assert len(speech) >= MIN_SPEECH_TURNS
+    name, results, speech = capture
+    turns, ticks = _EXPECTED[name]
+    assert len(speech) >= turns
+    assert sum(r["accepted"] for r in results) >= ticks
 
 
-def test_zero_false_locks_against_the_phrase_truth(capture):
-    results, _ = capture
-    errors = [e for r in results for e in r["local_errors_ms"]]
-    assert len(errors) > 100  # the rule did accept ticks
+def test_every_accepted_tick_has_content_windows_for_its_truth(capture):
+    # The own-window fallback is no independent truth; on the fixtures it is never needed.
+    _, results, _ = capture
+    fallback = {r["turn_id"]: r["window_fallback"] for r in results if r["window_fallback"]}
+    assert not fallback
+
+
+def test_zero_false_locks_against_the_window_content_truth(capture):
+    _, results, _ = capture
+    errors = [e for r in results for e in r["window_errors_ms"]]
+    assert len(errors) == sum(r["accepted"] for r in results)
     late = [e for e in errors if e > FALSE_LOCK_MS]
     assert not late, f"{len(late)} accepted ticks more than {FALSE_LOCK_MS} ms off: {late}"
 
 
-def test_every_turn_first_locks_within_750_ms_of_speech(capture):
-    _, speech = capture
+def test_every_turn_first_locks_within_750_ms_of_speech(capture, request):
+    name, _, speech = capture
+    _xfail_onset_step(request, name)
     late = {
         r["turn_id"]: r["first_lock_ms"]
         for r in speech
@@ -113,15 +163,48 @@ def test_every_turn_first_locks_within_750_ms_of_speech(capture):
     assert not late, f"first lock later than {FIRST_LOCK_MAX_MS} ms (None = never): {late}"
 
 
-def test_until_the_first_lock_the_onset_prior_is_within_10_ms_of_the_truth(capture):
-    _, speech = capture
-    prior = [abs(r["prior_error_ms"]) for r in speech if r["prior_error_ms"] is not None]
+def test_until_the_first_lock_the_onset_prior_is_within_10_ms_of_the_truth(capture, request):
+    name, _, speech = capture
+    _xfail_onset_step(request, name)
+    prior = [
+        abs(r["prior_error_window_ms"]) for r in speech if r["prior_error_window_ms"] is not None
+    ]
     assert len(prior) == len(speech)
     ok = sum(e <= PRIOR_TOL_MS for e in prior)
     assert ok >= PRIOR_SHARE * len(prior), f"prior errors in ms: {sorted(prior)}"
 
 
-def test_p95_error_against_the_phrase_truth_is_at_most_5_ms(capture):
-    results, _ = capture
-    errors = [e for r in results for e in r["local_errors_ms"]]
+def test_p95_error_against_the_window_content_truth_is_at_most_5_ms(capture):
+    _, results, _ = capture
+    errors = [e for r in results for e in r["window_errors_ms"]]
     assert np.percentile(errors, 95) <= P95_MAX_MS
+
+
+@pytest.fixture(scope="module")
+def splice(replay):
+    if not _SPLICE.is_dir():
+        pytest.skip("tests/fixtures/sync/daily-splice is not in the sdist")
+    return _run(replay, _SPLICE, False)[1]
+
+
+def _spliced(results, kind):
+    return [r for r in results if r["kind"] and r["kind"][0] == kind]
+
+
+def test_the_splice_fixture_holds_chained_and_gap_turns(splice):
+    chained = _spliced(splice, "chained")
+    gap = [r for r in _spliced(splice, "gap") if r["gap_ms"] > 0]
+    assert len(chained) >= MIN_CHAINED
+    assert len(gap) >= MIN_GAP
+
+
+def test_every_join_holds_its_gap_within_one_hop(splice):
+    joins = {
+        r["turn_id"]: r["join_delta_ms"]
+        for r in _spliced(splice, "chained") + _spliced(splice, "gap")
+    }
+    assert len(joins) >= MIN_CHAINED + MIN_GAP
+    unmeasured = [t for t, d in joins.items() if d is None]
+    assert not unmeasured, f"no content window on both sides of the join: {unmeasured}"
+    off = {t: d for t, d in joins.items() if abs(d) > HOP_MS}
+    assert not off, f"joins whose received gap is more than one hop off gap_ms (ms): {off}"

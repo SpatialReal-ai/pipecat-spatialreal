@@ -356,7 +356,8 @@ and both full recordings, meet all three: no false lock, every turn locked by 73
 (replay), the prior within 6.7 ms on every turn, and a phrase-truth p95 of 2.32 and 0.84 ms (1.82 and
 1.07 ms on the full recordings). `replay_capture.py` prints these restated criteria (the 300 ms
 count stays beside them for reference), and `tests/test_sync_replay.py` asserts them on the
-fixtures.
+fixtures. Since the splice run below, the error truth is the window content rather than the phrases
+(*The splice run*).
 
 **Pauses and late onsets (design §8, item 2).** 26 pauses of 0.3 s or more were received. The audio
 after each pause sat where the audio before it did, within -4.8 to +5.1 ms (each phrase aligned on
@@ -368,3 +369,48 @@ the start of the phrase whose decoded peak is 327 where the server's was over 32
 missed it by one sample value and found the voiced onset 58 ms later. On these captures, then, a late onset after a
 pause is the onset threshold meeting a soft lead-in, not a delay change and not a lead-in removed by
 DTX.
+
+### The splice run (2026-11-04)
+
+`tests/fixtures/sync/daily-splice/` is 20 whole turns of a third run (Daily, Chrome 156) made so that
+turns are spliced (design §3.3): a scratch copy of the example bot gave each sentence its own
+Cartesia context, so a three-sentence answer plays as three chained turns, and followed each answer
+with a short question 100-400 ms after it, a turn with `gap_ms` > 0. The full run had 55 turns: 25
+chained, 16 with a gap of 200-800 ms, 14 plain. The fixture keeps turns 9-28 (10 chained, 6 with a
+gap), trimmed like the clean ones; the replay gives the same numbers on the trimmed and the full
+recording.
+
+**The joins.** On every one of the 41 joins the received track holds exactly the gap the splice
+assumes: the received distance between a turn's last sample and the next one's first, minus
+`gap_ms`, is at most 2.1 ms (p95 1.1 ms), measured from the 400 ms windows nearest the join on both
+sides. `tests/test_sync_replay.py` asserts it within one hop on the fixture.
+
+**The truth.** The same run shows Chrome's jitter buffer moving the received audio inside a turn by
+5-60 ms, in steps: a turn whose last 200 ms arrived 51 ms later than the rest of it, a turn whose
+first 240 ms arrived 65 ms ahead of the rest. The rule follows those steps, so a phrase truth (one
+position per phrase of up to 5 s) charged it for them: 41 "false locks" on the first replay, none
+of them a lock away from the audio it was looking at. `replay_capture.py` now measures every
+accepted tick against the window content: 400 ms windows of the reference, each aligned on its own,
+overlap-weighted over the tick's 1 s window (its docstring has the definition). It also ticks a turn
+the way the page does, from the turn's first `turn_envelope` with the reference as it had arrived,
+with the prior the page had; with the causal high-pass its ticks are the page's own, tick for tick,
+on 63 of the 64 turns of the three captures (1 723 ticks). On the other one tick holds on a ratio of
+1.1998 where the page accepted on 1.2003 (the 16-bit rounding of `capture.wav`), and that turn's
+later ticks shift with it.
+
+| | `daily-clean` | `livekit-clean` | splice run (55 turns) | `daily-splice` (20) |
+|---|---|---|---|---|
+| accepted ticks / false locks (window truth) | 167 / **0** | 134 / **0** | 720 / **0** | 204 / **0** |
+| first lock, max ms of speech (live page) | 679 (679) | 732 (732) | **1065** (1065) | 156 (156) |
+| onset prior within 10 ms before the lock | 9 / 9 | 8 / 8 | 53 / 55 (96 %) | 20 / 20 |
+| p95 error, window truth | 1.24 ms | 0.83 ms | 0.86 ms | 0.60 ms |
+
+(Zero-phase high-pass; with the causal one the p95 moves by at most 0.05 ms and the splice run has
+719 accepted ticks, still none false.) The one
+criterion the splice run fails is the first lock of one turn, kept as
+`tests/fixtures/sync/daily-splice-failures/` and marked `xfail` there: its lead-in and first
+syllable reached the browser 65 ms ahead of the rest of it. The page's onset rule fired on them, so
+the prior was 68 ms off the rest of the turn; the rule's first two ticks found the early copy (peak
+0.998) but held on the peak ratio (1.08, 1.06), and the next 20 held because their 1 s window
+straddled the step, until it lay past it: first lock after 1065 ms of speech. That is the re-lock
+delay design §3.2 accepts after a jitter-buffer jump, here at the start of a turn.
