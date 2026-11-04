@@ -234,8 +234,10 @@ CASES = [
     # the last 3 s (here the whole 2.4 s), well above -70, and it clips both sides.
     {"name": "room-noise", "segments": [{"from": 0, "lead": ms(637.25)}], "samples": ms(2400),
      "prior_index": 125, "noise": {"amplitude": 400, "seed": 20261103}},
-    # A 250 ms period: the side lobes are as high as the peak. Fails on the ratio alone.
-    {"name": "ratio-only", "source": {"kind": "repeat", "from": 0, "length": ms(250), "total": ms(2000)},
+    # A 251 ms period: a side lobe 0.3 % below the peak. Fails on the ratio alone. (A 250 ms period,
+    # a whole number of hops, makes the side lobe tie the peak exactly, and which of two equal
+    # floats is the maximum is up to the platform's arithmetic.)
+    {"name": "ratio-only", "source": {"kind": "repeat", "from": 0, "length": ms(251), "total": ms(2000)},
      "segments": [{"from": 0, "lead": ms(637.25)}], "samples": ms(2400), "prior_index": 125},
     # Every sample held 6 times: syllables six times longer, a blunt peak. Fails on sharpness alone.
     {"name": "sharpness-only", "source": {"kind": "hold", "factor": 6, "total": ms(4000)},
@@ -267,7 +269,10 @@ CASES = [
      "prior_index": 125},
     # The speech gate on its boundary: std 1.5 dB (silence), 1.999 dB (silence, though the
     # sample standard deviation would be 2.004) and exactly 2 dB (speech: the gate is "< 2").
-    # "gate_only": the window's correlation is nearly flat, so only the gate is compared.
+    # "gate_only": the window's correlation is flat by construction (best and second-best lags
+    # within 1e-17 of each other), so where its peak lies is decided by rounding and differs
+    # between platforms: only the gate and the outcome are compared (probe_check.mjs, and the
+    # regeneration test in test_probe_page.py).
     {"name": "gate-1.5", "received_db": gate_window(1.5), "prior_index": 125, "gate_only": True},
     {"name": "gate-1.999", "received_db": gate_window(1.999), "prior_index": 125, "gate_only": True},
     {"name": "gate-2.0", "received_db": gate_window(2.0), "prior_index": 125, "gate_only": True},

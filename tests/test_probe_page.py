@@ -32,6 +32,8 @@ PAGE = Path(__file__).resolve().parent.parent / "examples" / "probe" / "index.ht
 SYNC = PAGE.with_name("sync.js")
 CHECK = Path(__file__).with_name("probe_check.mjs")
 ORACLE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sync" / "oracle.json"
+# What a gate_only case of oracle.json is compared on.
+GATE_ONLY_KEYS = ("speech", "window_ok", "accepted")
 
 TURN_A = "aaaaaaaa-1111-4111-8111-111111111111"
 TURN_B = "bbbbbbbb-2222-4222-8222-222222222222"
@@ -123,8 +125,16 @@ def test_the_oracle_fixture_is_what_its_generator_writes():
     spec.loader.exec_module(generator)
 
     committed = json.loads(ORACLE_FIXTURE.read_text())
+    fresh = generator.build()
+    # A gate-boundary case's correlation curve is flat by construction, so the lag of its peak (and
+    # everything measured there) is decided by rounding and differs between platforms' numpy;
+    # probe_check.mjs compares those cases on the gate and the outcome only, and so does this.
+    for document in (fresh, committed):
+        for case in document["cases"]:
+            if case.get("gate_only"):
+                case["oracle_no_hp"] = {key: case["oracle_no_hp"][key] for key in GATE_ONLY_KEYS}
 
-    _assert_same(generator.build(), committed)
+    _assert_same(fresh, committed)
     assert ORACLE_FIXTURE.stat().st_size < 200_000
 
 
