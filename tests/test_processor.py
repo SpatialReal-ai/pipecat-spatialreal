@@ -2095,6 +2095,35 @@ def fingerprint(audio_frames, rate=24000):
     return Envelope(rate).feed(b"".join(f.audio for f in audio_frames))
 
 
+def described_before_released(frames):
+    """Check that every audio frame of a turn is described before it goes; return how many.
+
+    When a turn's frame is pushed, the turn's envelope already holds every window that ends
+    inside what the room has been given of the turn, and every envelope came after its turn's
+    ``turn_start``. Turn ``n`` is the one whose ``turn_start`` is ``n``-th: turns are announced
+    in their order, which is the order they play in.
+    """
+    turn_ids = [s["turn_id"] for s in messages(frames, "turn_start")]
+    announced, sent = set(), dict.fromkeys(turn_ids, 0)
+    turn, inside, released, checked = -1, False, 0, 0
+    for f in frames:
+        if isinstance(f, RTVIServerMessageFrame) and "turn_start" in f.data:
+            announced.add(f.data["turn_start"]["turn_id"])
+        elif isinstance(f, RTVIServerMessageFrame) and "turn_envelope" in f.data:
+            run = f.data["turn_envelope"]
+            assert run["turn_id"] in announced  # never ahead of its turn_start
+            sent[run["turn_id"]] += len(base64.b64decode(run["values"]))
+        elif isinstance(f, TTSStartedFrame):
+            turn, inside, released = turn + 1, True, 0
+        elif isinstance(f, TTSStoppedFrame):
+            inside = False  # what plays until the next turn starts is no turn's
+        elif inside and isinstance(f, OutputAudioRawFrame):
+            released += len(f.audio) // 2
+            assert sent[turn_ids[turn]] >= values_for(released), (turn, released)
+            checked += 1
+    return checked
+
+
 def between_turns(frames):
     """The audio frames pushed after the first turn's TTSStoppedFrame and before the second's
     TTSStartedFrame: what the room plays between the two turns' samples."""
@@ -2129,24 +2158,8 @@ async def test_turn_envelope_precedes_the_audio_it_describes(fake):
             message_pushed(pushed, "turn_end", count=2),
         ],
     )
-    turn_ids = [s["turn_id"] for s in messages(down, "turn_start")]
-    assert len(turn_ids) == 2
-    announced, sent = set(), dict.fromkeys(turn_ids, 0)
-    turn, released, checked = -1, 0, 0
-    for f in down:
-        if isinstance(f, RTVIServerMessageFrame) and "turn_start" in f.data:
-            announced.add(f.data["turn_start"]["turn_id"])
-        elif isinstance(f, RTVIServerMessageFrame) and "turn_envelope" in f.data:
-            run = f.data["turn_envelope"]
-            assert run["turn_id"] in announced  # never ahead of its turn_start
-            sent[run["turn_id"]] += len(base64.b64decode(run["values"]))
-        elif isinstance(f, TTSStartedFrame):
-            turn, released = turn + 1, 0
-        elif turn >= 0 and isinstance(f, OutputAudioRawFrame):
-            released += len(f.audio) // 2
-            assert sent[turn_ids[turn]] >= values_for(released), (turn, released)
-            checked += 1
-    assert checked == chunks(1000) + chunks(300)
+    assert len(messages(down, "turn_start")) == 2
+    assert described_before_released(down) == chunks(1000) + chunks(300)
 
 
 async def test_turn_envelope_indices_are_contiguous_and_match_released_bytes(fake):
@@ -2219,6 +2232,7 @@ async def test_stall_silence_is_in_the_envelope_in_room_order(fake):
     assert isinstance(audio[0], TTSAudioRawFrame) and isinstance(audio[-1], TTSAudioRawFrame)
     values = envelope_values(down, req_of(down))
     assert values == fingerprint(audio)  # the room's samples, the silence in its place
+    assert described_before_released(down) == len(audio)  # each chunk, silence too, ahead
     # The windows that lie wholly in the stall are the floor, between the tone's values.
     start = sum(len(f.audio) for f in audio[: silence[0]]) // 2
     end = start + sum(len(audio[i].audio) for i in silence) // 2
@@ -2280,6 +2294,9 @@ async def test_unchained_turn_emits_its_gap_as_silence_and_reports_gap_ms(fake):
     # Neither turn's envelope or inference stream has it.
     assert envelope_values(down, second["turn_id"]) == fingerprint(turn_audio(down)[1])
     assert fake.received_audio_ms(second["turn_id"]) == padded(300)
+    sent = {m.client_audio_input.req_id for m in fake.received if m.HasField("client_audio_input")}
+    assert sent == {first["turn_id"], second["turn_id"]}  # no request of its own either
+    assert described_before_released(down) == sum(map(len, turn_audio(down)))
     # Turn 1 played unanimated and is described all the same.
     assert envelope_values(down, first["turn_id"]) == fingerprint(turn_audio(down)[0])
     assert_turn_lifecycle(down)
@@ -2449,6 +2466,7 @@ async def test_envelope_values_equal_fingerprint_on_the_pushed_bytes(fake):
     (audio,) = turn_audio(down)
     assert any(type(f) is OutputAudioRawFrame for f in audio)  # the stall's silence
     assert envelope_values(down, req_of(down)) == fingerprint(audio)
+    assert described_before_released(down) == len(audio)
     (end,) = messages(down, "turn_end")
     assert end["pcm_ms"] == sum(len(f.audio) for f in audio) * 1000 / (2 * 24000)
 
