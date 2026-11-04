@@ -3190,5 +3190,42 @@ async def test_a_barge_in_does_not_clamp_an_uninterruptible_tail_short(fake):
     # The fill is dropped, the uninterruptible tail is not: the room plays until its end.
     assert after_end == pytest.approx(max(at, tail_end), abs=0.002)
     assert after_sound == pytest.approx(tail_end, abs=1e-6)
-    # Normally the barge-in comes ~25 ms before the tail's end, so a clamp to now would cut the
-    # tail short; on a loaded machine it can come after it, when both agree.
+    if at >= tail_end - 0.002:
+        # Normally the barge-in comes ~25 ms before the tail's end, so a clamp to now would cut
+        # the tail short; on a loaded machine it can come after it, and then both rules agree.
+        pytest.skip("the barge-in came after the tail had played: nothing told the rules apart")
+
+
+async def test_a_barge_in_does_not_clamp_uninterruptible_stall_silence_short(fake):
+    """R68b: stall silence of an uninterruptible turn is uninterruptible too, so the transport keeps
+    it: a barge-in while that silence is the last audio released drops nothing, and the playout end
+    stays where the silence ends."""
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    seen = interrupted_at(proc)
+    await play(
+        proc,
+        [
+            link_up(proc),
+            uninterruptible(TTSStartedFrame()),
+            uninterruptible(tone_frame(300)),
+            tts_audio_released(pushed),
+            SleepFrame(0.6),  # the TTS falls behind: stall silence bridges it, a chunk ahead
+            InterruptionFrame(),
+            interruption_pushed(pushed),
+            uninterruptible(tone_frame(200)),
+            uninterruptible(TTSStoppedFrame()),
+            message_pushed(pushed, "turn_end"),
+        ],
+    )
+    at = seen["at"]
+    before_end, before_sound = seen["before"]
+    after_end, after_sound = seen["after"]
+    barge = next(i for i, (_, f) in enumerate(pushed) if isinstance(f, InterruptionFrame))
+    last = next(f for _, f in reversed(pushed[:barge]) if isinstance(f, OutputAudioRawFrame))
+    assert type(last) is OutputAudioRawFrame and not any(last.audio)  # stall silence
+    assert not last.interruptible
+    assert after_end == pytest.approx(before_end, abs=1e-6)  # nothing of it dropped
+    assert after_sound == pytest.approx(before_sound, abs=1e-6)
+    if before_end <= at + 0.002:
+        pytest.skip("the room had run dry at the barge-in: nothing queued to keep or drop")
