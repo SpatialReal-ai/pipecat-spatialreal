@@ -232,3 +232,47 @@ def test_every_join_holds_its_gap_within_one_hop(splice):
     assert not unmeasured, f"no content window on both sides of the join: {unmeasured}"
     off = {t: d for t, d in joins.items() if abs(d) > HOP_MS}
     assert not off, f"joins whose received gap is more than one hop off gap_ms (ms): {off}"
+
+
+# R72: before its first lock a gap turn is placed at the previous turn's place + its
+# turn_end.pcm_ms + gap_ms. The splice fixture was recorded before R72, so its ticks hold the arrival
+# prior and the replay above uses that; the replay also computes the R72 prior (and with
+# --r72-prior replays with it).
+R72_PRIOR_TOL_MS = 2.0
+MIN_R72_LOCKED_BEFORE_ONSET_PRIOR = 4
+
+
+@pytest.fixture(scope="module")
+def splice_r72(replay):
+    if not _SPLICE.is_dir():
+        pytest.skip("tests/fixtures/sync/daily-splice is not in the sdist")
+    with contextlib.redirect_stdout(io.StringIO()):
+        return replay.main([str(_SPLICE), "--causal", "--r72-prior"])
+
+
+def test_r72_prior_puts_each_gap_turn_within_2_ms_of_its_first_content(splice):
+    # The turns that locked before their onset prior existed: the recorded arrival prior had them
+    # 78-182 ms off until the lock; the splice position is the join measured exact (|δ| <= 2.1 ms).
+    r72 = {
+        r["turn_id"]: r["r72_prior_error_ms"] for r in splice if r["r72_prior_error_ms"] is not None
+    }
+    assert len(r72) >= MIN_R72_LOCKED_BEFORE_ONSET_PRIOR, r72
+    off = {t: e for t, e in r72.items() if abs(e) > R72_PRIOR_TOL_MS}
+    assert not off, f"R72 prior errors in ms: {off}"
+    recorded = [r["prelock_prior_error_ms"] for r in splice if r["turn_id"] in r72]
+    assert max(abs(e) for e in recorded) > 50  # what R72 fixes: the arrival prior was far off
+
+
+def test_r72_prior_leaves_every_first_lock_where_it_was(splice_r72, replay):
+    # The prior only places frames until the lock; on the fixture it changes no lock.
+    with contextlib.redirect_stdout(io.StringIO()):
+        recorded = replay.main([str(_SPLICE), "--causal"])
+    before = {r["turn_id"]: r["first_lock_ms"] for r in recorded}
+    after = {r["turn_id"]: r["first_lock_ms"] for r in splice_r72}
+    assert after == before
+    errors = [e for r in splice_r72 for e in r["window_errors_ms"]]
+    assert not [e for e in errors if e > FALSE_LOCK_MS]
+    replayed = [
+        r["prelock_prior_error_ms"] for r in splice_r72 if r["r72_prior_error_ms"] is not None
+    ]
+    assert replayed and all(abs(e) <= R72_PRIOR_TOL_MS for e in replayed)

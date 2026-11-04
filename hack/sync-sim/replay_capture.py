@@ -1,6 +1,6 @@
 """Replay the alignment rule on a paired capture and measure it against the received content.
 
-usage: python replay_capture.py CAPTURE_DIR [--causal] [--thr C,R,S,TOL_MS] [--features OUT.pkl] [--json OUT.json]
+usage: python replay_capture.py CAPTURE_DIR [--causal] [--r72-prior] [--thr C,R,S,TOL_MS] [--features OUT.pkl] [--json OUT.json]
 
 A paired capture is what the probe page saves (``examples/probe/README.md``, "The capture"):
 ``capture.wav`` (the bot's track as the browser decoded it), ``capture.sync.json`` (per turn the
@@ -18,7 +18,8 @@ What it does, per turn:
   spliced onto the previous turn's envelope as far as that had arrived (:func:`splice_at`). The
   prior before the first lock is what the page had: the onset prior once its analysis set it (R57:
   then used unconditionally), else ``turn_start`` + 200 ms (:func:`page_prior` reads it from the
-  page's own ticks, since the analysis runs on a wall-clock timer); after the first lock the last
+  page's own ticks, since the analysis runs on a wall-clock timer, so a capture replays with the
+  prior it was recorded with); after the first lock the last
   accepted position; after 10 held ticks with speech before a lock the search widens to +/- 600 ms
   around the onset prior; the ticks stop once the 1 s window lies past the turn's end (``turn_end``
   known by then) or 1 s after ``turn_abort``. With the causal high-pass the replay's ticks are the
@@ -48,6 +49,14 @@ What it does, per turn:
 * **Joins**: for a spliced turn, δ is the received distance between the previous turn's last and
   this turn's first sample minus ``gap_ms`` (:func:`join_delta`, from the content windows nearest
   the join on both sides).
+* **The prior before the lock (R72)**: since R72 the page places an unchained turn with
+  ``gap_ms`` > 0, whose previous turn had ended and was not aborted when its ``turn_start``
+  arrived, at the previous turn's place + its ``turn_end.pcm_ms`` + ``gap_ms`` until an onset prior
+  or a lock replaces it (:func:`gap_join`). Captures recorded before R72 hold the arrival prior in
+  their ticks and replay with it. For every such turn the replay also reports what each prior
+  would have placed at its first lock against the truth (``prelock_prior_error_ms``, the prior it
+  replayed with; ``r72_prior_error_ms``, the R72 prior, None where an onset prior was in effect,
+  which R72 leaves first). ``--r72-prior`` replays those turns with the R72 prior instead.
 * **Per tick**: ``first lock`` is the speech received at the first accepted tick, in ms from where
   that lock puts ``onsets_ms[0]`` (the page's definition); negative on a spliced turn that locks on
   the previous turn's audio before its own.
@@ -261,13 +270,48 @@ def page_prior(t, fs, hop):
     return at
 
 
-def replay_turn(t, env, hop, fs, n_samples, params=dsp.DEFAULTS, by_id=None, arrivals=None):
+def gap_join(t, prev):
+    """R72 (sync.js ``SyncTracker.message``): ``(previous turn id, join ms)`` when the page places
+    unchained ``t`` from the previous turn's end until its first lock, else None.
+
+    ``t`` has ``gap_ms`` > 0 and the turn announced before it (``prev``) had its ``turn_end`` and
+    no ``turn_abort`` when ``t``'s ``turn_start`` arrived; the join is that ``turn_end.pcm_ms`` +
+    ``gap_ms``, as for the splice.
+    """
+    if t.get("prev_turn_id") or not (t.get("gap_ms") or 0) > 0 or prev is None:
+        return None
+    end_tap, abort_tap = prev.get("end_tap"), prev.get("abort_tap")
+    if end_tap is None or end_tap > t["start_tap"] or prev.get("end_pcm_ms") is None:
+        return None
+    if abort_tap is not None and abort_tap <= t["start_tap"]:
+        return None
+    return prev["turn_id"], prev["end_pcm_ms"] + t["gap_ms"]
+
+
+def place_at(placed, turn_id, pos):
+    """Where turn ``turn_id`` was placed at tap ``pos`` (received frames of its index 0): its last
+    accepted tick at or before ``pos``, else its prior then. ``placed`` maps an id to the turn's
+    replayed ticks and its pre-lock prior (``pos -> frames``)."""
+    ticks, prior = placed[turn_id]
+    last = None
+    for k in ticks:
+        if k["pos"] > pos:
+            break
+        if k["accepted"]:
+            last = k["l"]
+    return last if last is not None else prior(pos)
+
+
+def replay_turn(
+    t, env, hop, fs, n_samples, params=dsp.DEFAULTS, by_id=None, arrivals=None, gap_prior=None
+):
     """The page's SyncTracker.tick loop for one turn, with dsp.align. Returns the ticks.
 
     As the page runs it (examples/probe/sync.js): the first tick is the first block after the
     turn's first ``turn_envelope`` arrived (and not before ``turn_start``); every tick correlates the
     reference as it had arrived by then, spliced as the page spliced it (:func:`splice_at`); the
-    prior before the first lock is the one the page had (:func:`page_prior`).
+    prior before the first lock is the one the page had (:func:`page_prior`). ``gap_prior``
+    (``pos -> frames``, the R72 prior) replaces the arrival prior where no onset prior is in effect.
     """
     by_id = by_id or {}
     arrivals = arrivals or {}
@@ -291,6 +335,8 @@ def replay_turn(t, env, hop, fs, n_samples, params=dsp.DEFAULTS, by_id=None, arr
             place = last_l
         elif onset_prior is not None:
             place = onset_prior / hop
+        elif gap_prior is not None:
+            place = gap_prior(pos)
         else:
             place = (t["start_tap"] + ms(PRIOR_LEAD_MS)) / hop
         window_start = pos / hop - params.window_ms / HOP_MS
@@ -701,6 +747,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("capture_dir")
     ap.add_argument("--causal", action="store_true", help="the browser's causal 30 Hz high-pass")
+    ap.add_argument(
+        "--r72-prior",
+        action="store_true",
+        help="replay gap turns with the R72 prior (previous turn's place + pcm_ms + gap_ms) "
+        "instead of the arrival prior the capture recorded",
+    )
     ap.add_argument("--thr", help="replay with these thresholds: peak,ratio,sharpness,half_tol_ms")
     ap.add_argument("--features", help="write sim.py stage-A features for thrsearch.py")
     ap.add_argument("--json", help="write the per-turn numbers as JSON")
@@ -729,13 +781,31 @@ def main(argv=None):
     print("|" + "|".join(["---"] * (hdr.count("|") - 1)) + "|")
     results, all_err, all_local, all_page_err, feats = [], [], [], [], []
     by_id = {t["turn_id"]: t for t in sync["turns"]}
+    placed = {}  # turn id -> (replayed ticks, pre-lock prior pos -> frames), for R72
     for n_turn, t in enumerate(sync["turns"]):
         own = b64(t["reference"])
         tid = f"{n_turn:2d} {t['turn_id'][8:14]}"  # index and the id's hhmmss
+        prior_at = page_prior(t, fs, hop)
+        default_l = (t["start_tap"] + round(PRIOR_LEAD_MS * fs / 1000)) / hop
+        join = gap_join(t, sync["turns"][n_turn - 1] if n_turn else None)
+        r72 = None
+        if join is not None and join[0] in placed:
+            join_frames = round(join[1] * fs / 1000) / hop
+            r72 = lambda pos, j=join, jf=join_frames: place_at(placed, j[0], pos) + jf
+        use_r72 = r72 if args.r72_prior else None
+
+        def prior_l_at(pos, prior_at=prior_at, default_l=default_l, use_r72=use_r72):
+            o = prior_at(pos)
+            if o is not None:
+                return o / hop
+            return use_r72(pos) if use_r72 is not None else default_l
+
         if not len(own):
+            placed[t["turn_id"]] = ([], prior_l_at)
             print(f"| {tid} | no reference |" + " |" * (hdr.count("|") - 3))
             continue
-        ticks = replay_turn(t, env, hop, fs, len(x), params, by_id, sync["arrivals"])
+        ticks = replay_turn(t, env, hop, fs, len(x), params, by_id, sync["arrivals"], use_r72)
+        placed[t["turn_id"]] = (ticks, prior_l_at)
         acc = [k for k in ticks if k["accepted"]]
         held = [k for k in ticks if k["speech"] and not k["accepted"]]
         # truth: start from the last accepted position, else the onset prior, else turn_start + 200 ms
@@ -758,7 +828,8 @@ def main(argv=None):
         ) / hop
         prior_err = None if l_truth is None else (prior_l - l_truth) * HOP_MS
         phrases, drift, local, onset_rows = [], None, [], []
-        window, fallback, prior_err_w, content, join = [], [], None, [], None
+        window, fallback, prior_err_w, content, join_d = [], [], None, [], None
+        prelock_err, r72_err = None, None
         if l_truth is not None:
             content, own_off = content_windows(
                 t, env, hop, l_truth, received_end_frame(t, hop, len(env))
@@ -773,11 +844,17 @@ def main(argv=None):
                     fallback.append(k["pos"])
                 if truth_k is not None:
                     window.append(abs(k["l"] - truth_k) * HOP_MS)
-            join = join_delta(t, content, own_off)
+            join_d = join_delta(t, content, own_off)
             # the prior's truth: where the turn's own first content window puts it
             own_first = [l for s_, l, _ in content if s_ >= own_off]
             if own_first:
                 prior_err_w = (prior_l - own_first[0]) * HOP_MS
+                if acc:
+                    # what placed the frames up to the first lock: the prior at that tick
+                    at = acc[0]["pos"]
+                    prelock_err = (prior_l_at(at) - own_first[0]) * HOP_MS
+                    if r72 is not None and prior_at(at) is None:
+                        r72_err = (r72(at) - own_first[0]) * HOP_MS
             own_db = dsp.dequantise(own)
             runs, first_f, last_f = quiet_runs(own_db, PHRASE_GAP_MS)
             end_f = received_end_frame(t, hop, len(env))
@@ -869,8 +946,11 @@ def main(argv=None):
             "prior_error_window_ms": prior_err_w,
             "content_windows": len(content),
             "gap_ms": t.get("gap_ms") or 0,
-            "join_delta_ms": None if join is None else join[0],
-            "join_windows_ms": None if join is None else join[1:],
+            "join_delta_ms": None if join_d is None else join_d[0],
+            "join_windows_ms": None if join_d is None else join_d[1:],
+            "r72": join is not None,
+            "prelock_prior_error_ms": prelock_err,
+            "r72_prior_error_ms": r72_err,
             "ticks": [
                 {k: v for k, v in tk.items() if k != "checks"}
                 | {"checks": [float(c) if c is not None else None for c in tk["checks"]]}
@@ -919,6 +999,20 @@ def main(argv=None):
             print(
                 f"| {r['label']} | {r['kind'][0]} | {r['gap_ms']:.0f} | {fmt(r['join_delta_ms'], 2)} "
                 f"| {fmt(w[0], 0)} | {fmt(w[1], 0)} |"
+            )
+
+    print("\n## The prior before the first lock of the gap turns R72 places from the turn before\n")
+    print(
+        f"replayed with the {'R72' if args.r72_prior else 'recorded'} prior; error at the first "
+        "lock against the turn's first content window, ms (R72: none where an onset prior was in effect)\n"
+    )
+    print("| turn | gap ms | first lock ms | replayed prior err ms | R72 prior err ms |")
+    print("|---|---|---|---|---|")
+    for r in results:
+        if r["r72"]:
+            print(
+                f"| {r['label']} | {r['gap_ms']:.0f} | {fmt(r['first_lock_ms'], 0)} "
+                f"| {fmt(r['prelock_prior_error_ms'], 1)} | {fmt(r['r72_prior_error_ms'], 1)} |"
             )
 
     print("\n## Pauses of 0.3 s or more inside a turn\n")

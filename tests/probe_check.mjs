@@ -941,7 +941,7 @@ test('tracker: a chained turn is spliced onto the turn before it and locks at pr
  * A chained Y is announced while X still plays and, as on the page, gets the chain's place as its
  * onset prior (analyze() places a chained turn from the end of the turn before it).
  */
-function twoTurns({ xMs, gapMs, y = {}, xEnd = {}, abortX = false, endThenAbortX = false }) {
+function twoTurns({ xMs, gapMs, y = {}, xEnd = {}, abortX = false, endThenAbortX = false, xEndLate = false, yOnsetPrior = null, yOnsetShiftMs = 0 }) {
   const cut = ms(xMs)
   const pcmX = ORACLE_PCM.subarray(0, cut)
   const pcmY = ORACLE_PCM.subarray(cut)
@@ -952,14 +952,18 @@ function twoTurns({ xMs, gapMs, y = {}, xEnd = {}, abortX = false, endThenAbortX
   const yFirst = first + cut + ms(gapMs)
   const track = placeAudio(ms(5000), [{ at: first, pcm: pcmX }, { at: yFirst, pcm: pcmY }])
   const yArrival = y.prev ? arrival + ms(600) : yFirst - ms(140)
+  // xEndLate: X's turn_end arrives only after Y's turn_start.
+  const xEndAt = xEndLate ? yArrival + 256 : first + cut
   const tracker = runTracker(track, [
     { pos: arrival, data: mx.start }, ...mx.envelopes.map(d => ({ pos: arrival, data: d })),
-    { pos: first + cut, data: abortX ? mx.abort : mx.end },
-    ...(endThenAbortX ? [{ pos: first + cut + 1, data: mx.abort }] : []),
+    { pos: xEndAt, data: abortX ? mx.abort : mx.end },
+    ...(endThenAbortX ? [{ pos: xEndAt + 1, data: mx.abort }] : []),
     { pos: yArrival, data: my.start }, ...my.envelopes.map(d => ({ pos: yArrival, data: d })),
     ...(y.prev ? [{ pos: yArrival, onsetPrior: { id: TURN_Y, pos: yFirst } }] : []),
+    // An onset prior for an unchained Y (yOnsetShiftMs off its first sample), from its turn_start on.
+    ...(yOnsetPrior ? [{ pos: yArrival, onsetPrior: { id: TURN_Y, pos: yFirst + ms(yOnsetShiftMs) } }] : []),
   ])
-  return { tracker, yFirst, pcmX, pcmY }
+  return { tracker, yFirst, yArrival, pcmX, pcmY }
 }
 
 test('tracker: an unchained turn with gap_ms > 0 is spliced onto the turn announced before it, gap_ms of floor in between', () => {
@@ -997,6 +1001,56 @@ test('tracker: a chained turn joins at its prev_turn_pcm_ms (1498 ms, off the gr
   // The join rounds to the 5 ms grid, so the spliced reference holds Y 2 ms later than it plays:
   // the lock, driven mostly by X's audio in the window, puts Y's first sample there.
   lockErrors(y.ticks, yFirst + ms(2))
+})
+
+/** X's last accepted first sample at or before `pos` (its place then), or null. */
+function placeAt(ticks, pos) {
+  let place = null
+  for (const k of ticks) if (k.pos <= pos && k.accepted) place = k.first_sample_pos
+  return place
+}
+
+test('tracker (R72): before its first lock a gap turn\'s prior is the previous turn\'s place + its turn_end.pcm_ms + gap_ms', () => {
+  // Y is announced 140 ms before its audio, so the arrival prior is 60 ms late; it has no onset
+  // prior (it locks before its onset would fire). X ended and was not aborted: Y is placed exactly
+  // where the splice puts it.
+  const { tracker, yFirst } = twoTurns({ xMs: 1000, gapMs: 200, y: { gapMs: 200 } })
+  const { [TURN_X]: x, [TURN_Y]: y } = tracker.summary()
+  const lock = y.ticks.findIndex(k => k.accepted)
+  assert(lock >= 0, 'never locked')
+  for (const k of y.ticks.slice(0, lock + 1)) {
+    const xPlace = placeAt(x.ticks, k.pos)
+    assert(xPlace !== null, 'X never locked before Y ticked')
+    assert(Math.abs(k.prior_pos - (xPlace + ms(1000 + 200))) < 1e-6, `prior ${k.prior_pos} vs X's place ${xPlace} + 1200 ms`)
+    assert(Math.abs(k.prior_pos - yFirst) <= ms(2), `prior ${(k.prior_pos - yFirst) * 1000 / SR} ms off Y's first sample`)
+  }
+  lockErrors(y.ticks, yFirst)
+  // The pcm_ms is the turn_end's, not the length of X's envelope: a turn_end 30 ms longer moves it.
+  const longer = twoTurns({ xMs: 1000, gapMs: 200, y: { gapMs: 200 }, xEnd: { endPcmMs: 1030 } }).tracker.summary()
+  const k0 = longer[TURN_Y].ticks[0]
+  assert(Math.abs(k0.prior_pos - (placeAt(longer[TURN_X].ticks, k0.pos) + ms(1030 + 200))) < 1e-6)
+})
+
+test('tracker (R72): an onset prior still re-anchors a gap turn before its first lock', () => {
+  const { tracker, yFirst } = twoTurns({ xMs: 1000, gapMs: 200, y: { gapMs: 200 }, yOnsetPrior: 'at-start', yOnsetShiftMs: 7 })
+  const y = tracker.summary()[TURN_Y]
+  const lock = y.ticks.findIndex(k => k.accepted)
+  assert(lock >= 0, 'never locked')
+  y.ticks.slice(0, lock + 1).forEach(k => assert.equal(k.prior_pos, yFirst + ms(7)))
+})
+
+test('tracker (R72): an aborted previous turn, gap_ms 0, or no turn_end yet keep the arrival prior', () => {
+  const arrivalPrior = (opts) => {
+    const { tracker, yArrival } = twoTurns(opts)
+    const y = tracker.summary()[TURN_Y]
+    assert(y.ticks.length > 0)
+    const lock = y.ticks.findIndex(k => k.accepted)
+    for (const k of y.ticks.slice(0, lock < 0 ? undefined : lock + 1)) assert.equal(k.prior_pos, delivered(yArrival) + ms(200))
+  }
+  arrivalPrior({ xMs: 1000, gapMs: 200, y: { gapMs: 200 }, abortX: true })
+  arrivalPrior({ xMs: 1000, gapMs: 200, y: { gapMs: 200 }, endThenAbortX: true })
+  arrivalPrior({ xMs: 1000, gapMs: 200, y: { gapMs: 0 } })
+  arrivalPrior({ xMs: 1000, gapMs: 200, y: { gapMs: 200 }, xEndLate: true })
 })
 
 test('tracker: an onset prior far from the arrival prior is the prior from the first tick, and stays the centre once the search widens', () => {

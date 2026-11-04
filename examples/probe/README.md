@@ -108,8 +108,11 @@ How the page runs the rule, per turn, from its `turn_start` on (design §3.2):
   between; never on `gap_ms` 0 for an unchained turn, and never onto a turn that was aborted.
 * **Cadence.** A tick every 50 ms of received audio until the turn's first lock, then every 200 ms;
   ticks stop once the last 1 s lies past the turn's end, or 1 s after `turn_abort`.
-* **Prior.** Until the first lock: the onset prior when the onset rule has one, else the arrival of
-  `turn_start` plus 200 ms; after it, the last accepted position. The search covers ± 300 ms
+* **Prior.** Until the first lock: the onset prior when the onset rule has one; else, for an
+  unchained turn with `gap_ms > 0` whose previous turn had ended (`turn_end`) and was not aborted
+  when its `turn_start` arrived, the previous turn's place plus its `turn_end.pcm_ms` plus `gap_ms`,
+  as for a chained turn (the processor released exactly that much silence; R72); else the arrival
+  of `turn_start` plus 200 ms. After it, the last accepted position. The search covers ± 300 ms
   around it. After 10 ticks with speech and no lock the search widens to ± 600 ms, re-centred on the
   onset prior.
 * **A tick** is `align` from `sync.js` on the last 3 s of received envelope: floor, speech gate,

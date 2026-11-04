@@ -43,6 +43,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The sdist leaves out `hack/` and the paired captures, so it stays at about 4 MB; the wheel is
   unchanged. The tests that need them skip without them.
+- The probe page places a turn that follows silence the processor released (`gap_ms` > 0, the
+  turn before it ended and was not aborted) at the previous turn's place plus its `pcm_ms` plus
+  `gap_ms` until its first lock, as the web SDK does (an onset prior still takes over); it used the
+  arrival of `turn_start` plus 200 ms, 78-182 ms off on the splice capture's gap turns that locked
+  before their onset. `replay_capture.py` reports both priors and replays with the new one on
+  `--r72-prior`.
 
 ## [0.1.0] - 2026-11-03
 
