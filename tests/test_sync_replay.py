@@ -25,6 +25,8 @@ tracking it. The criteria are design 4.1's restated minimum (rulings R62/R63):
 
 "Every turn" means every turn the rule saw with at least 300 ms of received speech. Each capture
 is replayed twice: with the oracle's zero-phase 30 Hz high-pass and with the browser's causal one.
+With the causal one the replay must first-lock every turn where the page did live (within 1.5 ms),
+which holds the replay's cadence and prior to the page's.
 On the splice fixture, the joins themselves are checked too: the received distance between a
 turn's last sample and the next one's first is the ``gap_ms`` the splice assumes, within a hop.
 
@@ -108,7 +110,7 @@ def _run(replay, capture: Path, causal: bool):
         results = replay.main([str(capture)] + (["--causal"] if causal else []))
     seen = [r for r in results if r["accepted"] or r["held"]]
     speech = [r for r in seen if (r["rx_ms"] or 0) >= 300]
-    return capture.name, results, speech
+    return capture.name, results, speech, causal
 
 
 _CASES = [(f, causal) for f in _FIXTURES for causal in (False, True)]
@@ -131,7 +133,7 @@ def _xfail_onset_step(request, name):
 
 
 def test_the_capture_still_holds_its_speech_turns(capture):
-    name, results, speech = capture
+    name, results, speech, _ = capture
     turns, ticks = _EXPECTED[name]
     assert len(speech) >= turns
     assert sum(r["accepted"] for r in results) >= ticks
@@ -139,13 +141,35 @@ def test_the_capture_still_holds_its_speech_turns(capture):
 
 def test_every_accepted_tick_has_content_windows_for_its_truth(capture):
     # The own-window fallback is no independent truth; on the fixtures it is never needed.
-    _, results, _ = capture
+    _, results, _, _ = capture
     fallback = {r["turn_id"]: r["window_fallback"] for r in results if r["window_fallback"]}
     assert not fallback
 
 
+@pytest.mark.parametrize(
+    "capture",
+    [c for c in _CASES if c[1]] or [None],
+    ids=lambda c: f"{c[0].name}-causal" if c else "none",
+    indirect=True,
+)
+def test_causal_replay_first_locks_where_the_page_did(capture):
+    # With the browser's high-pass the replay is the page's tracker: its first lock on every turn
+    # is the one the page recorded live (it holds exactly today; 1.5 ms leaves room for float
+    # rounding, not for a different tick). The page ran the causal high-pass only.
+    _, results, _, causal = capture
+    assert causal
+    recorded = [r for r in results if r["page_first_lock_ms"] is not None]
+    assert recorded
+    off = {
+        r["turn_id"]: (r["first_lock_ms"], r["page_first_lock_ms"])
+        for r in recorded
+        if r["first_lock_ms"] is None or abs(r["first_lock_ms"] - r["page_first_lock_ms"]) > 1.5
+    }
+    assert not off, f"replay vs page first lock, ms: {off}"
+
+
 def test_zero_false_locks_against_the_window_content_truth(capture):
-    _, results, _ = capture
+    _, results, _, _ = capture
     errors = [e for r in results for e in r["window_errors_ms"]]
     assert len(errors) == sum(r["accepted"] for r in results)
     late = [e for e in errors if e > FALSE_LOCK_MS]
@@ -153,7 +177,7 @@ def test_zero_false_locks_against_the_window_content_truth(capture):
 
 
 def test_every_turn_first_locks_within_750_ms_of_speech(capture, request):
-    name, _, speech = capture
+    name, _, speech, _ = capture
     _xfail_onset_step(request, name)
     late = {
         r["turn_id"]: r["first_lock_ms"]
@@ -164,7 +188,7 @@ def test_every_turn_first_locks_within_750_ms_of_speech(capture, request):
 
 
 def test_until_the_first_lock_the_onset_prior_is_within_10_ms_of_the_truth(capture, request):
-    name, _, speech = capture
+    name, _, speech, _ = capture
     _xfail_onset_step(request, name)
     prior = [
         abs(r["prior_error_window_ms"]) for r in speech if r["prior_error_window_ms"] is not None
@@ -175,7 +199,7 @@ def test_until_the_first_lock_the_onset_prior_is_within_10_ms_of_the_truth(captu
 
 
 def test_p95_error_against_the_window_content_truth_is_at_most_5_ms(capture):
-    _, results, _ = capture
+    _, results, _, _ = capture
     errors = [e for r in results for e in r["window_errors_ms"]]
     assert np.percentile(errors, 95) <= P95_MAX_MS
 

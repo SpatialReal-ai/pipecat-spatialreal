@@ -232,11 +232,11 @@
 {"t":1793776271.292,"tap":1116672,"message":{"data":{"tokens":[{"cache_read_input_tokens":0,"completion_tokens":0,"prompt_tokens":0,"reasoning_tokens":0,"total_tokens":0}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776271.292,"tap":1116672,"message":{"label":"rtvi-ai","type":"bot-llm-stopped"}}
 {"t":1793776271.292,"tap":1116672,"message":{"data":{"ttfb":[{"model":"gemini-3.6-flash","processor":"GoogleLLMService#0","value":0.0481719970703125}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776272.005,"tap":1150976,"message":{"data":{"final":false,"input_type":"transcription","text":"A long pause","timestamp":"2026-11-04T07:11:11.970+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776272.093,"tap":1155072,"message":{"data":{"final":false,"text":"A long pause","timestamp":"2026-11-04T07:11:11.970+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776272.005,"tap":1150976,"message":{"data":{"final":false,"input_type":"transcription","text":"A long pause","timestamp":"2026-11-04T07:11:11.970+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776272.093,"tap":1155072,"message":{"data":{"final":false,"text":"A long pause","timestamp":"2026-11-04T07:11:11.970+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776272.975,"tap":1197568,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":2.0000000000000013}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776273.009,"tap":1199104,"message":{"data":{"final":true,"input_type":"transcription","text":"A long pause after each one.","timestamp":"2026-11-04T07:11:12.941+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776273.059,"tap":1201664,"message":{"data":{"final":true,"text":"A long pause after each one.","timestamp":"2026-11-04T07:11:12.941+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776273.009,"tap":1199104,"message":{"data":{"final":true,"input_type":"transcription","text":"A long pause after each one.","timestamp":"2026-11-04T07:11:12.941+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776273.059,"tap":1201664,"message":{"data":{"final":true,"text":"A long pause after each one.","timestamp":"2026-11-04T07:11:12.941+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776273.067,"tap":1201920,"message":{"data":{"ttfb":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":0.2367544174194336}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776273.1,"tap":1203456,"message":{"data":{},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776273.172,"tap":1207040,"message":{"data":{"text":"A long pause after each one."},"label":"rtvi-ai","type":"user-llm-text"}}
@@ -290,11 +290,11 @@
 {"t":1793776277.354,"tap":1407744,"message":{"label":"rtvi-ai","type":"bot-stopped-speaking"}}
 {"t":1793776279.418,"tap":1506816,"message":{"label":"rtvi-ai","type":"user-started-speaking"}}
 {"t":1793776279.493,"tap":1510400,"message":{"label":"rtvi-ai","type":"bot-interrupted"}}
-{"t":1793776281.992,"tap":1561088,"message":{"data":{"final":false,"input_type":"transcription","text":"A pause between","timestamp":"2026-11-04T07:11:21.953+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776282.073,"tap":1565184,"message":{"data":{"final":false,"text":"A pause between","timestamp":"2026-11-04T07:11:21.953+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776281.992,"tap":1561088,"message":{"data":{"final":false,"input_type":"transcription","text":"A pause between","timestamp":"2026-11-04T07:11:21.953+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776282.073,"tap":1565184,"message":{"data":{"final":false,"text":"A pause between","timestamp":"2026-11-04T07:11:21.953+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776282.864,"tap":1603072,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":1.9600000000000013}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776282.906,"tap":1605120,"message":{"data":{"final":true,"input_type":"transcription","text":"A pause between each number.","timestamp":"2026-11-04T07:11:22.825+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776282.949,"tap":1607168,"message":{"data":{"final":true,"text":"A pause between each number.","timestamp":"2026-11-04T07:11:22.825+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776282.906,"tap":1605120,"message":{"data":{"final":true,"input_type":"transcription","text":"A pause between each number.","timestamp":"2026-11-04T07:11:22.825+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776282.949,"tap":1607168,"message":{"data":{"final":true,"text":"A pause between each number.","timestamp":"2026-11-04T07:11:22.825+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776282.949,"tap":1607168,"message":{"data":{},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776282.949,"tap":1607168,"message":{"data":{"ttfb":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":0.2783999443054199}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776282.973,"tap":1608448,"message":{"data":{"text":"A pause between each number."},"label":"rtvi-ai","type":"user-llm-text"}}
@@ -368,13 +368,13 @@
 {"t":1793776288.715,"tap":1883904,"message":{"label":"rtvi-ai","type":"bot-stopped-speaking"}}
 {"t":1793776290.758,"tap":1981952,"message":{"label":"rtvi-ai","type":"user-started-speaking"}}
 {"t":1793776290.834,"tap":1985536,"message":{"label":"rtvi-ai","type":"bot-interrupted"}}
-{"t":1793776290.868,"tap":1987328,"message":{"data":{"final":false,"input_type":"transcription","text":"Name","timestamp":"2026-11-04T07:11:30.809+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776290.919,"tap":1989632,"message":{"data":{"final":false,"text":"Name","timestamp":"2026-11-04T07:11:30.809+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
-{"t":1793776290.919,"tap":1989632,"message":{"data":{"final":false,"input_type":"transcription","text":"Name","timestamp":"2026-11-04T07:11:30.836+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776290.919,"tap":1989632,"message":{"data":{"final":false,"text":"Name","timestamp":"2026-11-04T07:11:30.836+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776290.868,"tap":1987328,"message":{"data":{"final":false,"input_type":"transcription","text":"Name","timestamp":"2026-11-04T07:11:30.809+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776290.919,"tap":1989632,"message":{"data":{"final":false,"text":"Name","timestamp":"2026-11-04T07:11:30.809+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776290.919,"tap":1989632,"message":{"data":{"final":false,"input_type":"transcription","text":"Name","timestamp":"2026-11-04T07:11:30.836+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776290.919,"tap":1989632,"message":{"data":{"final":false,"text":"Name","timestamp":"2026-11-04T07:11:30.836+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776292.602,"tap":2022528,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":0.7000000000000003}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776292.634,"tap":2024064,"message":{"data":{"final":true,"input_type":"transcription","text":"Slowly.","timestamp":"2026-11-04T07:11:32.500+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776292.689,"tap":2026624,"message":{"data":{"final":true,"text":"Slowly.","timestamp":"2026-11-04T07:11:32.500+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776292.634,"tap":2024064,"message":{"data":{"final":true,"input_type":"transcription","text":"Slowly.","timestamp":"2026-11-04T07:11:32.500+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776292.689,"tap":2026624,"message":{"data":{"final":true,"text":"Slowly.","timestamp":"2026-11-04T07:11:32.500+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776292.689,"tap":2026624,"message":{"data":{},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776292.689,"tap":2026624,"message":{"data":{"ttfb":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":0.2698519229888916}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776292.698,"tap":2027136,"message":{"data":{"text":"Slowly."},"label":"rtvi-ai","type":"user-llm-text"}}
@@ -385,11 +385,11 @@
 {"t":1793776292.874,"tap":2035584,"message":{"data":{"tokens":[{"cache_read_input_tokens":0,"completion_tokens":0,"prompt_tokens":0,"reasoning_tokens":0,"total_tokens":0}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776292.874,"tap":2035584,"message":{"label":"rtvi-ai","type":"bot-llm-stopped"}}
 {"t":1793776292.874,"tap":2035584,"message":{"data":{"ttfb":[{"model":"gemini-3.6-flash","processor":"GoogleLLMService#0","value":0.06659913063049316}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776293.566,"tap":2068864,"message":{"data":{"final":false,"input_type":"transcription","text":"Pausing after each","timestamp":"2026-11-04T07:11:33.532+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776293.601,"tap":2070400,"message":{"data":{"final":false,"text":"Pausing after each","timestamp":"2026-11-04T07:11:33.532+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776293.566,"tap":2068864,"message":{"data":{"final":false,"input_type":"transcription","text":"Pausing after each","timestamp":"2026-11-04T07:11:33.532+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776293.601,"tap":2070400,"message":{"data":{"final":false,"text":"Pausing after each","timestamp":"2026-11-04T07:11:33.532+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776294.106,"tap":2094720,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":1.560000000000001}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776294.196,"tap":2099072,"message":{"data":{"final":true,"input_type":"transcription","text":"Pausing after each one.","timestamp":"2026-11-04T07:11:34.070+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776294.244,"tap":2101376,"message":{"data":{"final":true,"text":"Pausing after each one.","timestamp":"2026-11-04T07:11:34.070+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776294.196,"tap":2099072,"message":{"data":{"final":true,"input_type":"transcription","text":"Pausing after each one.","timestamp":"2026-11-04T07:11:34.070+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776294.244,"tap":2101376,"message":{"data":{"final":true,"text":"Pausing after each one.","timestamp":"2026-11-04T07:11:34.070+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776294.244,"tap":2101376,"message":{"data":{"ttfb":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":0.2342629432678223}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776294.244,"tap":2101376,"message":{"data":{},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776294.364,"tap":2107008,"message":{"data":{"text":"Pausing after each one."},"label":"rtvi-ai","type":"user-llm-text"}}
@@ -441,16 +441,16 @@
 {"t":1793776298.427,"tap":2302080,"message":{"label":"rtvi-ai","type":"bot-stopped-speaking"}}
 {"t":1793776300.514,"tap":2402176,"message":{"label":"rtvi-ai","type":"user-started-speaking"}}
 {"t":1793776300.687,"tap":2410624,"message":{"label":"rtvi-ai","type":"bot-interrupted"}}
-{"t":1793776302.128,"tap":2439424,"message":{"data":{"final":false,"input_type":"transcription","text":"Tell me a long story about a dragon","timestamp":"2026-11-04T07:11:42.093+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776302.26,"tap":2445824,"message":{"data":{"final":false,"text":"Tell me a long story about a dragon","timestamp":"2026-11-04T07:11:42.093+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776302.128,"tap":2439424,"message":{"data":{"final":false,"input_type":"transcription","text":"Tell me a long story about a dragon","timestamp":"2026-11-04T07:11:42.093+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776302.26,"tap":2445824,"message":{"data":{"final":false,"text":"Tell me a long story about a dragon","timestamp":"2026-11-04T07:11:42.093+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776302.31,"tap":2448128,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":8.039999999999917}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776302.31,"tap":2448128,"message":{"data":{"final":true,"input_type":"transcription","text":"Tell me a long story about a","timestamp":"2026-11-04T07:11:42.114+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776302.31,"tap":2448128,"message":{"data":{"final":true,"text":"Tell me a long story about a","timestamp":"2026-11-04T07:11:42.114+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
-{"t":1793776302.882,"tap":2475776,"message":{"data":{"final":false,"input_type":"transcription","text":"who learns to bake","timestamp":"2026-11-04T07:11:42.847+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776302.915,"tap":2477312,"message":{"data":{"final":false,"text":"who learns to bake","timestamp":"2026-11-04T07:11:42.847+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776302.31,"tap":2448128,"message":{"data":{"final":true,"input_type":"transcription","text":"Tell me a long story about a","timestamp":"2026-11-04T07:11:42.114+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776302.31,"tap":2448128,"message":{"data":{"final":true,"text":"Tell me a long story about a","timestamp":"2026-11-04T07:11:42.114+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776302.882,"tap":2475776,"message":{"data":{"final":false,"input_type":"transcription","text":"who learns to bake","timestamp":"2026-11-04T07:11:42.847+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776302.915,"tap":2477312,"message":{"data":{"final":false,"text":"who learns to bake","timestamp":"2026-11-04T07:11:42.847+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776303.473,"tap":2503936,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":1.3200000000000007}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776303.511,"tap":2505728,"message":{"data":{"final":true,"input_type":"transcription","text":"who learns to bake bread.","timestamp":"2026-11-04T07:11:43.437+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776303.56,"tap":2508288,"message":{"data":{"final":true,"text":"who learns to bake bread.","timestamp":"2026-11-04T07:11:43.437+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776303.511,"tap":2505728,"message":{"data":{"final":true,"input_type":"transcription","text":"who learns to bake bread.","timestamp":"2026-11-04T07:11:43.437+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776303.56,"tap":2508288,"message":{"data":{"final":true,"text":"who learns to bake bread.","timestamp":"2026-11-04T07:11:43.437+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776303.572,"tap":2508800,"message":{"data":{"ttfb":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":0.23507404327392575}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776303.618,"tap":2510848,"message":{"data":{},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776303.675,"tap":2513664,"message":{"data":{"text":"Tell me a long story about a who learns to bake bread."},"label":"rtvi-ai","type":"user-llm-text"}}
@@ -594,11 +594,11 @@
 {"t":1793776308.411,"tap":2740992,"message":{"label":"rtvi-ai","type":"bot-interrupted"}}
 {"t":1793776308.516,"tap":2746112,"message":{"data":{"tag":"spatialreal-avatar","turn_abort":{"turn_id":"20261104071144_7uFTEvKY88ZS"}},"label":"rtvi-ai","type":"server-message"}}
 {"t":1793776308.516,"tap":2746112,"message":{"label":"rtvi-ai","type":"bot-stopped-speaking"}}
-{"t":1793776308.591,"tap":2749696,"message":{"data":{"final":false,"input_type":"transcription","text":"Sorry to","timestamp":"2026-11-04T07:11:48.556+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776308.626,"tap":2751488,"message":{"data":{"final":false,"text":"Sorry to","timestamp":"2026-11-04T07:11:48.556+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776308.591,"tap":2749696,"message":{"data":{"final":false,"input_type":"transcription","text":"Sorry to","timestamp":"2026-11-04T07:11:48.556+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776308.626,"tap":2751488,"message":{"data":{"final":false,"text":"Sorry to","timestamp":"2026-11-04T07:11:48.556+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776309.354,"tap":2786304,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":5.879999999999963}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776309.387,"tap":2787840,"message":{"data":{"final":true,"input_type":"transcription","text":"Sorry to interrupt.","timestamp":"2026-11-04T07:11:49.312+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776309.44,"tap":2790400,"message":{"data":{"final":true,"text":"Sorry to interrupt.","timestamp":"2026-11-04T07:11:49.312+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776309.387,"tap":2787840,"message":{"data":{"final":true,"input_type":"transcription","text":"Sorry to interrupt.","timestamp":"2026-11-04T07:11:49.312+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776309.44,"tap":2790400,"message":{"data":{"final":true,"text":"Sorry to interrupt.","timestamp":"2026-11-04T07:11:49.312+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776309.46,"tap":2791424,"message":{"data":{"ttfb":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":0.2356278896331787}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776309.57,"tap":2796544,"message":{"data":{},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776309.606,"tap":2798336,"message":{"data":{"text":"Sorry to interrupt."},"label":"rtvi-ai","type":"user-llm-text"}}
@@ -609,11 +609,11 @@
 {"t":1793776309.659,"tap":2800896,"message":{"data":{"tokens":[{"cache_read_input_tokens":0,"completion_tokens":0,"prompt_tokens":0,"reasoning_tokens":0,"total_tokens":0}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776309.659,"tap":2800896,"message":{"label":"rtvi-ai","type":"bot-llm-stopped"}}
 {"t":1793776309.659,"tap":2800896,"message":{"data":{"ttfb":[{"model":"gemini-3.6-flash","processor":"GoogleLLMService#0","value":0.08831596374511719}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776310.415,"tap":2837248,"message":{"data":{"final":false,"input_type":"transcription","text":"What is two plus two?","timestamp":"2026-11-04T07:11:50.380+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776310.506,"tap":2841600,"message":{"data":{"final":false,"text":"What is two plus two?","timestamp":"2026-11-04T07:11:50.380+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776310.415,"tap":2837248,"message":{"data":{"final":false,"input_type":"transcription","text":"What is two plus two?","timestamp":"2026-11-04T07:11:50.380+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776310.506,"tap":2841600,"message":{"data":{"final":false,"text":"What is two plus two?","timestamp":"2026-11-04T07:11:50.380+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776310.809,"tap":2856192,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":1.4600000000000009}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776310.863,"tap":2858752,"message":{"data":{"final":true,"input_type":"transcription","text":"What is two plus two?","timestamp":"2026-11-04T07:11:50.768+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776310.863,"tap":2858752,"message":{"data":{"final":true,"text":"What is two plus two?","timestamp":"2026-11-04T07:11:50.768+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776310.863,"tap":2858752,"message":{"data":{"final":true,"input_type":"transcription","text":"What is two plus two?","timestamp":"2026-11-04T07:11:50.768+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776310.863,"tap":2858752,"message":{"data":{"final":true,"text":"What is two plus two?","timestamp":"2026-11-04T07:11:50.768+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776310.864,"tap":2858752,"message":{"data":{},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776310.899,"tap":2860544,"message":{"data":{"ttfb":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":0.2704501152038574}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776318.117,"tap":2861312,"message":{"data":{"text":"List three colors of the rainbow."},"label":"rtvi-ai","type":"user-llm-text"}}
@@ -624,11 +624,11 @@
 {"t":1793776318.201,"tap":2865408,"message":{"data":{"tokens":[{"cache_read_input_tokens":0,"completion_tokens":0,"prompt_tokens":0,"reasoning_tokens":0,"total_tokens":0}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776318.201,"tap":2865408,"message":{"label":"rtvi-ai","type":"bot-llm-stopped"}}
 {"t":1793776318.201,"tap":2865408,"message":{"data":{"ttfb":[{"model":"gemini-3.6-flash","processor":"GoogleLLMService#0","value":0.07080602645874023}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776319.085,"tap":2907648,"message":{"data":{"final":false,"input_type":"transcription","text":"Pausing between each","timestamp":"2026-11-04T07:11:59.049+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776319.12,"tap":2909440,"message":{"data":{"final":false,"text":"Pausing between each","timestamp":"2026-11-04T07:11:59.049+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776319.085,"tap":2907648,"message":{"data":{"final":false,"input_type":"transcription","text":"Pausing between each","timestamp":"2026-11-04T07:11:59.049+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776319.12,"tap":2909440,"message":{"data":{"final":false,"text":"Pausing between each","timestamp":"2026-11-04T07:11:59.049+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776319.671,"tap":2935808,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":1.660000000000001}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776319.704,"tap":2937600,"message":{"data":{"final":true,"input_type":"transcription","text":"Pausing between each color.","timestamp":"2026-11-04T07:11:59.603+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776319.754,"tap":2939904,"message":{"data":{"final":true,"text":"Pausing between each color.","timestamp":"2026-11-04T07:11:59.603+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776319.704,"tap":2937600,"message":{"data":{"final":true,"input_type":"transcription","text":"Pausing between each color.","timestamp":"2026-11-04T07:11:59.603+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776319.754,"tap":2939904,"message":{"data":{"final":true,"text":"Pausing between each color.","timestamp":"2026-11-04T07:11:59.603+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776319.754,"tap":2939904,"message":{"data":{"ttfb":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":0.2543160915374756}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776319.754,"tap":2939904,"message":{"data":{},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776319.794,"tap":2941696,"message":{"data":{"text":"Pausing between each color."},"label":"rtvi-ai","type":"user-llm-text"}}
@@ -677,17 +677,17 @@
 {"t":1793776323.458,"tap":3117568,"message":{"data":{"aggregated_by":"sentence","output_type":"sentence","segment_id":9214,"spoken_progress":{"accumulated_text":"Blue.","remaining_text":""},"spoken_status":"completed","text":"Blue.","text_type":"sentence","will_be_spoken":true},"label":"rtvi-ai","type":"bot-output"}}
 {"t":1793776323.796,"tap":3133952,"message":{"data":{"tag":"spatialreal-avatar","turn_end":{"pcm_ms":2240,"segment_count":2,"turn_id":"20261104071201_-q6TVbrxhXfk"}},"label":"rtvi-ai","type":"server-message"}}
 {"t":1793776323.856,"tap":3136768,"message":{"label":"rtvi-ai","type":"bot-stopped-speaking"}}
-{"t":1793776325.654,"tap":3223040,"message":{"data":{"final":false,"input_type":"transcription","text":"As","timestamp":"2026-11-04T07:12:05.615+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776325.688,"tap":3224704,"message":{"data":{"final":false,"text":"As","timestamp":"2026-11-04T07:12:05.615+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776325.654,"tap":3223040,"message":{"data":{"final":false,"input_type":"transcription","text":"As","timestamp":"2026-11-04T07:12:05.615+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776325.688,"tap":3224704,"message":{"data":{"final":false,"text":"As","timestamp":"2026-11-04T07:12:05.615+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776325.819,"tap":3230976,"message":{"label":"rtvi-ai","type":"user-started-speaking"}}
 {"t":1793776325.819,"tap":3230976,"message":{"label":"rtvi-ai","type":"bot-interrupted"}}
-{"t":1793776327.648,"tap":3259264,"message":{"data":{"final":false,"input_type":"transcription","text":"Explain step by step how to bake a","timestamp":"2026-11-04T07:12:07.612+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776327.681,"tap":3260800,"message":{"data":{"final":false,"text":"Explain step by step how to bake a","timestamp":"2026-11-04T07:12:07.612+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
-{"t":1793776328.672,"tap":3308416,"message":{"data":{"final":false,"input_type":"transcription","text":"Explain step by step how to bake a loaf of bread from","timestamp":"2026-11-04T07:12:08.637+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776328.754,"tap":3312256,"message":{"data":{"final":false,"text":"Explain step by step how to bake a loaf of bread from","timestamp":"2026-11-04T07:12:08.637+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776327.648,"tap":3259264,"message":{"data":{"final":false,"input_type":"transcription","text":"Explain step by step how to bake a","timestamp":"2026-11-04T07:12:07.612+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776327.681,"tap":3260800,"message":{"data":{"final":false,"text":"Explain step by step how to bake a","timestamp":"2026-11-04T07:12:07.612+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776328.672,"tap":3308416,"message":{"data":{"final":false,"input_type":"transcription","text":"Explain step by step how to bake a loaf of bread from","timestamp":"2026-11-04T07:12:08.637+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776328.754,"tap":3312256,"message":{"data":{"final":false,"text":"Explain step by step how to bake a loaf of bread from","timestamp":"2026-11-04T07:12:08.637+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776329.258,"tap":3336576,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":9.599999999999884}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776329.313,"tap":3339136,"message":{"data":{"final":true,"input_type":"transcription","text":"Explain step by step how to bake a loaf of bread from scratch.","timestamp":"2026-11-04T07:12:09.215+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776329.362,"tap":3341440,"message":{"data":{"final":true,"text":"Explain step by step how to bake a loaf of bread from scratch.","timestamp":"2026-11-04T07:12:09.215+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776329.313,"tap":3339136,"message":{"data":{"final":true,"input_type":"transcription","text":"Explain step by step how to bake a loaf of bread from scratch.","timestamp":"2026-11-04T07:12:09.215+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776329.362,"tap":3341440,"message":{"data":{"final":true,"text":"Explain step by step how to bake a loaf of bread from scratch.","timestamp":"2026-11-04T07:12:09.215+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776329.386,"tap":3342720,"message":{"data":{},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776329.491,"tap":3347840,"message":{"data":{"ttfb":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":0.2876780033111572}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776329.528,"tap":3349376,"message":{"data":{"text":"Explain step by step how to bake a loaf of bread from scratch."},"label":"rtvi-ai","type":"user-llm-text"}}
@@ -821,11 +821,11 @@
 {"t":1793776334.323,"tap":3579776,"message":{"label":"rtvi-ai","type":"bot-interrupted"}}
 {"t":1793776334.323,"tap":3579776,"message":{"data":{"tag":"spatialreal-avatar","turn_abort":{"turn_id":"20261104071210_8PjC5eG3KjNQ"}},"label":"rtvi-ai","type":"server-message"}}
 {"t":1793776334.323,"tap":3579776,"message":{"label":"rtvi-ai","type":"bot-stopped-speaking"}}
-{"t":1793776334.371,"tap":3582080,"message":{"data":{"final":false,"input_type":"transcription","text":"Stop","timestamp":"2026-11-04T07:12:14.336+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776334.404,"tap":3583616,"message":{"data":{"final":false,"text":"Stop","timestamp":"2026-11-04T07:12:14.336+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776334.371,"tap":3582080,"message":{"data":{"final":false,"input_type":"transcription","text":"Stop","timestamp":"2026-11-04T07:12:14.336+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776334.404,"tap":3583616,"message":{"data":{"final":false,"text":"Stop","timestamp":"2026-11-04T07:12:14.336+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776335.145,"tap":3619200,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":5.899999999999962}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776335.255,"tap":3624320,"message":{"data":{"final":true,"input_type":"transcription","text":"Stop there, please.","timestamp":"2026-11-04T07:12:15.109+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776335.255,"tap":3624320,"message":{"data":{"final":true,"text":"Stop there, please.","timestamp":"2026-11-04T07:12:15.109+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776335.255,"tap":3624320,"message":{"data":{"final":true,"input_type":"transcription","text":"Stop there, please.","timestamp":"2026-11-04T07:12:15.109+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776335.255,"tap":3624320,"message":{"data":{"final":true,"text":"Stop there, please.","timestamp":"2026-11-04T07:12:15.109+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776335.288,"tap":3626112,"message":{"data":{},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776335.322,"tap":3627648,"message":{"data":{"ttfb":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":0.2952089309692383}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776335.355,"tap":3629184,"message":{"data":{"text":"Stop there, please."},"label":"rtvi-ai","type":"user-llm-text"}}
@@ -836,17 +836,17 @@
 {"t":1793776335.439,"tap":3633280,"message":{"data":{"tokens":[{"cache_read_input_tokens":0,"completion_tokens":0,"prompt_tokens":0,"reasoning_tokens":0,"total_tokens":0}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776335.439,"tap":3633280,"message":{"label":"rtvi-ai","type":"bot-llm-stopped"}}
 {"t":1793776335.439,"tap":3633280,"message":{"data":{"ttfb":[{"model":"gemini-3.6-flash","processor":"GoogleLLMService#0","value":0.048583984375}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776336.204,"tap":3669888,"message":{"data":{"final":false,"input_type":"transcription","text":"What day comes after","timestamp":"2026-11-04T07:12:16.169+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776336.339,"tap":3676544,"message":{"data":{"final":false,"text":"What day comes after","timestamp":"2026-11-04T07:12:16.169+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
-{"t":1793776344.205,"tap":3693184,"message":{"data":{"final":false,"text":"Say goodbye slow","timestamp":"2026-11-04T07:12:24.067+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776336.204,"tap":3669888,"message":{"data":{"final":false,"input_type":"transcription","text":"What day comes after","timestamp":"2026-11-04T07:12:16.169+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776336.339,"tap":3676544,"message":{"data":{"final":false,"text":"What day comes after","timestamp":"2026-11-04T07:12:16.169+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776344.205,"tap":3693184,"message":{"data":{"final":false,"text":"Say goodbye slow","timestamp":"2026-11-04T07:12:24.067+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776344.485,"tap":3706496,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":1.3400000000000007}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776344.485,"tap":3706496,"message":{"data":{"final":true,"input_type":"transcription","text":"Say goodbye slowly.","timestamp":"2026-11-04T07:12:24.448+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776344.534,"tap":3708800,"message":{"data":{"final":true,"text":"Say goodbye slowly.","timestamp":"2026-11-04T07:12:24.448+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
-{"t":1793776345.483,"tap":3754368,"message":{"data":{"final":false,"input_type":"transcription","text":"In three short","timestamp":"2026-11-04T07:12:25.448+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776345.516,"tap":3755904,"message":{"data":{"final":false,"text":"In three short","timestamp":"2026-11-04T07:12:25.448+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776344.485,"tap":3706496,"message":{"data":{"final":true,"input_type":"transcription","text":"Say goodbye slowly.","timestamp":"2026-11-04T07:12:24.448+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776344.534,"tap":3708800,"message":{"data":{"final":true,"text":"Say goodbye slowly.","timestamp":"2026-11-04T07:12:24.448+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776345.483,"tap":3754368,"message":{"data":{"final":false,"input_type":"transcription","text":"In three short","timestamp":"2026-11-04T07:12:25.448+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776345.516,"tap":3755904,"message":{"data":{"final":false,"text":"In three short","timestamp":"2026-11-04T07:12:25.448+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776346.15,"tap":3786368,"message":{"data":{"stt_usage":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":{"audio_seconds":1.660000000000001}}]},"label":"rtvi-ai","type":"metrics"}}
-{"t":1793776346.265,"tap":3792000,"message":{"data":{"final":true,"input_type":"transcription","text":"In three short sentences.","timestamp":"2026-11-04T07:12:26.111+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-input"}}
-{"t":1793776346.265,"tap":3792000,"message":{"data":{"final":true,"text":"In three short sentences.","timestamp":"2026-11-04T07:12:26.111+00:00","user_id":"a22f70ba-8381-43ac-a8e5-f18389f683d8"},"label":"rtvi-ai","type":"user-transcription"}}
+{"t":1793776346.265,"tap":3792000,"message":{"data":{"final":true,"input_type":"transcription","text":"In three short sentences.","timestamp":"2026-11-04T07:12:26.111+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-input"}}
+{"t":1793776346.265,"tap":3792000,"message":{"data":{"final":true,"text":"In three short sentences.","timestamp":"2026-11-04T07:12:26.111+00:00","user_id":"speaker"},"label":"rtvi-ai","type":"user-transcription"}}
 {"t":1793776346.301,"tap":3793536,"message":{"data":{"ttfb":[{"model":"nova-3-general","processor":"DeepgramSTTService#0","value":0.22978925704956055}]},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776346.351,"tap":3796096,"message":{"data":{},"label":"rtvi-ai","type":"metrics"}}
 {"t":1793776346.351,"tap":3796096,"message":{"data":{"text":"Say goodbye slowly. In three short sentences."},"label":"rtvi-ai","type":"user-llm-text"}}
