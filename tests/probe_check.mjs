@@ -876,6 +876,7 @@ test('tracker: locks on the turn, 50 ms ticks until the first lock and 200 ms af
   for (const k of t.ticks) {
     if (last !== null) assert.equal(k.prior_pos, last, 'the prior after a lock is the last accepted position')
     else assert.equal(k.prior_pos, delivered(arrival) + ms(200))
+    assert.equal(k.prior_kind, last !== null ? 'locked' : 'arrival')
     if (k.accepted) last = k.first_sample_pos
   }
   assert(t.ticks.slice(lock + 1).some(k => k.prior_pos !== t.ticks[lock].first_sample_pos), 'the prior moves with each lock')
@@ -912,6 +913,7 @@ test('tracker: no lock inside +/- 300 ms of the prior; after 10 held ticks the s
   assert(lock2 >= 0 && lock2 < lock && k2.every(k => k.search_ms === 300))
   lockErrors(k2, first)
   assert.equal(k2[0].prior_pos, first + ms(30))
+  assert.equal(k2[0].prior_kind, 'onset')
 })
 
 test('tracker: a chained turn is spliced onto the turn before it and locks at prev_turn_pcm_ms after it', () => {
@@ -1023,7 +1025,9 @@ test('tracker (R72): before its first lock a gap turn\'s prior is the previous t
     assert(xPlace !== null, 'X never locked before Y ticked')
     assert(Math.abs(k.prior_pos - (xPlace + ms(1000 + 200))) < 1e-6, `prior ${k.prior_pos} vs X's place ${xPlace} + 1200 ms`)
     assert(Math.abs(k.prior_pos - yFirst) <= ms(2), `prior ${(k.prior_pos - yFirst) * 1000 / SR} ms off Y's first sample`)
+    assert.equal(k.prior_kind, 'gap') // recorded, so a replay of the capture knows it (replay_capture.page_prior)
   }
+  y.ticks.slice(lock + 1).forEach(k => assert.equal(k.prior_kind, 'locked'))
   lockErrors(y.ticks, yFirst)
   // The pcm_ms is the turn_end's, not the length of X's envelope: a turn_end 30 ms longer moves it.
   const longer = twoTurns({ xMs: 1000, gapMs: 200, y: { gapMs: 200 }, xEnd: { endPcmMs: 1030 } }).tracker.summary()
@@ -1037,6 +1041,7 @@ test('tracker (R72): an onset prior still re-anchors a gap turn before its first
   const lock = y.ticks.findIndex(k => k.accepted)
   assert(lock >= 0, 'never locked')
   y.ticks.slice(0, lock + 1).forEach(k => assert.equal(k.prior_pos, yFirst + ms(7)))
+  y.ticks.slice(0, lock + 1).forEach(k => assert.equal(k.prior_kind, 'onset'))
 })
 
 test('tracker (R72): an aborted previous turn, gap_ms 0, or no turn_end yet keep the arrival prior', () => {
@@ -1045,7 +1050,10 @@ test('tracker (R72): an aborted previous turn, gap_ms 0, or no turn_end yet keep
     const y = tracker.summary()[TURN_Y]
     assert(y.ticks.length > 0)
     const lock = y.ticks.findIndex(k => k.accepted)
-    for (const k of y.ticks.slice(0, lock < 0 ? undefined : lock + 1)) assert.equal(k.prior_pos, delivered(yArrival) + ms(200))
+    for (const k of y.ticks.slice(0, lock < 0 ? undefined : lock + 1)) {
+      assert.equal(k.prior_pos, delivered(yArrival) + ms(200))
+      assert.equal(k.prior_kind, 'arrival')
+    }
   }
   arrivalPrior({ xMs: 1000, gapMs: 200, y: { gapMs: 200 }, abortX: true })
   arrivalPrior({ xMs: 1000, gapMs: 200, y: { gapMs: 200 }, endThenAbortX: true })

@@ -48,6 +48,9 @@ export const DEFAULTS = Object.freeze({
 /** The receiver's high-pass corner, Hz. */
 export const HIGH_PASS_HZ = 30
 
+/** What a tick's prior was (its `prior_kind`): see SyncTracker.prior(). */
+export const PRIOR_KINDS = Object.freeze(['locked', 'onset', 'gap', 'arrival'])
+
 /** How a live tracker ticks (design §3.2 steps 4, 8 and 10). */
 export const CADENCE = Object.freeze({
   beforeLockMs: 50, // a tick every 50 ms of new audio until the turn's first lock
@@ -560,15 +563,27 @@ export class SyncTracker {
   }
 
   /**
-   * Where the turn's first sample is believed to be now, received frames (the web SDK's frame 0):
-   * the last accepted alignment, else the onset prior, else (R72) the previous turn's place + the
-   * gap turn's join, else turn_start arrival + 200 ms.
+   * Where the turn's first sample is believed to be now, received frames (the web SDK's frame 0),
+   * and what puts it there (PRIOR_KINDS, recorded per tick as `prior_kind`): the last accepted
+   * alignment ('locked'), else the onset prior ('onset'; a chained turn's place from the
+   * analysis comes this way too), else (R72) the previous turn's place + the gap turn's join
+   * ('gap'), else turn_start arrival + 200 ms ('arrival').
+   *
+   * Two simplifications against web-sdk ba14a15, which matter for outliers only: the web SDK
+   * places a gap turn only when the previous turn has a frame 0, and re-anchors it only on an
+   * onset within 200 ms of that place; here the previous turn always has a place (at worst its own
+   * arrival prior), and any onset prior the page's analysis sets takes over.
    */
+  prior(turn) {
+    if (turn.locked) return { frame: turn.lastL, kind: 'locked' }
+    if (turn.onsetPrior !== null) return { frame: turn.onsetPrior / this.hop, kind: 'onset' }
+    if (turn.gapFrom) return { frame: this.place(this.turns.get(turn.gapFrom.id)) + this.samples(turn.gapFrom.joinMs) / this.hop, kind: 'gap' }
+    return { frame: (turn.startTap + this.samples(this.cadence.priorLeadMs)) / this.hop, kind: 'arrival' }
+  }
+
+  /** The frame of prior(). */
   place(turn) {
-    if (turn.locked) return turn.lastL
-    if (turn.onsetPrior !== null) return turn.onsetPrior / this.hop
-    if (turn.gapFrom) return this.place(this.turns.get(turn.gapFrom.id)) + this.samples(turn.gapFrom.joinMs) / this.hop
-    return (turn.startTap + this.samples(this.cadence.priorLeadMs)) / this.hop
+    return this.prior(turn).frame
   }
 
   /** The turn's own envelope, reassembled by index. */
@@ -605,7 +620,7 @@ export class SyncTracker {
     const atFrame = tapPos => tapPos / this.hop
     // A turn with nothing to correlate yet waits; it is due again on the next block.
     if (!own.values.length) return
-    const place = this.place(turn)
+    const { frame: place, kind: placeKind } = this.prior(turn)
     // Finished: the whole 1 s window lies past the turn's end (or 1 s past an abort).
     const windowStart = atFrame(pos) - this.params.windowMs / hopMs
     if (turn.abortTap !== null && pos > turn.abortTap + this.samples(this.params.windowMs)) return void (turn.done = true)
@@ -615,6 +630,7 @@ export class SyncTracker {
     turn.splice = ref.splice
     const wide = !turn.locked && turn.heldNoLock >= cadence.widenAfterTicks
     const centre = wide && turn.onsetPrior !== null ? atFrame(turn.onsetPrior) : place
+    const priorKind = wide && turn.onsetPrior !== null ? 'onset' : placeKind
     const searchMs = wide ? cadence.wideSearchMs : this.params.searchMs
     const all = this.env.values()
     const base = Math.max(0, all.length - Math.trunc(this.params.floorHistoryMs / hopMs))
@@ -628,6 +644,7 @@ export class SyncTracker {
     const record = {
       pos,
       prior_pos: centre * this.hop,
+      prior_kind: priorKind,
       search_ms: searchMs,
       gate: r.checks.speech,
       accepted,

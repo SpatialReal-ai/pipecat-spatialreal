@@ -52,7 +52,9 @@ What it does, per turn:
 * **The prior before the lock (R72)**: since R72 the page places an unchained turn with
   ``gap_ms`` > 0, whose previous turn had ended and was not aborted when its ``turn_start``
   arrived, at the previous turn's place + its ``turn_end.pcm_ms`` + ``gap_ms`` until an onset prior
-  or a lock replaces it (:func:`gap_join`). Captures recorded before R72 hold the arrival prior in
+  or a lock replaces it (:func:`gap_join`). The page records each tick's prior kind
+  (``prior_kind``); a gap prior is replayed from the previous turn's replayed place, not from the
+  recorded value. Captures recorded before R72 have no ``prior_kind``, hold the arrival prior in
   their ticks and replay with it. For every such turn the replay also reports what each prior
   would have placed at its first lock against the truth (``prelock_prior_error_ms``, the prior it
   replayed with; ``r72_prior_error_ms``, the R72 prior, None where an onset prior was in effect,
@@ -228,21 +230,45 @@ def splice_at(t, own, by_id, arrivals, pos):
     return ref, off
 
 
+def recorded_kind(k, default):
+    """What a pre-lock tick's prior was: its ``prior_kind`` (``onset``, ``gap`` or ``arrival``), or,
+    in a capture saved before the page recorded it, ``arrival`` when ``prior_pos`` is
+    ``turn_start`` + 200 ms (``default``) and ``onset`` otherwise (those pages had no gap prior)."""
+    kind = k.get("prior_kind")
+    if kind is not None:
+        return kind
+    return "arrival" if abs(k["prior_pos"] - default) < 0.5 else "onset"
+
+
+def recorded_gap_prior(t, fs):
+    """Whether the page placed ``t`` with the R72 gap prior before its first lock."""
+    default = t["start_tap"] + round(PRIOR_LEAD_MS * fs / 1000)
+    for k in t.get("ticks") or []:
+        if recorded_kind(k, default) == "gap":
+            return True
+        if k["accepted"]:
+            break
+    return False
+
+
 def page_prior(t, fs, hop):
     """The onset prior the page had at a tap position, as a function ``pos -> samples or None``.
 
     The page sets it from its analysis pass, which runs up to 100 ms after an onset is heard and
     can move it (a chained turn placed from its predecessor's end, then heard): wall-clock timing
     the capture does not hold. Its ticks do: before the first lock each records the prior it used
-    (``prior_pos``), which is the onset prior when the page had one and ``turn_start`` + 200 ms
-    when it had none. The replay follows that record tick by tick. Past the page's last tick before
-    its first lock (the replay locking later than the page did) it uses the turn's final onset
-    prior, from 100 ms after the onset it rests on was received (no earlier than that last tick).
+    (``prior_pos``) and what it was (``prior_kind``, :func:`recorded_kind`). The replay follows
+    that record tick by tick, taking the recorded value of an onset prior only: an arrival prior
+    is ``turn_start`` + 200 ms, and a gap prior (R72) follows the previous turn's replayed place,
+    which the caller computes (None here for both). Past the page's last tick before its first
+    lock (the replay locking later than the page did) it uses the turn's final onset prior, from
+    100 ms after the onset it rests on was received (no earlier than that last tick).
     """
     default = t["start_tap"] + round(PRIOR_LEAD_MS * fs / 1000)
     steps = []
     for k in t.get("ticks") or []:
-        steps.append((k["pos"], None if abs(k["prior_pos"] - default) < 0.5 else k["prior_pos"]))
+        onset = recorded_kind(k, default) == "onset"
+        steps.append((k["pos"], k["prior_pos"] if onset else None))
         if k["accepted"]:
             break
     final = t.get("onset_prior_pos")
@@ -792,7 +818,8 @@ def main(argv=None):
         if join is not None and join[0] in placed:
             join_frames = round(join[1] * fs / 1000) / hop
             r72 = lambda pos, j=join, jf=join_frames: place_at(placed, j[0], pos) + jf
-        use_r72 = r72 if args.r72_prior else None
+        # the page's own gap prior (recorded) is replayed as one, and --r72-prior adds it elsewhere
+        use_r72 = r72 if args.r72_prior or recorded_gap_prior(t, fs) else None
 
         def prior_l_at(pos, prior_at=prior_at, default_l=default_l, use_r72=use_r72):
             o = prior_at(pos)
