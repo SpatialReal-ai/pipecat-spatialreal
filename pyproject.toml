@@ -52,6 +52,9 @@ dev = [
     # Pipecat's eval transport, which tests/test_rtvi_smoke.py sends through, is its FastAPI
     # WebSocket transport.
     "pipecat-ai[websocket]>=1.15.0,<2",
+    # Only tests/test_fingerprint_oracle.py (and hack/sync-sim/) use it; the package itself is
+    # numpy-free. 2.0 is the first release with wheels for every Python the tests run on.
+    "numpy>=2.0",
 ]
 example = [
     "pipecat-ai[daily,livekit,runner,silero,deepgram,cartesia,google]>=1.15.0",
