@@ -30,7 +30,6 @@ import sys
 import time
 from multiprocessing import Pool
 
-import codec
 import dsp
 import numpy as np
 
@@ -51,7 +50,7 @@ WIN = float(
     os.environ.get("SYNC_SIM_WIN", "1.0")
 )  # correlation window: last WIN s of received audio
 SEARCH = 0.30  # +/- search around the prior
-PRIOR0 = 0.20  # first prior: 200 ms after the turn message (see REPORT: real arrivals)
+PRIOR0 = 0.20  # first prior: 200 ms after the turn message
 WIDE = (-0.45, 0.95)  # lag range for which curves are computed (covers every prior)
 PRE = 1.0  # pre-roll: the track exists before the turn message; message arrives at X time PRE
 
@@ -153,6 +152,8 @@ def pink(n, rng):
 def build_x(r, kbps, cond, rng, pkt_cache):
     """Returns X (48 kHz float, int16 scale), rtime (R seconds per X sample, NaN = none),
     events dict."""
+    import codec  # here, not at the top: it loads libopus, which the oracle test does not need
+
     p = dict(CONDS[cond])
     if p.get("gain_db") == "rand":
         p["gain_db"] = rng.choice([-6, 6])

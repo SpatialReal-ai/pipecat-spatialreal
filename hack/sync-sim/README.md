@@ -11,8 +11,10 @@ curve", "lined up" and "trustworthy" mean. It is the spike's code, kept as the o
   `tests/test_fingerprint_oracle.py`.
 * `sim.py`, `codec.py`, `thrsearch.py`, `analyze.py`, `make_speech.sh` are the simulation that
   chose the thresholds. They are evidence, not part of the contract. `sim.py` calls the same
-  `dsp` functions that `dsp.align` composes, so the simulated rule and the shipped rule cannot
-  drift apart.
+  `dsp` building blocks (`ncc_curve`, `floor_db`, `peak_features`, `features`, `passes`) that
+  `dsp.align` composes, and `tests/test_fingerprint_oracle.py::test_align_equals_the_simulation_path`
+  holds the two compositions together: on one tick `align` and the simulation's
+  `tick_curves`/`features` must agree to 1e-9, so `RESULTS.md` keeps describing `align`.
 * `RESULTS.md` is the simulation's output with the frozen thresholds (1 s window): error,
   false locks, time to first lock, re-lock after a gap, and the onset heuristic on the same
   channel for comparison. `thrsearch.out` is the threshold grid's output. Both are regenerated
@@ -97,7 +99,10 @@ python analyze.py OUT.pkl 0.95,1.2,0.03,0.01 0.85,1.2,0.05,0.02 0.8,1.1,0.02,0.0
   (default 10); `--captures DIR` adds real bot turns from capture directories
   (`DIR/<run>/capture.wav` + `capture.jsonl`, the probe's recording format -- not committed);
   `SYNC_SIM_WIN=0.5` runs the 0.5 s window variant.
-* The three `--thr` sets are the frozen thresholds for the fingerprints F1, F2, F3 in that order.
+* `sim.py` replays **every** `--thr` set for **every** fingerprint (F1, F2, F3), so any set can
+  be tabulated later. The three sets given here are the frozen thresholds of F1, F2, F3; for
+  `analyze.py` the three sets are **positional**: the first is read as F1's, the second as F2's,
+  the third as F3's, and each must have been passed to `sim.py --thr`.
   **F1 is the one that ships** (5 ms hop, 10 ms window, one band); F2 (10 ms hop) and F3 (two
   bands) were rejected, see the design. `thrsearch.py` reads the per-tick features that `sim.py`
   stores in the pickle.

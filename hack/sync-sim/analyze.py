@@ -30,6 +30,17 @@ def pct(a, q):
     return np.percentile(a, q) if len(a) else np.nan
 
 
+def mx(a):
+    return a.max() if len(a) else np.nan
+
+
+# A pickle made without --captures has no real turns: their tables are skipped, with a note.
+KINDS = [k for k in ("tts", "real") if any(r["kind"] == k for r in res)]
+for _k in ("tts", "real"):
+    if _k not in KINDS:
+        print(f"(no {_k} turns in this pickle: the {_k} rows are skipped)\n")
+
+
 def table(kind_filter, title):
     print(f"## {title}\n")
     print(
@@ -68,14 +79,14 @@ def summary():
     print("|---|---|---|---|---|---|---|---|---|---|---|")
     for fp in FPN:
         for step in ("200ms", "50ms"):
-            for kind in ("tts", "real"):
+            for kind in KINDS:
                 v = [r["res"][(fp, best[fp], step)] for r in res if r["kind"] == kind]
                 ei = np.concatenate([x["acc_err_i"] for x in v])
                 e0 = np.concatenate([x["acc_err"] for x in v])
                 print(
                     f"| {fp} | {step} | {kind} | {sum(x['n_acc'] for x in v)} | {sum(x['n_false'] for x in v)} | "
-                    f"{sum(x['n_hold'] for x in v) / sum(x['n_gate'] for x in v):.2f} | {ms(pct(ei, 50))} | "
-                    f"{ms(pct(ei, 95))} | {ms(pct(ei, 99))} | {ms(ei.max())} | {ms(pct(e0, 50))} / {ms(pct(e0, 95))} |"
+                    f"{sum(x['n_hold'] for x in v) / max(sum(x['n_gate'] for x in v), 1):.2f} | {ms(pct(ei, 50))} | "
+                    f"{ms(pct(ei, 95))} | {ms(pct(ei, 99))} | {ms(mx(ei))} | {ms(pct(e0, 50))} / {ms(pct(e0, 95))} |"
                 )
     print()
 
@@ -85,9 +96,11 @@ table(
     lambda r: r["kind"] == "tts",
     "Alignment error, TTS references (ms; 200 ms rule, parabolic interpolation)",
 )
-table(
-    lambda r: r["kind"] == "real", "Alignment error, real captures pushed through Opus again (ms)"
-)
+if "real" in KINDS:
+    table(
+        lambda r: r["kind"] == "real",
+        "Alignment error, real captures pushed through Opus again (ms)",
+    )
 
 # ------------------------------------------------ first lock
 print("## Time to first lock (ms of turn audio after the true first onset)\n")
@@ -95,11 +108,11 @@ print("| fp | ticks | source | median | p90 | max | never locked |")
 print("|---|---|---|---|---|---|---|")
 for fp in FPN:
     for step in ("50ms", "200ms"):
-        for kind in ("tts", "real"):
+        for kind in KINDS:
             fl = [r["res"][(fp, best[fp], step)]["first_lock"] for r in res if r["kind"] == kind]
             got = np.array([f for f in fl if f is not None])
             print(
-                f"| {fp} | {step} | {kind} | {ms(pct(got, 50))} | {ms(pct(got, 90))} | {ms(got.max())} | "
+                f"| {fp} | {step} | {kind} | {ms(pct(got, 50))} | {ms(pct(got, 90))} | {ms(mx(got))} | "
                 f"{sum(f is None for f in fl)}/{len(fl)} |"
             )
 print()
@@ -111,7 +124,7 @@ for fp in FPN:
         fl = [r["res"][(fp, best[fp], "50ms")]["first_lock"] for r in res if r["cond"] == c]
         got = np.array([f for f in fl if f is not None])
         print(
-            f"| {fp} | {c} | {ms(pct(got, 50))} | {ms(pct(got, 90))} | {ms(got.max())} | {sum(f is None for f in fl)}/{len(fl)} |"
+            f"| {fp} | {c} | {ms(pct(got, 50))} | {ms(pct(got, 90))} | {ms(mx(got))} | {sum(f is None for f in fl)}/{len(fl)} |"
         )
 print()
 
@@ -148,7 +161,7 @@ print(
 )
 print("|---|---|---|---|---|---|---|---|---|---|---|---|")
 tot = defaultdict(int)
-for kind in ("tts", "real"):
+for kind in KINDS:
     for kb in (32, 24):
         for c in CONDS:
             rs = [r for r in res if r["kbps"] == kb and r["cond"] == c and r["kind"] == kind]
@@ -173,7 +186,7 @@ for kind in ("tts", "real"):
                 f"{ms(np.median(ea))} / {ms(pct(ea, 95))} / {ms(ea.max())} | {np.sum(ea > 0.02)} | {t20} | {t40} |"
             )
 print()
-for kind in ("tts", "real"):
+for kind in KINDS:
     print(
         f"- {kind}, noise-free conditions (clean/drift/gaps): {tot[(kind, 't20')]}/{tot[(kind, 'turns')]} "
         f"turns with an onset >20 ms off, {tot[(kind, 't40')]} >40 ms"
