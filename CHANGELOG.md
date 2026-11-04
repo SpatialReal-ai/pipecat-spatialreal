@@ -49,6 +49,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arrival of `turn_start` plus 200 ms, 78-182 ms off on the splice capture's gap turns that locked
   before their onset. `replay_capture.py` reports both priors and replays with the new one on
   `--r72-prior`.
+- The envelope is computed as a turn's chunks join its hold, not when its release starts: a long
+  run held whole (about 41 ms of work for 12 s at 48 kHz) no longer delays the turn's first audio
+  after the decision to start it. The `turn_envelope` messages are the same bytes, sent at the same
+  points.
 
 ## [0.1.0] - 2026-11-03
 

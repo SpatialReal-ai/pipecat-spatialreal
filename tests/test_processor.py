@@ -2984,3 +2984,97 @@ async def test_a_cancel_frame_during_the_fill_stops_it_and_ends_the_pipeline(fak
     fill = fill_frames(order)
     assert fill and isinstance(order[-1], CancelFrame)  # nothing after it, the fill least of all
     assert quiet_ms(fill) < FILL_CAP_MS
+
+
+# --- Post-merge follow-ups: the envelope fed as chunks join the hold (R68a), and the playout
+# --- clamped on an interruption that aborts no announced turn (R68b).
+
+
+async def test_the_release_of_a_long_held_run_does_no_fingerprinting(fake, monkeypatch):
+    """R68a: 12 s held whole at 48 kHz (one turn_envelope's worth) is fingerprinted as it joins
+    the hold, so between the decision to start the turn and its first audio push nothing is fed to
+    the envelope (at release it cost ~41 ms, long enough to dry the room after the start). The
+    message is still the one run, from index 0, of the bytes the room gets."""
+    rate = 48000
+    fake.first_segment_ms = 2000  # the whole turn is in hand when its release starts
+    proc = make_proc(fake, hold_cap_s=5.0)
+    pushed = record_pushes(proc)
+    events = []  # ("feed", bytes) | ("start",) | ("audio",), in the order they happened
+    feed = Envelope.feed
+
+    def counted(self, pcm):
+        events.append(("feed", len(pcm)))
+        return feed(self, pcm)
+
+    monkeypatch.setattr(Envelope, "feed", counted)
+    may_start = proc._may_start
+
+    def deciding(turn, deadlines):
+        ok = may_start(turn, deadlines)
+        if ok:
+            events.append(("start",))
+        return ok
+
+    proc._may_start = deciding
+
+    @proc.event_handler("on_before_push_frame")
+    async def _audio(processor, frame):
+        if isinstance(frame, TTSAudioRawFrame):
+            events.append(("audio",))
+
+    down, _ = await play(
+        proc,
+        [
+            link_up(proc),
+            TTSStartedFrame(),
+            *[tone_frame(100, rate=rate) for _ in range(120)],
+            TTSStoppedFrame(),
+            tts_audio_released(pushed),
+            InterruptionFrame(),  # nothing more to see: no need to play 12 s out
+            interruption_pushed(pushed),
+        ],
+        params=PipelineParams(audio_out_sample_rate=rate),
+    )
+    start = events.index(("start",))
+    first_audio = events.index(("audio",), start)
+    fed_meanwhile = sum(e[1] for e in events[start:first_audio] if e[0] == "feed")
+    assert fed_meanwhile == 0, f"{fed_meanwhile} B fingerprinted between the start and the audio"
+    assert sum(e[1] for e in events[:start] if e[0] == "feed") == 2 * rate * 12
+    (run,) = envelope_runs(down, req_of(down))
+    values = base64.b64decode(run["values"])
+    assert run["first_index"] == 0 and len(values) == values_for(rate * 12, rate)
+    assert values == Envelope(rate).feed(pcm16(sine(100, rate)) * 120)
+
+
+async def test_values_queued_in_the_hold_go_with_an_interrupted_turn(fake):
+    """R68a: a turn held whole is fingerprinted before it is announced; interrupted then, none of
+    those values is ever sent, and the next turn's envelope starts again from index 0."""
+    fake.first_segment_ms = 10_000  # never ready: the interruption finds it held
+    proc = make_proc(fake, hold_cap_s=30.0)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
+            link_up(proc),
+            TTSStartedFrame(),
+            tone_frame(600),  # still open: no end flush brings its animation back
+            audio_at_driveningress(fake),
+            Until(
+                "the hold to be fingerprinted",
+                lambda: proc._turns and proc._turns[0].envelope.index,
+            ),
+            InterruptionFrame(),
+            interruption_pushed(pushed),
+            Do(lambda: setattr(fake, "first_segment_ms", 200)),
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            message_pushed(pushed, "turn_end"),
+        ],
+    )
+    (start,) = messages(down, "turn_start")  # the first turn was never announced
+    runs = messages(down, "turn_envelope")
+    assert runs and {r["turn_id"] for r in runs} == {start["turn_id"]}
+    (audio,) = turn_audio(down)
+    assert envelope_values(down, start["turn_id"]) == fingerprint(audio)
+    assert_turn_lifecycle(down)

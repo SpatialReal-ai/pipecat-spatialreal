@@ -50,7 +50,6 @@ that does not return within ``wire_timeout_s`` is a loss like any other.
 
 import asyncio
 import dataclasses
-import itertools
 import sys
 from array import array
 from collections import deque
@@ -207,9 +206,13 @@ class _Turn:
         self.segment_count = 0  # pushed
         self.end_pushed = False  # the segment with driveningress's end flag was pushed
         # The fingerprint of the turn's released samples, in the order the room plays them, from
-        # its first sample (index 0); turn_envelope messages carry it ahead of the audio.
+        # its first sample (index 0); turn_envelope messages carry it ahead of the audio. Each of
+        # the turn's chunks is fed to it as it joins the hold, which is the order the room plays
+        # them in (stall silence only plays on an empty hold), so its release costs nothing.
         self.envelope = Envelope(rate)
-        self.described = 0  # chunks at the front of the hold already in the envelope
+        self.unsent = bytearray()  # values computed and not sent yet, up to envelope.index
+        self.unsent_chunks = 0  # the chunks of the hold those values describe
+        self.described = 0  # chunks at the front of the hold already sent in the envelope
         self.gap_ms = 0.0  # the fill between the previous turn's last sample and its first
 
     @property
@@ -646,8 +649,13 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             await self.push_frame(item)
 
     def _take_audio(self, turn: _Turn, pcm: bytes) -> None:
-        """Count a chunk that just joined the turn's hold, and queue it for driveningress."""
+        """Count and fingerprint a chunk that just joined the turn's hold; queue it for driveningress.
+
+        Its envelope values are sent ahead of it at its release (see ``_describe_held``).
+        """
         turn.onsets.extend(turn.tracker.feed(pcm))
+        turn.unsent += turn.envelope.feed(pcm)
+        turn.unsent_chunks += 1
         turn.pcm_bytes += len(pcm)
         if turn.first_audio_at is None:
             turn.first_audio_at = self._now()
@@ -832,6 +840,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             (keeper.hold if keeper is not None else unplaced).extend(rescued)
             turn.hold.clear()
             turn.segments.clear()
+            turn.unsent.clear()  # its envelope goes with it: nothing of it is sent any more
         if self._open in victims:
             self._open = None
         if self._chain in victims:
@@ -1185,19 +1194,17 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         hold is empty, the quiet before a turn comes before its first sample, and what follows
         the turn's end in its hold is not the turn's. So one message describes the whole run that
         is in hand, rather than one per 40 ms chunk, and it goes out before the run's first chunk.
+        The values were computed as the chunks joined the hold (``_take_audio``): this only sends
+        them, so a long run held whole costs its release nothing.
         """
-        pcm = [
-            item.audio
-            for item in itertools.takewhile(lambda item: item is not _END_OF_AUDIO, turn.hold)
-            if turn.on_track(item)
-        ]
-        turn.described = len(pcm)
-        await self._push_envelope(turn, b"".join(pcm))
+        turn.described, turn.unsent_chunks = turn.unsent_chunks, 0
+        await self._send_envelope(turn)
 
-    async def _push_envelope(self, turn: _Turn, pcm: bytes) -> None:
-        """Add samples about to be released for ``turn`` to its envelope; send what they complete."""
-        first = turn.envelope.index
-        for data in envelope.turn_envelope(turn.turn_id, first, turn.envelope.feed(pcm)):
+    async def _send_envelope(self, turn: _Turn) -> None:
+        """Send the turn's envelope values that are computed and not sent yet, as one run."""
+        values, turn.unsent = bytes(turn.unsent), bytearray()
+        first = turn.envelope.index - len(values)
+        for data in envelope.turn_envelope(turn.turn_id, first, values):
             await self._push_message(data)
 
     async def _play_silence(self, turn: _Turn) -> None:
@@ -1208,7 +1215,10 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         pcm = self._silence
         turn.onsets.extend(turn.tracker.feed(pcm))
         turn.pcm_bytes += len(pcm)
-        await self._push_envelope(turn, pcm)  # described before it plays, as any of its audio
+        # Described before it plays, as any of its audio. The hold is empty, so every chunk fed
+        # before it has been released, and sent: the run is this chunk's values alone.
+        turn.unsent += turn.envelope.feed(pcm)
+        await self._send_envelope(turn)
         self._queue_write(turn, pcm)  # the same samples inference sees; never waited for here
         frame = _silence_frame(pcm, self._out_rate, turn.started.transport_destination)
         frame.interruptible = turn.interruptible
