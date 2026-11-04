@@ -677,7 +677,7 @@ test('sync: which half decides: older-half-only by its older half alone, the oth
   }
 })
 
-test('sync: the room-noise cases put the floor above -70 dB, from the 3 s history', () => {
+test('sync: the room-noise cases put the floor above -60 dB, from the 3 s history', () => {
   for (const name of ['room-noise', 'room-noise-long']) {
     const c = ORACLE.cases.find(k => k.name === name)
     const env = oracleReceivedDb(c, { highPassHz: null })

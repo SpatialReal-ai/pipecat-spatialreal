@@ -153,9 +153,10 @@ def test_rounding_is_half_up_around_x_point_5(b):
     # upwards. Inverting 10 * log10(ms / 32768^2 + 1e-10) = db_b gives the mean square where the
     # byte flips:
     #   ms_b = 32768^2 * (10^(db_b / 10) - 1e-10)
-    # e.g. b = 100: db_b = 100.5 * 96 / 255 - 96 = -58.1647, ms_b = 32768^2 * (1.5265e-6 - 1e-10)
-    # = 1639.7. A 4800-sample window (100 ms at 48 kHz) makes the grid of reachable mean squares
-    # fine enough (about 0.01 byte) to sit just below and just above ms_b.
+    # e.g. b = 100: db_b = 100.5 * 96 / 255 - 96 = -58.1647, 10^(db_b / 10) = 1.5259e-6, so
+    # ms_b = 32768^2 * (1.5259e-6 - 1e-10) = 1638.3. A 4800-sample window (100 ms at 48 kHz) makes
+    # the grid of reachable mean squares fine enough (a step of about 1e-4 byte) to sit just below
+    # and just above ms_b.
     rate, window_ms = 48000, 100
     samples = rate * window_ms // 1000
     db_b = (b + 0.5) * 96 / 255 - 96

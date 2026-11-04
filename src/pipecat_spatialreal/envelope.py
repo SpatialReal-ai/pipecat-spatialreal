@@ -22,9 +22,10 @@ from pipecat_spatialreal.proto.generated import avatar_pb2
 # Value of AvatarMessage.tag; lets a client skip other server messages.
 TAG = "spatialreal-avatar"
 
-# Most bytes of a driveningress message that one frames chunk carries. Base64 turns 2400 bytes
-# into 3200 characters (2400 is a multiple of 3, so a full chunk has no padding); with the keys,
-# a UUID turn id and the RTVI wrapper that is about 3.4 KB, inside Daily's 4 KB app-message cap.
+# Most bytes that one frames chunk or one turn_envelope message carries. Base64 turns 2400
+# bytes into 3200 characters (2400 is a multiple of 3, so a full chunk has no padding); with the
+# keys, a UUID turn id and the RTVI wrapper that is about 3.4 KB, inside Daily's 4 KB app-message
+# cap.
 MAX_CHUNK_BYTES = 2400
 
 # Keyframes per second of the animation the web SDK renders.
@@ -119,7 +120,7 @@ def turn_envelope(
     hop_ms: int = 5,
     window_ms: int = 10,
 ) -> list[dict[str, Any]]:
-    """Split a run of audio-envelope values into ``turn_envelope`` messages that each fit one app message.
+    """Split a run of envelope values into ``turn_envelope`` messages that each fit an app message.
 
     The values are one byte each, so a chunk of ``n`` bytes covers ``n`` consecutive indices.
 
