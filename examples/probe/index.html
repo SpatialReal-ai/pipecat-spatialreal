@@ -39,6 +39,7 @@
   <button id="leave" disabled>Leave</button>
   <button id="dl-jsonl" disabled>download capture.jsonl</button>
   <button id="dl-wav" disabled>download capture.wav</button>
+  <button id="dl-sync" disabled>download capture.sync.json</button>
   <span id="status" class="muted">press Start</span>
   <span id="live" class="muted"></span>
 </div>
@@ -54,6 +55,11 @@
     <th title="tapped minus announced spacing of the later onsets, or of a chained turn's first onset; at most 40 ms">onset &Delta; ms</th>
     <th class="l">end</th>
     <th title="turn_abort minus the user-started-speaking message; at most 300 ms. Blind to a delay the two messages share, such as a burst of frames queued ahead of both on the bot's transport: that delay is not measured (README, What abort &Delta; cannot see)">abort &Delta; ms</th>
+    <th title="envelope alignment: ms of the turn's speech heard before the first accepted tick (counted from where that lock puts onsets_ms[0])">first lock ms</th>
+    <th title="envelope alignment: the turn's first sample at the latest accepted tick, minus the arrival of turn_start (tap clock); the onset rule's estimate of the same is skew">offset ms</th>
+    <th title="envelope alignment: 95th percentile of |accepted position - onset prior| over the accepted ticks; the onset prior is the first onset heard (or placed) minus onsets_ms[0]">p95 err ms</th>
+    <th title="envelope alignment: ticks with speech that were held (not accepted) / accepted; a * marks a reference spliced onto the turn before it">held / acc</th>
+    <th class="l" title="envelope alignment, the last tick with speech: peak (&ge; 0.95), peak / second peak (&ge; 1.2), sharpness (&ge; 0.03), half-window deviation in ms (&le; 10); a failed check is marked !, a peak at the edge of the search (edge)">peak / ratio / sharp / halves</th>
     <th class="l">result</th>
   </tr></thead>
   <tbody></tbody>
@@ -81,11 +87,14 @@ const LATE_START_MS = 1500  // an onset may precede the arrival of its turn_star
 const AFTER_CLOSE_MS = 800  // ... or follow its turn_end / turn_abort (audio trails the messages)
 const LATER_TOL_MS = 120    // how far from its announced place a later onset is still looked for
 const CHAIN_TOL_MS = 200    // ... and a chained turn's first onset from where the end of the turn before it puts it
+const ENVELOPE_HOP_MS = 5   // turn_envelope: hop_ms and window_ms in this version of the contract
+const ENVELOPE_WINDOW_MS = 10
 
 // Every key of a payload member is present (avatar.proto, JSON rules); a missing key is a bug.
 const PAYLOAD_KEYS = {
-  turn_start: ['turn_id', 'sample_rate', 'fps', 'onsets_ms', 'prev_turn_id', 'prev_turn_pcm_ms', 'degraded'],
+  turn_start: ['turn_id', 'sample_rate', 'fps', 'onsets_ms', 'prev_turn_id', 'prev_turn_pcm_ms', 'degraded', 'gap_ms'],
   turn_onsets: ['turn_id', 'onsets_ms'],
+  turn_envelope: ['turn_id', 'first_index', 'hop_ms', 'window_ms', 'values'],
   frames: ['turn_id', 'segment_seq', 'chunk_index', 'chunk_count', 'data', 'end'],
   turn_end: ['turn_id', 'pcm_ms', 'segment_count'],
   turn_abort: ['turn_id'],
@@ -179,6 +188,7 @@ function newTurn(id, first) {
     start: null, startBody: null,          // the turn_start record and its payload
     onsetsMs: [], onsetMessages: [],       // announced onsets: turn_start's, then each turn_onsets'
     segments: new Map(),                   // segment_seq -> segment
+    envelopes: [],                         // turn_envelope: { t, first, count }
     end: null, endBody: null, abort: null,
     primary: null, later: [],              // tapped onsets: the first, and by announced index
   }
@@ -224,8 +234,10 @@ function markerNear(markers, type, t, back, ahead) {
  * markers: [{ t, type }]             RTVI messages about the conversation (user-started-speaking, ...)
  * rate:    the AudioContext's sample rate, which is the rate of `pos`
  * notes:   [{ t, text }]              what the page itself did (tapped a track, replaced it)
+ * sync:    { [turn_id]: { ticks, splice, referenceLength, missing } }  the envelope alignment's
+ *          ticks per turn (SyncTracker.summary() in sync.js; positions in tap samples)
  */
-function analyze({ log, onsets, markers, rate, notes = [] }) {
+function analyze({ log, onsets, markers, rate, notes = [], sync = {} }) {
   const problems = []
   const states = []
   const events = []
@@ -286,6 +298,25 @@ function analyze({ log, onsets, markers, rate, notes = [] }) {
         if (turn.end || turn.abort) problem(rec.t, `${tag}: frames after ${turn.end ? 'turn_end' : 'turn_abort'}`)
         addChunk(turn, rec, body, problem)
         break
+      case 'turn_envelope': {
+        if (!turn.start) problem(rec.t, `${tag}: turn_envelope before turn_start`)
+        if (turn.end || turn.abort) problem(rec.t, `${tag}: turn_envelope after ${turn.end ? 'turn_end' : 'turn_abort'}`)
+        if (body.hop_ms !== ENVELOPE_HOP_MS || body.window_ms !== ENVELOPE_WINDOW_MS) problem(rec.t, `${tag}: turn_envelope hop_ms ${body.hop_ms}, window_ms ${body.window_ms}; ${ENVELOPE_HOP_MS} and ${ENVELOPE_WINDOW_MS} expected`)
+        if (!Number.isInteger(body.first_index) || body.first_index < 0) {
+          problem(rec.t, `${tag}: turn_envelope first_index ${body.first_index}, a 0-based index expected`)
+          break
+        }
+        let count = 0
+        try {
+          count = decodeBase64(body.values).length
+        } catch (e) {
+          problem(rec.t, `${tag}: turn_envelope values are not base64`)
+          break
+        }
+        if (!count) problem(rec.t, `${tag}: turn_envelope with no values, which is never sent`)
+        turn.envelopes.push({ t: rec.t, first: body.first_index, count })
+        break
+      }
       case 'turn_end':
         if (!turn.start) problem(rec.t, `${tag}: turn_end for a turn never announced`)
         if (turn.abort) problem(rec.t, `${tag}: turn_end after turn_abort`)
@@ -317,6 +348,13 @@ function analyze({ log, onsets, markers, rate, notes = [] }) {
     const ends = seqs.filter(seq => turn.segments.get(seq).end)
     if (ends.length > 1) problem(t, `${tag}: end is set on segments ${ends.join(', ')}; only the last carries it`)
     else if (ends.length === 1 && ends[0] !== seqs[seqs.length - 1]) problem(t, `${tag}: segment ${seqs[seqs.length - 1]} follows the end segment ${ends[0]}`)
+    // The envelope covers 0, 1, 2, ... without gaps or repeats (only the turn's end may be short of the audio).
+    const covered = new Map()
+    for (const e of turn.envelopes) for (let k = e.first; k < e.first + e.count; k++) covered.set(k, (covered.get(k) || 0) + 1)
+    const twice = [...covered].filter(([, n]) => n > 1).length
+    if (twice) problem(turn.envelopes[0].t, `${tag}: turn_envelope covers ${twice} indices more than once`)
+    const top = turn.envelopes.reduce((n, e) => Math.max(n, e.first + e.count), 0)
+    if (turn.end && covered.size < top) problem(turn.end.t, `${tag}: turn_envelope leaves ${top - covered.size} of indices 0..${top - 1} uncovered at turn_end`)
     if (turn.end) {
       if (turn.endBody.segment_count !== turn.segments.size) problem(turn.end.t, `${tag}: turn_end counts ${turn.endBody.segment_count} segments, ${turn.segments.size} arrived`)
       for (const segment of turn.segments.values()) {
@@ -465,6 +503,9 @@ function analyze({ log, onsets, markers, rate, notes = [] }) {
         ? `no onset was matched to it, and it cannot be placed: it ${why}`
         : `no audible onset was heard${turn.onsetsMs.length ? '' : ' (it announced none either)'}`)
     }
+    // The onset prior: where the onset rule puts the turn's first sample (tap samples), or null.
+    row.onsetPriorPos = place && row.o0 != null ? place.pos - toSamples(row.o0) : null
+    row.sync = syncRow(sync[turn.id], turn, row, toMs, toSamples)
     if (turn.end) row.end = { at: turn.end.t - turn.start.t, pcmMs: turn.endBody.pcm_ms, segments: turn.endBody.segment_count }
     if (turn.abort) {
       row.abort = { at: turn.abort.t - turn.start.t, sinceUser: null }
@@ -506,11 +547,110 @@ function analyze({ log, onsets, markers, rate, notes = [] }) {
     const { place } = turn.start && !turn.primary ? placeOf(turn) : {}
     if (place) events.push({ t: place.wall, text: `[${short(turn.id)}] first onset placed from the end of the turn before it, ${Math.round(place.wall - turn.start.t)} ms after turn_start (none heard)` })
   }
+  for (const turn of list) {
+    if (!turn.envelopes.length) continue
+    const values = turn.envelopes.reduce((n, e) => n + e.count, 0)
+    const last = turn.envelopes[turn.envelopes.length - 1]
+    events.push({ t: turn.envelopes[0].t, text: `[${short(turn.id)}] turn_envelope  ${turn.envelopes.length} messages, ${values} values (${Math.round((values * ENVELOPE_HOP_MS) / 100) / 10} s) until +${last.t - turn.envelopes[0].t} ms` })
+  }
   for (const m of markers) events.push({ t: m.t, text: `rtvi ${m.type}` })
   for (const n of notes) events.push({ t: n.t, text: `page: ${n.text}` })
   events.sort((a, b) => a.t - b.t)
 
   return { turns: list.map(turn => turn.row), problems, states, strays, events }
+}
+
+/** numpy's default (linear) percentile of a non-empty list. */
+function percentileOf(values, q) {
+  const a = values.slice().sort((x, y) => x - y)
+  const at = ((a.length - 1) * q) / 100
+  const lo = Math.floor(at)
+  const hi = Math.min(lo + 1, a.length - 1)
+  return a[lo] + (a[hi] - a[lo]) * (at - lo)
+}
+
+/**
+ * The envelope alignment's numbers for one turn's row, from its ticks, or null when it has none.
+ *
+ * firstLockMs: ms of the turn's speech heard before the first accepted tick, counted from where
+ *   that lock puts onsets_ms[0] (the turn's first sample when it announced none).
+ * offsetMs:    the turn's first sample at the latest accepted tick minus the arrival of turn_start,
+ *   on the tap clock.
+ * p95ErrMs:    95th percentile of |accepted position - onset prior| over the accepted ticks.
+ * held / accepted: ticks with speech that were not accepted / that were.
+ * last:        the checks of the last tick with speech.
+ */
+function syncRow(summary, turn, row, toMs, toSamples) {
+  if (!summary || !summary.ticks.length) return summary && summary.referenceLength ? { ticks: 0, spliced: !!summary.splice, referenceLength: summary.referenceLength } : null
+  const ticks = summary.ticks
+  const accepted = ticks.filter(k => k.accepted)
+  const speech = ticks.filter(k => k.gate)
+  const out = {
+    ticks: ticks.length,
+    held: speech.length - accepted.length,
+    accepted: accepted.length,
+    spliced: !!summary.splice,
+    referenceLength: summary.referenceLength,
+    last: speech.length ? speech[speech.length - 1].checks : null,
+    firstLockMs: null,
+    offsetMs: null,
+    p95ErrMs: null,
+  }
+  if (accepted.length) {
+    const first = accepted[0]
+    out.firstLockMs = toMs(first.pos - (first.first_sample_pos + toSamples(row.o0 ?? 0)))
+    out.offsetMs = toMs(accepted[accepted.length - 1].first_sample_pos - turn.start.tap)
+    if (row.onsetPriorPos != null) out.p95ErrMs = percentileOf(accepted.map(k => Math.abs(toMs(k.first_sample_pos - row.onsetPriorPos))), 95)
+  }
+  return out
+}
+
+const signed = (n, digits = 0) => (n >= 0 ? '+' : '-') + Math.abs(n).toFixed(digits)
+
+function onsetDelta(r) {
+  const parts = r.laterErrs.map(e => signed(e))
+  if (r.chainErr != null) parts.push(`chain ${signed(r.chainErr)}`)
+  return parts.length ? parts.join(', ') : '-'
+}
+function onsetDeltaClass(r) {
+  const all = r.laterErrs.concat(r.chainErr == null ? [] : [r.chainErr])
+  return all.length ? (all.every(e => Math.abs(e) <= ONSET_TOL_MS) ? 'ok' : 'bad') : ''
+}
+
+/** The last tick's four checks: peak / ratio / sharpness / half deviation, a failed one marked "!". */
+function checksText(c) {
+  if (!c) return '-'
+  const v = (x, digits) => (x === 'Infinity' ? 'inf' : x == null ? '-' : x.toFixed(digits))
+  const mark = (ok, text) => (ok ? text : `${text}!`)
+  return [
+    mark(c.peak_ok, v(c.peak, 3)),
+    mark(c.ratio_ok, v(c.ratio, 2)),
+    mark(c.sharpness_ok, v(c.sharpness, 3)),
+    mark(c.halves_ok, v(c.half_deviation_ms, 1)),
+  ].join(' / ') + (c.edge ? ' (edge)' : '')
+}
+
+/** The table cells of one row, in the order of the page's <thead>: [{ text, cls }]. */
+function rowCells(r) {
+  const seg = r.seg0
+  const s = r.sync
+  const c = (text, cls = '') => ({ text, cls })
+  return [
+    c(r.short, 'l'),
+    c(r.lead == null ? '-' : (r.placed ? '~' : '') + signed(r.lead), r.lead == null ? '' : r.lead >= LEAD_MIN_MS ? 'ok' : 'bad'),
+    c(seg ? `${seg.chunks}/${seg.count} chunks, ${seg.bytes} B, ${seg.margin >= 0 ? `${r.placed ? '~' : ''}${Math.round(seg.margin)} ms before` : `${Math.round(-seg.margin)} ms AFTER`}` : '-', seg ? (seg.complete && seg.margin >= 0 ? 'ok' : 'bad') : ''),
+    c(r.o0 == null ? '-' : r.o0.toFixed(1)),
+    c(r.skew == null ? '-' : signed(r.skew)),
+    c(onsetDelta(r), onsetDeltaClass(r)),
+    c(r.end ? `end +${Math.round(r.end.at)} ms, pcm ${r.end.pcmMs} ms, ${r.end.segments} seg` : r.abort ? `abort +${Math.round(r.abort.at)} ms` : '-', 'l'),
+    c(r.abort && r.abort.sinceUser != null ? signed(r.abort.sinceUser) : '-', r.abort && r.abort.sinceUser != null ? (r.abort.sinceUser <= ABORT_MAX_MS ? 'ok' : 'bad') : ''),
+    c(s && s.firstLockMs != null ? Math.round(s.firstLockMs).toString() : s && s.ticks ? 'none' : '-'),
+    c(s && s.offsetMs != null ? signed(s.offsetMs, 1) : '-'),
+    c(s && s.p95ErrMs != null ? s.p95ErrMs.toFixed(1) : '-'),
+    c(s ? `${s.held ?? 0} / ${s.accepted ?? 0}${s.spliced ? ' *' : ''}` : '-'),
+    c(s ? checksText(s.last) : '-', 'l'),
+    c(r.status === 'fail' ? `fail: ${r.fails.join('; ')}` : r.status + (r.notes.length ? ` (${r.notes.join('; ')})` : ''), r.status === 'pass' ? 'l ok' : r.status === 'fail' ? 'l bad' : r.status === 'unverified' ? 'l muted' : 'l'),
+  ]
 }
 
 /** The summary line of an analysis, and its tone: 'ok' only when every finished turn passed and nothing else is wrong. */
@@ -529,9 +669,10 @@ function summarize({ turns, states, problems, strays }) {
 }
 </script>
 
-<script>
-'use strict'
-// The page: Daily, the audio tap, the recorders and the rendering. All numbers come from analyze().
+<script type="module">
+// The page: Daily, the audio tap, the recorders and the rendering. All numbers come from analyze();
+// the envelope alignment runs live in a SyncTracker (sync.js), as the web SDK runs it.
+import { SyncTracker } from './sync.js'
 
 const params = new URLSearchParams(location.search)
 const ROOM = params.get('room')                                   // join this room; else POST /start
@@ -544,6 +685,7 @@ const MIN_SILENCE_MS = Number(params.get('min_silence_ms') || 150) // ... and it
 
 const $ = id => document.getElementById(id)
 const log = []        // accepted avatar messages: { t, tap, size, data }
+const rtvi = []       // every RTVI message, as received: { t, tap, message } (capture.jsonl)
 const onsets = []     // onsets found in the tapped track: { pos, wall, level }
 const markers = []    // RTVI messages that time a barge-in: { t, type }
 const notes = []      // what the page itself did, for the timeline: { t, text }
@@ -556,6 +698,7 @@ let botTrackId = null
 let tapPos = 0        // samples of the bot track received so far
 let lastAudible = 0   // wall time of the latest block with sound
 let tapGraph = null   // what tap() built for the bot's track, so that a replaced track can be let go
+let tracker = null    // the envelope alignment on the tapped track (sync.js); its positions are tapPos
 
 const status = text => { $('status').textContent = text }
 /** Say what the page did: on the status line and on the timeline. */
@@ -661,8 +804,10 @@ function onBlock(block, wall) {
     onsets.push({ pos: tapPos + i, wall: wall - ((n - i) * 1000) / rate, level: Math.abs(block[i]) })
   }
   tapPos += n
+  const ticks = tracker.ticks
+  tracker.audio(block)
   if (peak * 32768 > THRESHOLD) lastAudible = wall
-  if (found.length) schedule()
+  if (found.length || tracker.ticks !== ticks) schedule()
 }
 
 // --- the room
@@ -681,10 +826,13 @@ function onTrackStarted(ev) {
 
 function onAppMessage(data, wall) {
   if (!data || data.label !== 'rtvi-ai') return
+  // Every RTVI message goes into capture.jsonl; Date.now() when it arrived, and the tap position
+  // that places it in capture.wav.
+  rtvi.push({ t: wall, tap: tapPos, message: data })
   if (data.type === 'server-message') {
     if (!data.data || data.data.tag !== 'spatialreal-avatar') return
-    // Date.now() when it arrived; the tap position places it in capture.wav.
     log.push({ t: wall, tap: tapPos, size: JSON.stringify(data).length, data: data.data })
+    if (tracker) tracker.message(data.data, tapPos)
   } else if (data.type === 'user-started-speaking' || data.type === 'bot-interrupted') {
     markers.push({ t: wall, type: data.type })
   } else {
@@ -726,6 +874,7 @@ $('start').onclick = async () => {
     await ctx.resume()
     rate = ctx.sampleRate
     recorder = new Recorder(rate * 5)
+    tracker = new SyncTracker(rate)
     await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })))
     let room = ROOM
     let token = TOKEN
@@ -752,12 +901,16 @@ function download(name, blob) {
   setTimeout(() => URL.revokeObjectURL(link.href), 10000)
 }
 $('dl-jsonl').onclick = () => {
-  // One object per line. `data` is the AvatarMessage, the very object onServerMessage hands to
-  // session.handleServerMessage(); `tap` is how many samples of capture.wav had arrived.
-  const lines = log.map(r => JSON.stringify({ t: r.t, tap: r.tap, data: r.data }))
+  // One object per line, every RTVI message in arrival order: `t` in epoch seconds, `tap` how many
+  // samples of capture.wav had arrived, `message` the whole RTVI message (an avatar message's
+  // `data` is the AvatarMessage that session.handleServerMessage() takes). hack/sync-sim reads this.
+  const lines = rtvi.map(r => JSON.stringify({ t: r.t / 1000, tap: r.tap, message: r.message }))
   download('capture.jsonl', new Blob([lines.join('\n') + '\n'], { type: 'application/x-ndjson' }))
 }
 $('dl-wav').onclick = () => download('capture.wav', recorder.toWav(rate))
+// Per turn: the reference envelope reassembled by index, spliced as the rule splices it, and every
+// alignment tick, so the oracle can run on (capture.wav, reference) directly.
+$('dl-sync').onclick = () => download('capture.sync.json', new Blob([JSON.stringify(tracker.export())], { type: 'application/json' }))
 
 // --- rendering
 
@@ -774,7 +927,6 @@ const cell = (text, cls = '') => {
   if (cls) td.className = cls
   return td
 }
-const signed = (n, digits = 0) => (n >= 0 ? '+' : '-') + Math.abs(n).toFixed(digits)
 const clock = t => {
   const d = new Date(t)
   return `${d.toTimeString().slice(0, 8)}.${String(d.getMilliseconds()).padStart(3, '0')}`
@@ -783,11 +935,13 @@ const clock = t => {
 function render() {
   let result
   try {
-    result = analyze({ log, onsets, markers, rate: rate || 48000, notes })
+    result = analyze({ log, onsets, markers, rate: rate || 48000, notes, sync: tracker ? tracker.summary() : {} })
   } catch (e) {
     $('summary').textContent = `analysis failed: ${e.message}`
     return
   }
+  // The onset rule's place for each turn is the alignment's prior until its first lock.
+  if (tracker) for (const r of result.turns) if (r.onsetPriorPos != null) tracker.setOnsetPrior(r.id, r.onsetPriorPos)
   const rows = result.turns
   const line = summarize(result)
   $('summary').innerHTML = ''
@@ -800,18 +954,7 @@ function render() {
   body.replaceChildren()
   for (const r of rows) {
     const tr = document.createElement('tr')
-    const seg = r.seg0
-    tr.append(
-      cell(r.short, 'l'),
-      cell(r.lead == null ? '-' : (r.placed ? '~' : '') + signed(r.lead), r.lead == null ? '' : r.lead >= LEAD_MIN_MS ? 'ok' : 'bad'),
-      cell(seg ? `${seg.chunks}/${seg.count} chunks, ${seg.bytes} B, ${seg.margin >= 0 ? `${r.placed ? '~' : ''}${Math.round(seg.margin)} ms before` : `${Math.round(-seg.margin)} ms AFTER`}` : '-', seg ? (seg.complete && seg.margin >= 0 ? 'ok' : 'bad') : ''),
-      cell(r.o0 == null ? '-' : r.o0.toFixed(1)),
-      cell(r.skew == null ? '-' : signed(r.skew)),
-      cell(onsetDelta(r), onsetDeltaClass(r)),
-      cell(r.end ? `end +${Math.round(r.end.at)} ms, pcm ${r.end.pcmMs} ms, ${r.end.segments} seg` : r.abort ? `abort +${Math.round(r.abort.at)} ms` : '-', 'l'),
-      cell(r.abort && r.abort.sinceUser != null ? signed(r.abort.sinceUser) : '-', r.abort && r.abort.sinceUser != null ? (r.abort.sinceUser <= ABORT_MAX_MS ? 'ok' : 'bad') : ''),
-      cell(r.status === 'fail' ? `fail: ${r.fails.join('; ')}` : r.status + (r.notes.length ? ` (${r.notes.join('; ')})` : ''), r.status === 'pass' ? 'l ok' : r.status === 'fail' ? 'l bad' : r.status === 'unverified' ? 'l muted' : 'l'),
-    )
+    tr.append(...rowCells(r).map(c => cell(c.text, c.cls)))
     body.append(tr)
   }
 
@@ -823,18 +966,9 @@ function render() {
   const first = result.events.length ? result.events[0].t : 0
   $('timeline').textContent = result.events.map(e => `${((e.t - first) / 1000).toFixed(3).padStart(9)} s  ${e.text}`).join('\n')
 
-  $('dl-jsonl').disabled = !log.length
+  $('dl-jsonl').disabled = !rtvi.length
+  $('dl-sync').disabled = !tracker || !tracker.turns.size
   $('dl-wav').disabled = !recorder || !recorder.length
-}
-
-function onsetDelta(r) {
-  const parts = r.laterErrs.map(e => signed(e))
-  if (r.chainErr != null) parts.push(`chain ${signed(r.chainErr)}`)
-  return parts.length ? parts.join(', ') : '-'
-}
-function onsetDeltaClass(r) {
-  const all = r.laterErrs.concat(r.chainErr == null ? [] : [r.chainErr])
-  return all.length ? (all.every(e => Math.abs(e) <= ONSET_TOL_MS) ? 'ok' : 'bad') : ''
 }
 
 // A live reading of the tapped track, so a silent probe still shows when the bot is talking.
@@ -845,7 +979,7 @@ setInterval(() => {
 }, 250)
 
 render()
-window.probe = { log, onsets, markers, notes, analyze: () => analyze({ log, onsets, markers, rate, notes }) }
+window.probe = { log, rtvi, onsets, markers, notes, tracker: () => tracker, analyze: () => analyze({ log, onsets, markers, rate, notes, sync: tracker ? tracker.summary() : {} }) }
 </script>
 </body>
 </html>

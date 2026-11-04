@@ -1,0 +1,59 @@
+### F1: 182190 speech ticks
+
+| c_min | ratio | sharp | agree tol (ms) | false locks | accept rate | med err (ms) |
+|---|---|---|---|---|---|---|
+| 0.95 | 1.2 | 0.03 | 10 | 0 | 0.811 | 0.36 |
+| 0.95 | 1.2 | 0.03 | 5 | 0 | 0.804 | 0.36 |
+| 0.95 | 1.2 | 0.03 | 3 | 0 | 0.794 | 0.35 |
+| 0.8 | 1.5 | 0.03 | 10 | 0 | 0.780 | 0.36 |
+| 0.85 | 1.5 | 0.03 | 10 | 0 | 0.776 | 0.36 |
+| 0.8 | 1.5 | 0.03 | 5 | 0 | 0.772 | 0.35 |
+| 0.9 | 1.5 | 0.03 | 10 | 0 | 0.771 | 0.36 |
+| 0.85 | 1.5 | 0.03 | 5 | 0 | 0.769 | 0.35 |
+
+single-criterion view (others off):
+  c>=0.9                 accept 0.951  false 193
+  ratio>=1.5             accept 0.882  false 220
+  sharp>=0.02            accept 0.951  false 510
+  agree<=5ms             accept 0.947  false 169
+  c>=0.9 & agree<=5ms    accept 0.932  false 118
+
+
+### F2: 182159 speech ticks
+
+| c_min | ratio | sharp | agree tol (ms) | false locks | accept rate | med err (ms) |
+|---|---|---|---|---|---|---|
+
+single-criterion view (others off):
+  c>=0.9                 accept 0.951  false 272
+  ratio>=1.5             accept 0.911  false 333
+  sharp>=0.02            accept 0.932  false 603
+  agree<=5ms             accept 0.924  false 224
+  c>=0.9 & agree<=5ms    accept 0.911  false 171
+
+least-false rows:
+   (0.85, 1.2, 0.05, 0.02, 1, np.float64(0.7113126444479823), np.float32(0.0005708531))
+   (0.9, 1.2, 0.05, inf, 1, np.float64(0.7083427115871299), np.float32(0.0005704231))
+   (0.85, 1.2, 0.05, 0.01, 1, np.float64(0.7070745886835128), np.float32(0.0005698073))
+   (0.9, 1.2, 0.05, 0.02, 1, np.float64(0.70555393914108), np.float32(0.00057015044))
+   (0.9, 1.2, 0.05, 0.01, 1, np.float64(0.7018868131687153), np.float32(0.0005692313))
+
+### F3: 177165 speech ticks
+
+| c_min | ratio | sharp | agree tol (ms) | false locks | accept rate | med err (ms) |
+|---|---|---|---|---|---|---|
+
+single-criterion view (others off):
+  c>=0.9                 accept 0.942  false 23
+  ratio>=1.5             accept 0.940  false 174
+  sharp>=0.02            accept 0.972  false 159
+  agree<=5ms             accept 0.944  false 17
+  c>=0.9 & agree<=5ms    accept 0.920  false 9
+
+least-false rows:
+   (0.8, 1.1, 0.02, 0.02, 1, np.float64(0.9336720006773347), np.float32(0.00058326405))
+   (0.8, 1.2, 0.02, 0.02, 1, np.float64(0.9296475037394519), np.float32(0.0005826157))
+   (0.8, 1.1, 0.02, 0.01, 1, np.float64(0.9280501227669122), np.float32(0.0005813365))
+   (0.8, 1.1, 0.01, 0.005, 1, np.float64(0.9277340332458442), np.float32(0.0005795147))
+   (0.85, 1.1, 0.02, 0.02, 1, np.float64(0.9262834081223718), np.float32(0.00058220816))
+

@@ -6,7 +6,7 @@ Written for Pipecat v1.15.0.
 |---|---|
 | `bot.py` | The bot: Pipecat's `06-voice-agent` shape (Deepgram, Gemini, Cartesia) with `SpatialRealAvatarProcessor` after the TTS. One file, run by Pipecat's development runner on Daily or LiveKit. |
 | `client/` | The web page: `pipecat-client-js` plus the SpatialReal web SDK. See [client/README.md](client/README.md). |
-| `probe/` | A silent receiver that measures how the envelope and the bot's audio line up in a Daily room. A developer tool for this package. See [probe/README.md](probe/README.md). |
+| `probe/` | A silent receiver that measures how the avatar messages and the bot's audio line up in a Daily room, including the browser's alignment against the server's envelope, and saves paired captures. A developer tool for this package. See [probe/README.md](probe/README.md). |
 
 ## Run it
 

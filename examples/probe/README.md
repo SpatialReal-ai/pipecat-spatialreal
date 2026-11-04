@@ -16,6 +16,17 @@ carries on across the swap.
 Onsets are found with the processor's own rule, `threshold` and `min_silence_ms`, on the same PCM16
 quantisation as the web SDK.
 
+The page also runs the envelope alignment on the tapped track, live, as the web SDK runs it: the
+processor's `turn_envelope` (one byte per 5 ms of the audio it released) is correlated with the
+envelope of the received track to find where each turn sits (design §3.2 of backend-ng's
+`docs/superpowers/specs/2026-11-03-pipecat-sync-fingerprint-design.md`). The rule is in `sync.js`,
+next to the page: a port of the normative oracle, `hack/sync-sim/dsp.py` (`envelopeBytes` and
+`align` mirror `envelope_bytes` and `align`), held to the oracle's own numbers by
+`tests/probe_check.mjs` (`tests/fixtures/sync/oracle.json`, written by `make_oracle_fixture.py`
+next to it). One difference is deliberate: the oracle's 30 Hz high-pass on the received track is
+zero phase over the whole signal, the page's is causal (first order), as a browser must run it; on
+the fixture it moves the offset by 0.04 ms.
+
 ## Run it
 
 ```bash
@@ -57,6 +68,11 @@ late only changes its own row.
 | `onset Δ ms` | Tapped minus announced spacing: each later onset against the first, and for a chained turn (`prev_turn_id`) the first onset against where the end of the turn before it puts it (`chain +N`). | within 40 |
 | `end` | `turn_end` (or `turn_abort`) time since `turn_start`, `pcm_ms` and the segment count. | |
 | `abort Δ ms` | `turn_abort` minus Pipecat's `user-started-speaking` message. Blind to a delay the two messages share (see *What `abort Δ` cannot see* below). | at most 300 |
+| `first lock ms` | Envelope alignment: how much of the turn's speech had been received at the first accepted tick, in ms, counted from where that lock puts `onsets_ms[0]` (the turn's first sample when it announced none). `none` while it has ticked without a lock. | see below |
+| `offset ms` | The turn's first sample at the latest accepted tick minus the arrival of `turn_start`, on the tap's clock. It measures what `skew` measures with onsets: the audio path's delay over the message path's. | see below |
+| `p95 err ms` | The 95th percentile, over the accepted ticks, of the distance between the accepted position and the *onset prior*: where the onset rule puts the turn's first sample (its first onset heard, or placed from the chain, minus `onsets_ms[0]`). `-` without an onset prior. | see below |
+| `held / acc` | Ticks with speech in the window that were held (not accepted) and that were accepted. A `*` marks a reference spliced onto the turn before it. | see below |
+| `peak / ratio / sharp / halves` | The four checks at the last tick with speech: correlation peak (≥ 0.95), peak over the second peak (≥ 1.2), sharpness (≥ 0.03) and the half windows' deviation in ms (≤ 10). A failed check is marked `!`, a peak at the edge of the search `(edge)`. | see below |
 | `result` | `pass`, `fail` with the reasons, `unverified` (a placed chained turn, see below) or `pending`. | |
 
 Above the table a line counts the turns that pass, fail, are unverified or are pending, the `state`
@@ -68,8 +84,37 @@ stray onset. Reload the page and run again. Below the table, **Contract problems
 message that breaks `pipecat/v1/avatar.proto`: a missing key, 1-based or out-of-range
 `chunk_index`, `chunk_count` below 1, `chunk_count` or `end` changing inside a segment, a gap in
 `segment_seq`, `end` anywhere but the last segment, frames after `turn_end` or `turn_abort`, an
-empty `turn_onsets`, a message over Daily's 4 KB limit, and the like. **Timeline** puts every
+empty `turn_onsets`, a `turn_envelope` with a `hop_ms` or `window_ms` other than 5 and 10, an index
+it covers twice, indices left uncovered at `turn_end` or one sent after `turn_end` or `turn_abort`,
+a message over Daily's 4 KB limit, and the like. **Timeline** puts every
 message, tapped onset and conversation marker in order.
+
+### The alignment columns
+
+The five alignment columns do not decide `pass` or `fail`: they are what the paired captures of the
+sync-fingerprint plan's Task 7 (Chrome, Daily and LiveKit) record, and they become measurements
+there, against the design's minimum (no false lock, a first lock within 300 ms of speech on 95 % of
+turns, p95 error within 5 ms). The page reports them without judging them; the measurements are in
+*Paired captures* below.
+
+How the page runs the rule, per turn, from its `turn_start` on (design §3.2):
+
+* **Received envelope.** The tapped track after a first-order 30 Hz high-pass, 10 ms windows every
+  5 ms, dB of the mean square; only windows fully inside the audio count.
+* **Reference.** The turn's `turn_envelope` values, placed by `first_index` (arrival order does not
+  matter; a missing index is silence). It is spliced onto the previous turn's envelope as the web
+  SDK splices it (design §3.3): a chained turn at `prev_turn_pcm_ms`; an unchained turn with
+  `gap_ms > 0` (1000 included) at the previous turn's `turn_end.pcm_ms + gap_ms`, with silence in
+  between; never on `gap_ms` 0 for an unchained turn, and never onto a turn that was aborted.
+* **Cadence.** A tick every 50 ms of received audio until the turn's first lock, then every 200 ms;
+  ticks stop once the last 1 s lies past the turn's end, or 1 s after `turn_abort`.
+* **Prior.** Until the first lock: the onset prior when the onset rule has one, else the arrival of
+  `turn_start` plus 200 ms; after it, the last accepted position. The search covers ± 300 ms
+  around it. After 10 ticks with speech and no lock the search widens to ± 600 ms, re-centred on the
+  onset prior.
+* **A tick** is `align` from `sync.js` on the last 3 s of received envelope: floor, speech gate,
+  correlation of the last 1 s and its two halves, the four checks, parabolic refinement. A held
+  tick changes nothing.
 
 ### What `lead` means
 
@@ -157,22 +202,35 @@ measured.
 
 ## The capture
 
-**download capture.jsonl** saves one JSON object per line, one per avatar message, in arrival
-order:
+**download capture.jsonl** saves one JSON object per line, one per RTVI message the page received
+(the avatar messages, `turn_envelope` included, and the session messages such as
+`user-started-speaking` and `bot-interrupted`), in arrival order:
 
 ```json
-{"t": 1730580000123, "tap": 481920, "data": {"tag": "spatialreal-avatar", "turn_start": {"turn_id": "..."}}}
+{"t": 1730580000.123, "tap": 481920, "message": {"label": "rtvi-ai", "type": "server-message", "data": {"tag": "spatialreal-avatar", "turn_start": {"turn_id": "..."}}}}
 ```
 
-* `t` is `Date.now()` when the message arrived.
+* `t` is the arrival time, epoch seconds.
 * `tap` is how many samples of `capture.wav` had arrived by then, so a replay can put the message
   at `tap / sample rate` seconds into the audio.
-* `data` is the `AvatarMessage`: the argument `onServerMessage` gets in `pipecat-client-js`, and
-  what `session.handleServerMessage()` takes. Other RTVI messages are not recorded.
+* `message` is the whole RTVI message. For an avatar message its `data` is the `AvatarMessage`:
+  the argument `onServerMessage` gets in `pipecat-client-js`, and what
+  `session.handleServerMessage()` takes. This is the format `hack/sync-sim/sim.py --captures` and
+  the web SDK's capture replay read, and the format of the capture committed next to this file.
 
 **download capture.wav** saves what the tap received: the bot's decoded track, mono PCM16, at the
 rate of the browser's AudioContext (its header says which; 48 kHz on most machines), from the moment
 the page started tapping.
+
+**download capture.sync.json** saves, per turn, what the oracle needs to run on the capture
+directly: the reference envelope reassembled by index (`reference`, base64, one byte per 5 ms from
+the turn's first sample, with `reference_missing` indices never received), the splice when there is
+one (`splice`: `kind` `chained` or `gap`, the turn it joins, `join_ms`, `own_offset` — the index of
+the turn's own index 0 — and the spliced `values`), the `turn_start` fields the splice depends on,
+`turn_end.pcm_ms`, the tap positions of `turn_start`, `turn_end` and `turn_abort`, the onset prior,
+and every tick the page ran (`pos`, the prior and search range, whether it was gated, accepted, the
+position it accepted as `first_sample_pos` and the four checks). Positions are samples of
+`capture.wav`. A turn's received envelope at a tick is the one of `capture.wav` up to `pos`.
 
 ## The live run
 
@@ -210,8 +268,149 @@ expectations; the runs above are the measurement.
    the onsets disagree by more than 40 ms, adjust `threshold` (and `min_silence_ms`) in the
    processor and in the URL until ten turns pass, make that the constructor default, and record it
    in the README.
-4. Download both capture files, move them into this directory, and commit them: they are the offline
+4. Download the capture files, move them into this directory, and commit them: they are the offline
    test material for the web SDK's Pipecat session.
 
 LiveKit has no probe: run the bot with `-t livekit` and use the example page
 (`/avatar/?transport=livekit`, see [../client/README.md](../client/README.md)).
+
+## Paired captures
+
+`tests/fixtures/sync/daily-clean/` and `tests/fixtures/sync/livekit-clean/` are the first paired
+captures (2026-11-03): the processor's per-turn envelope and messages next to the bot's track as a
+real Chrome (156, headless) decoded it, in the format of *The capture* above. They were recorded
+unattended against the SpatialReal test deployment with the example bot as shipped (Deepgram,
+Gemini, Cartesia):
+
+* **Speaker**: a scripted second participant (daily-python, or the LiveKit Python SDK) joins the room
+  and plays ten spoken prompts, two of them as barge-ins 2.5 s into the bot's answer, four of them
+  asking for a list with pauses ("Count slowly from one to five, with a pause between each number").
+* **Receiver**: Chrome, driven by puppeteer. On Daily it is this page, joined with `?room=&token=`.
+  On LiveKit it is a copy of this page with the Daily calls replaced by `livekit-client` 2.22.4 (the
+  same tap, recorder, `sync.js` tracker, analysis and downloads), kept outside the repository.
+* **No impaired run.** The plan asked for a second run per transport at 3 % loss / 100 ms jitter;
+  Network Link Conditioner is not installed on the recording machine and `pf`/dummynet needs root,
+  so both captures are clean networks only. The impaired thresholds rest on the spike's simulation.
+
+Each run gave 12 turns (2 aborted by barge-in, 0 `STATUS_DEGRADED`, no splice: every turn followed an
+idle longer than 1 s, so `gap_ms` was 0 throughout). The fixtures are trimmed to whole turns, 9 of
+Daily's and 8 of LiveKit's, so that each directory stays under 10 MB: each kept turn keeps the audio
+from 3.5 s before its `turn_start` to 1.5 s after its last tick, cut on a 40 ms grid (a multiple of
+the 5 ms hop and of the 128-sample worklet block), and every tap position is rebased
+(`capture.sync.json` says what was kept under `trimmed`). On the kept turns the replay gives the same
+numbers on the trimmed and on the full recording.
+
+`hack/sync-sim/replay_capture.py DIR` replays the rule on a capture with the oracle (`dsp.align`,
+the page's cadence, prior and widening) and measures it against the whole-turn alignment (the turn's
+reference correlated once with everything received of it). On the full recordings (24 turns; the
+fixtures are subsets):
+
+| | Daily | LiveKit |
+|---|---|---|
+| accepted ticks / false locks (> 20 ms off) | 211 / **0** | 200 / **0** |
+| first lock within 300 ms of speech | **9 / 12 (75 %)** | **10 / 12 (83 %)** |
+| first lock, ms of speech: p50 / p95 / max | 125 / 572 / 685 | 107 / 592 / 718 |
+| error against the whole-turn alignment: p50 / p95 / max | 0.62 / 5.00 / 6.94 ms | 0.25 / 1.24 / 1.99 ms |
+| error against the phrase-by-phrase alignment: p50 / p95 | 0.22 / 1.82 ms | 0.16 / 1.07 ms |
+| received audio moving inside a turn (largest) | 9.8 ms | 5.1 ms |
+| \|onset prior - truth\| before the first lock: p50 / max | 0.9 / 6.7 ms | 0.9 / 5.1 ms |
+| the page's live ticks (causal high-pass): accepted / false / p95 | 213 / 0 / 5.03 ms | 200 / 0 / 1.27 ms |
+
+Against the design's minimum as §4.1 first wrote it (backend-ng
+`2026-11-03-pipecat-sync-fingerprint-design.md`): **no false lock on either transport; the
+first-lock minimum (300 ms on 95 % of turns) fails on both**; the p95 error is 5.00 ms on Daily (at
+the limit; 5.02 with the browser's causal high-pass) and 1.24 ms on LiveKit. The late first locks
+are turns whose first second is mostly the silence before the turn: the candidate is right (peak
+0.99 or more, within 7 ms of the whole-turn alignment) but its sharpness is under 0.03 or its peak
+ratio under 1.2. Until the lock the frames follow the onset prior, which was within 7 ms of the
+truth on every turn here. The Daily p95 comes from the two greetings at the start of the call, where
+the received audio moved by up to 10 ms inside the turn (the jitter buffer settling); against each
+phrase's own alignment the p95 is 1.8 ms. Lowering the thresholds would meet the first-lock minimum
+on these captures, but every relaxation tried re-opens false locks on the spike's impaired
+simulation (sharpness 0.025: one at 21.5 ms; ratio 1.1 with sharpness 0.03: six, up to 130 ms; ratio
+1.1 with sharpness 0.02: seven). Source of those counts: the spike's impaired simulation,
+`hack/sync-sim/sim.py` replayed with each of those thresholds (its `--thr`, see
+`hack/sync-sim/README.md`, "Rerunning"). The result pickles are not committed and `thrsearch.out`
+lists only the 500-combination grid on the frozen features, so the counts are quoted from that run,
+not recomputed here. These clean captures cannot show a false lock at any threshold (no tick of
+theirs is more than 7 ms off at the fixed first prior, so `thrsearch.py` on them finds zero for all
+500 combinations). The thresholds were not changed.
+
+On the fixtures themselves (the trimmed subsets, which keep the slow turns and so weigh them more):
+
+| | `daily-clean` (9 turns) | `livekit-clean` (8 turns) |
+|---|---|---|
+| false locks | 0 of 165 accepted | 0 of 133 accepted |
+| first lock within 300 ms of speech | 6 / 9 | 6 / 8 |
+| first lock, latest (replay / live page) | 685 / 679 ms | 718 / 732 ms |
+| p95 error, whole-turn truth | 6.07 ms | 1.28 ms |
+| p95 error, phrase-by-phrase truth | 2.32 ms | 0.84 ms |
+| \|onset prior - truth\| before the first lock, max | 6.7 ms | 5.1 ms |
+
+**The criteria as restated by the owner after these captures** (they replace the two that failed as
+written; zero false locks stays): the error is measured against the **phrase-by-phrase** alignment,
+p95 at most 5 ms (R63), because the whole-turn alignment charges the rule for audio that really moved
+inside the turn; and the first lock is **every turn locks within 750 ms of speech, and until it
+locks the onset prior is within 10 ms of the truth on at least 95 % of turns** (R62). Both fixtures,
+and both full recordings, meet all three: no false lock, every turn locked by 732 ms (live) / 718 ms
+(replay), the prior within 6.7 ms on every turn, and a phrase-truth p95 of 2.32 and 0.84 ms (1.82 and
+1.07 ms on the full recordings). `replay_capture.py` prints these restated criteria (the 300 ms
+count stays beside them for reference), and `tests/test_sync_replay.py` asserts them on the
+fixtures. Since the splice run below, the error truth is the window content rather than the phrases
+(*The splice run*).
+
+**Pauses and late onsets (design §8, item 2).** 26 pauses of 0.3 s or more were received. The audio
+after each pause sat where the audio before it did, within -4.8 to +5.1 ms (each phrase aligned on
+its own); no pause moved it by tens of milliseconds, and no lead-in was lost (no reference frame of
+the first 150 ms after a pause 10 dB over the floor while the received track stayed at it). The onset
+rule still missed on LiveKit: +57.8 ms on one onset (after a 260 ms quiet), +12 to +18 ms on three
+more and -11 ms on one, with the phrase not moved (-2.8 to +0.4 ms). The +57.8 ms one is a click at
+the start of the phrase whose decoded peak is 327 where the server's was over 328: the threshold
+missed it by one sample value and found the voiced onset 58 ms later. On these captures, then, a late onset after a
+pause is the onset threshold meeting a soft lead-in, not a delay change and not a lead-in removed by
+DTX.
+
+### The splice run (2026-11-04)
+
+`tests/fixtures/sync/daily-splice/` is 20 whole turns of a third run (Daily, Chrome 156) made so that
+turns are spliced (design §3.3): a scratch copy of the example bot gave each sentence its own
+Cartesia context, so a three-sentence answer plays as three chained turns, and followed each answer
+with a short question 100-400 ms after it, a turn with `gap_ms` > 0. The full run had 55 turns: 25
+chained, 16 with a gap of 200-800 ms, 14 plain. The fixture keeps turns 9-28 (10 chained, 6 with a
+gap), trimmed like the clean ones; the replay gives the same numbers on the trimmed and the full
+recording.
+
+**The joins.** On every one of the 41 joins the received track holds exactly the gap the splice
+assumes: the received distance between a turn's last sample and the next one's first, minus
+`gap_ms`, is at most 2.1 ms (p95 1.1 ms), measured from the 400 ms windows nearest the join on both
+sides. `tests/test_sync_replay.py` asserts it within one hop on the fixture.
+
+**The truth.** The same run shows Chrome's jitter buffer moving the received audio inside a turn by
+5-60 ms, in steps: a turn whose last 200 ms arrived 51 ms later than the rest of it, a turn whose
+first 240 ms arrived 65 ms ahead of the rest. The rule follows those steps, so a phrase truth (one
+position per phrase of up to 5 s) charged it for them: 41 "false locks" on the first replay, none
+of them a lock away from the audio it was looking at. `replay_capture.py` now measures every
+accepted tick against the window content: 400 ms windows of the reference, each aligned on its own,
+overlap-weighted over the tick's 1 s window (its docstring has the definition). It also ticks a turn
+the way the page does, from the turn's first `turn_envelope` with the reference as it had arrived,
+with the prior the page had; with the causal high-pass its ticks are the page's own, tick for tick,
+on 63 of the 64 turns of the three captures (1 723 ticks). On the other one tick holds on a ratio of
+1.1998 where the page accepted on 1.2003 (the 16-bit rounding of `capture.wav`), and that turn's
+later ticks shift with it.
+
+| | `daily-clean` | `livekit-clean` | splice run (55 turns) | `daily-splice` (20) |
+|---|---|---|---|---|
+| accepted ticks / false locks (window truth) | 167 / **0** | 134 / **0** | 720 / **0** | 204 / **0** |
+| first lock, max ms of speech (live page) | 679 (679) | 732 (732) | **1065** (1065) | 156 (156) |
+| onset prior within 10 ms before the lock | 9 / 9 | 8 / 8 | 53 / 55 (96 %) | 20 / 20 |
+| p95 error, window truth | 1.24 ms | 0.83 ms | 0.86 ms | 0.60 ms |
+
+(Zero-phase high-pass; with the causal one the p95 moves by at most 0.05 ms and the splice run has
+719 accepted ticks, still none false.) The one
+criterion the splice run fails is the first lock of one turn, kept as
+`tests/fixtures/sync/daily-splice-failures/` and marked `xfail` there: its lead-in and first
+syllable reached the browser 65 ms ahead of the rest of it. The page's onset rule fired on them, so
+the prior was 68 ms off the rest of the turn; the rule's first two ticks found the early copy (peak
+0.998) but held on the peak ratio (1.08, 1.06), and the next 20 held because their 1 s window
+straddled the step, until it lay past it: first lock after 1065 ms of speech. That is the re-lock
+delay design §3.2 accepts after a jitter-buffer jump, here at the start of a turn.
