@@ -53,6 +53,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   run held whole (about 41 ms of work for 12 s at 48 kHz) no longer delays the turn's first audio
   after the decision to start it. The `turn_envelope` messages are the same bytes, sent at the same
   points.
+- An interruption that aborts no announced turn (only the fill was playing) now also moves the
+  processor's playout clock back to the moment of the interruption, as the transport drops the
+  fill it held (up to 80 ms): the next turn gets its full lead and its `turn_end` goes when its
+  audio has played. On any interruption the clock is never moved back past uninterruptible audio
+  already released, which the transport keeps.
 
 ## [0.1.0] - 2026-11-03
 

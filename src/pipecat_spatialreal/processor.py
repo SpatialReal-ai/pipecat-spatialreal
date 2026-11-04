@@ -439,6 +439,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         # The quiet between turns. _sound_end is where the last audio that is not the fill ends;
         # the fill is the silence released since then, while no turn plays (see _fill).
         self._sound_end = 0.0
+        # Where the last uninterruptible audio released ends: an interruption never drops it
+        # (Pipecat's output transport keeps uninterruptible frames), so the room plays until then.
+        self._kept_end = 0.0
         self._filling = False  # a turn has played out and the room is kept fed after it
         self._fill_track: str | None = None  # the track the fill plays on: that turn's
         self._fill_bytes = 0  # fill released since _sound_end
@@ -633,7 +636,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             await self._keep(last, frame)  # nothing overtakes a turn's frames
             return
         if _plays(frame) and frame.transport_destination == self._track:
-            self._queue_playout(_duration(frame))
+            self._queue_playout(_duration(frame), kept=not frame.interruptible)
         await self.push_frame(frame)
 
     async def _keep(self, turn: _Turn, item: Frame | _EndOfAudio) -> None:
@@ -816,6 +819,12 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         # An interruption ends the quiet after a turn: the room stops being fed, and what the
         # transport still held of the fill is dropped with the rest, so no gap is known after it.
         self._filling = self._fed = False
+        # The transport drops every interruptible frame it still holds, the fill's too, whether
+        # or not a turn is aborted here; what it keeps, uninterruptible audio, plays on to its end.
+        # (Kept audio queued behind dropped audio would end earlier than this: not modelled.)
+        until = max(self._now(), self._kept_end)
+        self._playout_end = min(self._playout_end, until)
+        self._sound_end = min(self._sound_end, until)
         victims = [turn for turn in self._turns if turn.interruptible]
         if not victims:
             await self.push_frame(frame, direction)
@@ -845,9 +854,6 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             self._open = None
         if self._chain in victims:
             self._chain = None
-        if any(turn.announced for turn in victims):  # the transport drops what it still holds
-            self._playout_end = min(self._playout_end, self._now())
-            self._sound_end = min(self._sound_end, self._now())
         interrupt = self._driven is not None and self._last_sent in victims
         if interrupt:
             self._last_sent = None
@@ -868,7 +874,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
         for item in unplaced:
             if _plays(item):
-                self._queue_playout(_duration(item))
+                self._queue_playout(_duration(item), kept=not item.interruptible)
             await self.push_frame(item)
         self._start_driver()
 
@@ -1173,7 +1179,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                         if not turn.described:
                             await self._describe_held(turn)
                         turn.described -= 1
-                    self._queue_playout(_duration(item))
+                    self._queue_playout(_duration(item), kept=not item.interruptible)
                 turn.hold.popleft()
                 await self.push_frame(item)
             turn.drained = True  # the next turn may start at once
@@ -1222,7 +1228,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         self._queue_write(turn, pcm)  # the same samples inference sees; never waited for here
         frame = _silence_frame(pcm, self._out_rate, turn.started.transport_destination)
         frame.interruptible = turn.interruptible
-        self._queue_playout(_duration(frame))
+        self._queue_playout(_duration(frame), kept=not frame.interruptible)
         await self.push_frame(frame)  # not TTS audio: Pipecat does not count it as speech
 
     async def _fill(self, deadlines: list[float]) -> None:
@@ -1250,11 +1256,12 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             await self.push_frame(_silence_frame(pcm, self._out_rate, self._fill_track))
         self._filling = False  # the cap: from here the transport's own idle fills the room
 
-    def _queue_playout(self, seconds: float, *, fill: bool = False) -> None:
+    def _queue_playout(self, seconds: float, *, fill: bool = False, kept: bool = False) -> None:
         """Account for ``seconds`` of audio released now behind what the room already has.
 
         Audio that is not the fill moves ``_sound_end``, where the quiet before the next turn
         is measured from; the fill only tells whether the room has stayed fed since then.
+        ``kept`` audio (uninterruptible) moves ``_kept_end``, which an interruption leaves.
         """
         now = self._now()
         if fill:
@@ -1265,6 +1272,8 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         self._playout_end = max(self._playout_end, now) + seconds
         if not fill:
             self._sound_end = self._playout_end
+        if kept:
+            self._kept_end = self._playout_end
 
     def _fed_now(self) -> bool:
         """Whether the room has played without a break since the last audio that was not fill."""
