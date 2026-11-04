@@ -4,13 +4,17 @@
 bot's audio into its table, in plain JavaScript. ``probe_check.mjs`` runs that code under Node on
 messages built by :mod:`pipecat_spatialreal.envelope` and on random audio scanned by the package's
 ``OnsetTracker``, so the page's reading of the contract and its onset rule cannot drift from the
-processor's. Without ``node`` that test is skipped locally and fails in CI, where the workflow
-installs Node; the one that asks the bot's server for the page is skipped when the example extra
-is not installed.
+processor's. It also holds ``examples/probe/sync.js``, the page's port of the envelope alignment
+rule, to the normative oracle's numbers in ``tests/fixtures/sync/oracle.json``; the fixture itself
+is checked against a fresh run of its generator. Without ``node`` the Node test is skipped locally
+and fails in CI, where the workflow installs Node; the ones that ask the bot's server for the page
+are skipped when the example extra is not installed.
 """
 
 import base64
+import importlib.util
 import json
+import math
 import os
 import random
 import shutil
@@ -25,7 +29,9 @@ from pipecat_spatialreal.onset import OnsetTracker
 from pipecat_spatialreal.proto.generated import avatar_pb2
 
 PAGE = Path(__file__).resolve().parent.parent / "examples" / "probe" / "index.html"
+SYNC = PAGE.with_name("sync.js")
 CHECK = Path(__file__).with_name("probe_check.mjs")
+ORACLE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sync" / "oracle.json"
 
 TURN_A = "aaaaaaaa-1111-4111-8111-111111111111"
 TURN_B = "bbbbbbbb-2222-4222-8222-222222222222"
@@ -33,7 +39,8 @@ TURN_C = "cccccccc-3333-4333-8333-333333333333"
 
 
 def _envelopes() -> dict:
-    """Messages of three turns (a two-segment one, one chained to it, one interrupted)."""
+    """Messages of three turns (a two-segment one, one chained to it, one interrupted), and turn A's
+    and turn C's envelopes."""
     return {
         "A_start": envelope.turn_start(TURN_A, sample_rate=24000, onsets_ms=[180.0, 1400.0]),
         "A_seg0": envelope.frames(TURN_A, 0, bytes(range(256)) * 20, end=False),  # 3 chunks
@@ -52,6 +59,9 @@ def _envelopes() -> dict:
         "C_seg0": envelope.frames(TURN_C, 0, b"\x03" * 3000, end=False),
         "C_abort": envelope.turn_abort(TURN_C),
         "C_onsets": envelope.turn_onsets(TURN_C, [900.0]),
+        # Two messages for A (2 400 + 160 values); one for C, sent after its abort in one test.
+        "A_env": envelope.turn_envelope(TURN_A, 0, bytes(range(256)) * 10),
+        "C_env": envelope.turn_envelope(TURN_C, 0, b"\x05" * 100),
         "degraded": envelope.state(avatar_pb2.State.STATUS_DEGRADED, "driveningress closed"),
     }
 
@@ -83,6 +93,39 @@ def _audio(rate: int = 48000, threshold: int = 328, min_silence_ms: int = 150) -
     }
 
 
+def _assert_same(fresh, committed, where="oracle.json"):
+    """``fresh`` and ``committed`` hold the same JSON, floats within 1e-9 (relative)."""
+    if isinstance(fresh, dict):
+        assert isinstance(committed, dict) and fresh.keys() == committed.keys(), where
+        for key in fresh:
+            _assert_same(fresh[key], committed[key], f"{where}.{key}")
+    elif isinstance(fresh, list):
+        assert isinstance(committed, list) and len(fresh) == len(committed), where
+        for i, (a, b) in enumerate(zip(fresh, committed)):
+            _assert_same(a, b, f"{where}[{i}]")
+    elif isinstance(fresh, float) and not isinstance(committed, bool):
+        assert isinstance(committed, (int, float)), where
+        assert math.isclose(fresh, committed, rel_tol=1e-9, abs_tol=1e-9), where
+    else:
+        assert fresh == committed, where
+
+
+def test_the_oracle_fixture_is_what_its_generator_writes():
+    # probe_check.mjs trusts tests/fixtures/sync/oracle.json as the oracle's numbers: it must be a
+    # current run of make_oracle_fixture.py over hack/sync-sim/dsp.py.
+    pytest.importorskip("numpy")
+    spec = importlib.util.spec_from_file_location(
+        "make_oracle_fixture", ORACLE_FIXTURE.with_name("make_oracle_fixture.py")
+    )
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+
+    committed = json.loads(ORACLE_FIXTURE.read_text())
+
+    _assert_same(generator.build(), committed)
+    assert ORACLE_FIXTURE.stat().st_size < 200_000
+
+
 async def test_the_bot_serves_the_probe_at_probe():
     # The URL the README, examples/README.md and bot.py give for the probe.
     reason = "needs the example extra: uv sync --extra example"
@@ -97,9 +140,15 @@ async def test_the_bot_serves_the_probe_at_probe():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost:7860") as client:
         reply = await client.get("/probe/", params={"mic": "1"})
+        # The page imports the rule as a module next to it: ./sync.js.
+        module = await client.get("/probe/sync.js")
 
     assert reply.status_code == 200
     assert reply.text == PAGE.read_text()
+    assert "import { SyncTracker } from './sync.js'" in reply.text
+    assert module.status_code == 200
+    assert module.text == SYNC.read_text()
+    assert "javascript" in module.headers["content-type"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None and not os.environ.get("CI"), reason="needs node")

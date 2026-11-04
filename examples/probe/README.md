@@ -16,6 +16,17 @@ carries on across the swap.
 Onsets are found with the processor's own rule, `threshold` and `min_silence_ms`, on the same PCM16
 quantisation as the web SDK.
 
+The page also runs the envelope alignment on the tapped track, live, as the web SDK runs it: the
+processor's `turn_envelope` (one byte per 5 ms of the audio it released) is correlated with the
+envelope of the received track to find where each turn sits (design §3.2 of backend-ng's
+`docs/superpowers/specs/2026-11-03-pipecat-sync-fingerprint-design.md`). The rule is in `sync.js`,
+next to the page: a port of the normative oracle, `hack/sync-sim/dsp.py` (`envelopeBytes` and
+`align` mirror `envelope_bytes` and `align`), held to the oracle's own numbers by
+`tests/probe_check.mjs` (`tests/fixtures/sync/oracle.json`, written by `make_oracle_fixture.py`
+next to it). One difference is deliberate: the oracle's 30 Hz high-pass on the received track is
+zero phase over the whole signal, the page's is causal (first order), as a browser must run it; on
+the fixture it moves the offset by 0.04 ms.
+
 ## Run it
 
 ```bash
@@ -57,6 +68,11 @@ late only changes its own row.
 | `onset Δ ms` | Tapped minus announced spacing: each later onset against the first, and for a chained turn (`prev_turn_id`) the first onset against where the end of the turn before it puts it (`chain +N`). | within 40 |
 | `end` | `turn_end` (or `turn_abort`) time since `turn_start`, `pcm_ms` and the segment count. | |
 | `abort Δ ms` | `turn_abort` minus Pipecat's `user-started-speaking` message. Blind to a delay the two messages share (see *What `abort Δ` cannot see* below). | at most 300 |
+| `first lock ms` | Envelope alignment: how much of the turn's speech had been received at the first accepted tick, in ms, counted from where that lock puts `onsets_ms[0]` (the turn's first sample when it announced none). `none` while it has ticked without a lock. | see below |
+| `offset ms` | The turn's first sample at the latest accepted tick minus the arrival of `turn_start`, on the tap's clock. It measures what `skew` measures with onsets: the audio path's delay over the message path's. | see below |
+| `p95 err ms` | The 95th percentile, over the accepted ticks, of the distance between the accepted position and the *onset prior*: where the onset rule puts the turn's first sample (its first onset heard, or placed from the chain, minus `onsets_ms[0]`). `-` without an onset prior. | see below |
+| `held / acc` | Ticks with speech in the window that were held (not accepted) and that were accepted. A `*` marks a reference spliced onto the turn before it. | see below |
+| `peak / ratio / sharp / halves` | The four checks at the last tick with speech: correlation peak (≥ 0.95), peak over the second peak (≥ 1.2), sharpness (≥ 0.03) and the half windows' deviation in ms (≤ 10). A failed check is marked `!`, a peak at the edge of the search `(edge)`. | see below |
 | `result` | `pass`, `fail` with the reasons, `unverified` (a placed chained turn, see below) or `pending`. | |
 
 Above the table a line counts the turns that pass, fail, are unverified or are pending, the `state`
@@ -68,8 +84,36 @@ stray onset. Reload the page and run again. Below the table, **Contract problems
 message that breaks `pipecat/v1/avatar.proto`: a missing key, 1-based or out-of-range
 `chunk_index`, `chunk_count` below 1, `chunk_count` or `end` changing inside a segment, a gap in
 `segment_seq`, `end` anywhere but the last segment, frames after `turn_end` or `turn_abort`, an
-empty `turn_onsets`, a message over Daily's 4 KB limit, and the like. **Timeline** puts every
+empty `turn_onsets`, a `turn_envelope` with a `hop_ms` or `window_ms` other than 5 and 10, an index
+it covers twice, indices left uncovered at `turn_end` or one sent after `turn_end` or `turn_abort`,
+a message over Daily's 4 KB limit, and the like. **Timeline** puts every
 message, tapped onset and conversation marker in order.
+
+### The alignment columns
+
+The five alignment columns do not decide `pass` or `fail`: they are what the paired captures of the
+sync-fingerprint plan's Task 7 (Chrome, Daily and LiveKit) record, and they become measurements
+there, against the design's minimum (no false lock, a first lock within 300 ms of speech on 95 % of
+turns, p95 error within 5 ms). Until then the page reports them without judging them.
+
+How the page runs the rule, per turn, from its `turn_start` on (design §3.2):
+
+* **Received envelope.** The tapped track after a first-order 30 Hz high-pass, 10 ms windows every
+  5 ms, dB of the mean square; only windows fully inside the audio count.
+* **Reference.** The turn's `turn_envelope` values, placed by `first_index` (arrival order does not
+  matter; a missing index is silence). It is spliced onto the previous turn's envelope as the web
+  SDK splices it (design §3.3): a chained turn at `prev_turn_pcm_ms`; an unchained turn with
+  `gap_ms > 0` (1000 included) at the previous turn's `turn_end.pcm_ms + gap_ms`, with silence in
+  between; never on `gap_ms` 0 for an unchained turn, and never onto a turn that was aborted.
+* **Cadence.** A tick every 50 ms of received audio until the turn's first lock, then every 200 ms;
+  ticks stop once the last 1 s lies past the turn's end, or 1 s after `turn_abort`.
+* **Prior.** Until the first lock: the onset prior when the onset rule has one, else the arrival of
+  `turn_start` plus 200 ms; after it, the last accepted position. The search covers ± 300 ms
+  around it. After 10 ticks with speech and no lock the search widens to ± 600 ms, re-centred on the
+  onset prior.
+* **A tick** is `align` from `sync.js` on the last 3 s of received envelope: floor, speech gate,
+  correlation of the last 1 s and its two halves, the four checks, parabolic refinement. A held
+  tick changes nothing.
 
 ### What `lead` means
 
@@ -157,22 +201,35 @@ measured.
 
 ## The capture
 
-**download capture.jsonl** saves one JSON object per line, one per avatar message, in arrival
-order:
+**download capture.jsonl** saves one JSON object per line, one per RTVI message the page received
+(the avatar messages, `turn_envelope` included, and the session messages such as
+`user-started-speaking` and `bot-interrupted`), in arrival order:
 
 ```json
-{"t": 1730580000123, "tap": 481920, "data": {"tag": "spatialreal-avatar", "turn_start": {"turn_id": "..."}}}
+{"t": 1730580000.123, "tap": 481920, "message": {"label": "rtvi-ai", "type": "server-message", "data": {"tag": "spatialreal-avatar", "turn_start": {"turn_id": "..."}}}}
 ```
 
-* `t` is `Date.now()` when the message arrived.
+* `t` is the arrival time, epoch seconds.
 * `tap` is how many samples of `capture.wav` had arrived by then, so a replay can put the message
   at `tap / sample rate` seconds into the audio.
-* `data` is the `AvatarMessage`: the argument `onServerMessage` gets in `pipecat-client-js`, and
-  what `session.handleServerMessage()` takes. Other RTVI messages are not recorded.
+* `message` is the whole RTVI message. For an avatar message its `data` is the `AvatarMessage`:
+  the argument `onServerMessage` gets in `pipecat-client-js`, and what
+  `session.handleServerMessage()` takes. This is the format `hack/sync-sim/sim.py --captures` and
+  the web SDK's capture replay read, and the format of the capture committed next to this file.
 
 **download capture.wav** saves what the tap received: the bot's decoded track, mono PCM16, at the
 rate of the browser's AudioContext (its header says which; 48 kHz on most machines), from the moment
 the page started tapping.
+
+**download capture.sync.json** saves, per turn, what the oracle needs to run on the capture
+directly: the reference envelope reassembled by index (`reference`, base64, one byte per 5 ms from
+the turn's first sample, with `reference_missing` indices never received), the splice when there is
+one (`splice`: `kind` `chained` or `gap`, the turn it joins, `join_ms`, `own_offset` — the index of
+the turn's own index 0 — and the spliced `values`), the `turn_start` fields the splice depends on,
+`turn_end.pcm_ms`, the tap positions of `turn_start`, `turn_end` and `turn_abort`, the onset prior,
+and every tick the page ran (`pos`, the prior and search range, whether it was gated, accepted, the
+position it accepted as `first_sample_pos` and the four checks). Positions are samples of
+`capture.wav`. A turn's received envelope at a tick is the one of `capture.wav` up to `pos`.
 
 ## The live run
 
@@ -210,7 +267,7 @@ expectations; the runs above are the measurement.
    the onsets disagree by more than 40 ms, adjust `threshold` (and `min_silence_ms`) in the
    processor and in the URL until ten turns pass, make that the constructor default, and record it
    in the README.
-4. Download both capture files, move them into this directory, and commit them: they are the offline
+4. Download the capture files, move them into this directory, and commit them: they are the offline
    test material for the web SDK's Pipecat session.
 
 LiveKit has no probe: run the bot with `-t livekit` and use the example page
