@@ -15,6 +15,7 @@ to this file; ``tests/test_probe_page.py`` fails when the committed file differs
 """
 
 import base64
+import dataclasses
 import importlib.util
 import json
 import math
@@ -93,7 +94,9 @@ def build_received(source: np.ndarray, case: dict) -> np.ndarray:
     that segment's ``lead`` samples (zeros where it has no sample), ``samples`` long in all, plus
     the case's ``noise`` (LCG, see :func:`lcg_noise`) clipped to the int16 range.
 
-    The source is reversed when ``reverse`` is set, and all zeros when ``silent`` is.
+    The source is reversed when the case's ``reverse`` is set, and all zeros when ``silent`` is. A
+    segment may set its own ``reverse`` (other audio for that stretch) and ``shift`` (its samples
+    arithmetic-shifted right by that many bits: quieter by 6 dB a bit).
     """
     src = (
         np.zeros_like(source)
@@ -107,8 +110,9 @@ def build_received(source: np.ndarray, case: dict) -> np.ndarray:
     for seg, end in zip(case["segments"], bounds[1:]):
         n = np.arange(seg["from"], end)
         k = n - seg["lead"]
-        inside = (k >= 0) & (k < len(src))
-        out[n[inside]] = src[k[inside]]
+        own = src[::-1] if seg.get("reverse") else src
+        inside = (k >= 0) & (k < len(own))
+        out[n[inside]] = own[k[inside]].astype(np.int64) >> seg.get("shift", 0)
     if "noise" in case:
         noise = lcg_noise(case["samples"], case["noise"]["amplitude"], case["noise"]["seed"])
         out = np.clip(out + noise, -32768, 32767)
@@ -145,6 +149,46 @@ def result(res) -> dict:
         "halves_ok": c.halves_ok,
         "interior_ok": c.interior_ok,
     }
+
+
+def half_deviations(dsp, received_db, reference, prior_index, params):
+    """Each half's own deviation from the full window's peak, ms (``inf`` at the edge of its
+    +/- 40 ms search, ``None`` without speech): what ``dsp.align`` takes the maximum of, built
+    from the same public blocks, so a case can say which half decided."""
+    hop = params.hop_ms
+    rec = np.asarray(received_db, dtype=np.float64)
+    jt = len(rec)
+    m_full = round(params.window_ms / hop)
+    m_half = m_full // 2
+    floor = dsp.floor_db(rec[max(0, jt - int(params.floor_history_ms / hop)) : jt], params)
+    prior_ms = prior_index * hop
+    lo_ms, hi_ms = prior_ms - params.search_ms, prior_ms + params.search_ms
+    margin = params.half_search_ms + 2 * hop
+    lags = np.arange(
+        int(np.floor((lo_ms - margin) / hop)), int(np.ceil((hi_ms + margin) / hop)) + 1
+    )
+    lags_ms = lags * hop
+    ref_db = dsp.dequantise(reference)
+    pad = max(lags[-1] - (jt - m_full), (jt - lags[0]) - len(ref_db), 0) + 1
+    ref_padded = dsp.pad_reference(ref_db, pad)
+
+    def curve(length, end):
+        window = rec[end - length : end]
+        return dsp.ncc_curve(
+            window, ref_padded, pad + end - length, lags, floor, params.gate_std_db
+        )
+
+    est = dsp.peak_features(lags_ms, curve(m_full, jt), lo_ms, hi_ms)[3]
+    out = []
+    for c in (curve(m_half, jt - m_half), curve(m_half, jt)):
+        if c is None:
+            out.append(None)
+            continue
+        _, _, _, half_est, edge = dsp.peak_features(
+            lags_ms, c, est - params.half_search_ms, est + params.half_search_ms
+        )
+        out.append(number(np.inf if edge else abs(half_est - est)))
+    return out
 
 
 def ms(value: float, rate: int = RATE) -> int:
@@ -196,14 +240,27 @@ CASES = [
     # Every sample held 6 times: syllables six times longer, a blunt peak. Fails on sharpness alone.
     {"name": "sharpness-only", "source": {"kind": "hold", "factor": 6, "total": ms(4000)},
      "segments": [{"from": 0, "lead": ms(637.25)}], "samples": ms(2400), "prior_index": 125},
-    # The audio 50 ms later until 1.85 s: the older half peaks past its +/- 40 ms search.
-    {"name": "older-half-jump",
+    # The audio 50 ms later until 1.85 s: the full window follows the late audio (+34 ms), so the
+    # on-time newer half is the one that peaks past its +/- 40 ms search.
+    {"name": "late-until-1.85",
      "segments": [{"from": 0, "lead": ms(687.25)}, {"from": ms(1850), "lead": ms(637.25)}],
      "samples": ms(2400), "prior_index": 125},
     # The audio 50 ms later from 2.0 s: the newer half peaks past its +/- 40 ms search.
     {"name": "newer-half-jump",
      "segments": [{"from": 0, "lead": ms(637.25)}, {"from": ms(2000), "lead": ms(687.25)}],
      "samples": ms(2400), "prior_index": 125},
+    # Other audio (reversed, 12 dB down) from 1.425 to 1.675 s, inside the older half only: the
+    # older half peaks 16 ms off, the newer one 4 ms. With the peak threshold relaxed to 0.80
+    # (the full window loses some correlation to the stretch) the halves check alone rejects it,
+    # and it is the older half that does.
+    {"name": "older-half-only",
+     "segments": [{"from": 0, "lead": ms(637.25)},
+                  {"from": ms(1425), "lead": ms(637.25), "reverse": True, "shift": 2},
+                  {"from": ms(1675), "lead": ms(637.25)}],
+     "samples": ms(2400), "prior_index": 125, "params": {"min_peak": 0.8}},
+    # Room noise over 3.4 s: the floor's 3 s history is not the whole track.
+    {"name": "room-noise-long", "segments": [{"from": 0, "lead": ms(1637.25)}], "samples": ms(3400),
+     "prior_index": 325, "noise": {"amplitude": 400, "seed": 7}},
     # The same samples read at 48 kHz (half the length): the rule at the browser's usual rate.
     {"name": "shifted-48k", "rate": 48000,
      "segments": [{"from": 0, "lead": ms(637.25, 48000)}], "samples": ms(2000, 48000),
@@ -231,16 +288,23 @@ def build() -> dict:
         source = build_source(pcm, case)
         reference = dsp.envelope_bytes(source, rate)
         entry = dict(case)
+        params = dataclasses.replace(dsp.DEFAULTS, **case.get("params", {}))
+        prior = case["prior_index"]
         if "received_db" in case:
             received_db = np.asarray(case["received_db"])
-            entry["oracle_no_hp"] = result(dsp.align(received_db, reference, case["prior_index"]))
+            entry["oracle_no_hp"] = result(dsp.align(received_db, reference, prior, params))
             cases.append(entry)
             continue
         received = build_received(source, case)
         plain = dsp.envelope_db(received, rate, 0.005)
         filtered = dsp.envelope_db(received, rate, 0.005, dc_block=True)
-        entry["oracle_no_hp"] = result(dsp.align(plain, reference, case["prior_index"]))
-        entry["oracle_hp"] = result(dsp.align(filtered, reference, case["prior_index"]))
+        entry["oracle_no_hp"] = result(dsp.align(plain, reference, prior, params))
+        entry["oracle_hp"] = result(dsp.align(filtered, reference, prior, params))
+        if "half" in case["name"] or "until" in case["name"]:
+            # [older, newer]: which half decided.
+            entry["oracle_half_deviations_ms"] = half_deviations(
+                dsp, plain, reference, prior, params
+            )
         if case["name"] == "shifted":
             # The received envelope itself, so a mismatch shows up before the rule runs.
             entry["received_db_no_hp"] = [float(v) for v in plain]

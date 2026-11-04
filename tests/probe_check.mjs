@@ -586,9 +586,10 @@ function oracleReceived(c) {
   const out = new Int16Array(c.samples)
   const bounds = c.segments.map(g => g.from).concat([c.samples])
   c.segments.forEach((g, i) => {
+    const own = g.reverse ? src.slice().reverse() : src
     for (let n = g.from; n < bounds[i + 1]; n++) {
       const k = n - g.lead
-      if (k >= 0 && k < src.length) out[n] = src[k]
+      if (k >= 0 && k < own.length) out[n] = own[k] >> (g.shift ?? 0)
     }
   })
   if (c.noise) {
@@ -597,6 +598,9 @@ function oracleReceived(c) {
   }
   return out
 }
+
+/** A case's params in the port's names (the oracle's are snake_case: min_peak -> minPeak). */
+const oracleParams = c => Object.fromEntries(Object.entries(c.params ?? {}).map(([k, v]) => [k.replace(/_([a-z])/g, (_, ch) => ch.toUpperCase()), v]))
 
 /** The received envelope (dB) of an oracle case: given, or measured on the rebuilt track. */
 const oracleReceivedDb = (c, opts) => (c.received_db ? Float64Array.from(c.received_db) : sync.receivedEnvelope(oracleReceived(c), c.rate ?? ORACLE.rate, opts))
@@ -623,7 +627,7 @@ test('sync: the received envelope without the high-pass equals the oracle\'s env
 test('sync: align equals the oracle on every case (high-pass off): offset within 0.1 ms, checks within 1e-6', () => {
   for (const c of ORACLE.cases) {
     const o = c.oracle_no_hp
-    const r = sync.align(oracleReceivedDb(c, { highPassHz: null }), oracleReference(c), c.prior_index)
+    const r = sync.align(oracleReceivedDb(c, { highPassHz: null }), oracleReference(c), c.prior_index, oracleParams(c))
     const k = r.checks
     if (c.gate_only) {
       // A synthetic window that only pins the speech gate: its correlation curve is flat enough
@@ -652,12 +656,42 @@ test('sync: align equals the oracle on every case (high-pass off): offset within
   assert(byName['room-noise'].accepted && byName['shifted-48k'].accepted)
   assert.deepEqual(failing(byName['ratio-only']), ['ratio_ok'])
   assert.deepEqual(failing(byName['sharpness-only']), ['sharpness_ok'])
-  assert.equal(byName['older-half-jump'].half_deviation_ms, 'Infinity')   // a half peaked at the edge of its +/- 40 ms
+  assert.equal(byName['late-until-1.85'].half_deviation_ms, 'Infinity')   // a half peaked at the edge of its +/- 40 ms
   assert.equal(byName['newer-half-jump'].half_deviation_ms, 'Infinity')
+  assert.deepEqual(failing(byName['older-half-only']), ['halves_ok'])
+  assert(byName['room-noise-long'].accepted)
   assert(!byName['gate-1.5'].speech && !byName['gate-1.999'].speech && byName['gate-2.0'].speech)
 })
 
-test('sync: the room-noise case puts the floor above -70 dB, from the 3 s history', () => {
+test('sync: which half decides: older-half-only by its older half alone, the others by the newer half', () => {
+  const halves = name => ORACLE.cases.find(k => k.name === name).oracle_half_deviations_ms.map(oracleNumber)
+  const [older, newer] = halves('older-half-only')
+  assert(older > 10 && newer <= 10, `older ${older}, newer ${newer}`)
+  const c = ORACLE.cases.find(k => k.name === 'older-half-only')
+  const k = sync.align(oracleReceivedDb(c, { highPassHz: null }), oracleReference(c), c.prior_index, oracleParams(c)).checks
+  assert(!k.halvesOk && k.peakOk && k.ratioOk && k.sharpnessOk && k.interiorOk)
+  assert(Math.abs(k.halfDeviationMs - older) <= 1e-6, `${k.halfDeviationMs} vs the older half's ${older}`)
+  for (const name of ['late-until-1.85', 'newer-half-jump']) {
+    const [o, n] = halves(name)
+    assert(n === Infinity && o <= 40, `${name}: older ${o}, newer ${n}`)
+  }
+})
+
+test('sync: the room-noise cases put the floor above -70 dB, from the 3 s history', () => {
+  for (const name of ['room-noise', 'room-noise-long']) {
+    const c = ORACLE.cases.find(k => k.name === name)
+    const env = oracleReceivedDb(c, { highPassHz: null })
+    const floor = sync.align(env, oracleReference(c), c.prior_index).checks.floor
+    const history = Array.from(env.subarray(Math.max(0, env.length - 600)))
+    assert.equal(floor, sync.percentile(history, 5) + 6, name)
+    if (name === 'room-noise-long') {
+      assert(env.length > 600, 'longer than the 3 s history')
+      assert.notEqual(floor, sync.percentile(Array.from(env.subarray(env.length - 800)), 5) + 6, '4 s of history would give another floor')
+    }
+  }
+})
+
+test('sync: the room-noise case puts the floor above -70 dB, from the 3 s history (details)', () => {
   const c = ORACLE.cases.find(k => k.name === 'room-noise')
   const env = oracleReceivedDb(c, { highPassHz: null })
   const floor = sync.align(env, oracleReference(c), c.prior_index).checks.floor
@@ -668,6 +702,17 @@ test('sync: the room-noise case puts the floor above -70 dB, from the 3 s histor
   assert.notEqual(floor, sync.percentile(all.slice(-200), 5) + 6)
   const sorted = all.slice().sort((a, b) => a - b)
   assert(!sorted.includes(sync.percentile(all, 5)), 'the 5th percentile falls between two values')
+})
+
+test('sync: the rule\'s fixed terms and the cadence are the design\'s values', () => {
+  assert.deepEqual({ ...sync.DEFAULTS }, {
+    hopMs: 5, windowMs: 1000, searchMs: 300, halfSearchMs: 40, sharpAtMs: 20,
+    floorHistoryMs: 3000, floorPercentile: 5, floorMarginDb: 6, floorMinDb: -70, gateStdDb: 2,
+    minPeak: 0.95, minRatio: 1.2, minSharpness: 0.03, halfTolMs: 10, interpolate: true,
+  })
+  assert.deepEqual({ ...sync.CADENCE }, { beforeLockMs: 50, afterLockMs: 200, priorLeadMs: 200, widenAfterTicks: 10, wideSearchMs: 600 })
+  assert.equal(sync.HIGH_PASS_HZ, 30)
+  assert(Object.isFrozen(sync.DEFAULTS) && Object.isFrozen(sync.CADENCE))
 })
 
 test('sync: the received hop is the oracle\'s round(0.005 * rate), half to even', () => {
@@ -707,7 +752,7 @@ test('sync: Web Audio floats are measured x 32768 (a level on a byte boundary te
 test('sync: with the causal 30 Hz high-pass the offset stays within 0.5 ms of the oracle\'s (zero-phase) one', () => {
   for (const c of ORACLE.cases.filter(k => k.oracle_hp)) {
     const o = c.oracle_hp
-    const r = sync.align(oracleReceivedDb(c), oracleReference(c), c.prior_index)
+    const r = sync.align(oracleReceivedDb(c), oracleReference(c), c.prior_index, oracleParams(c))
     assert.equal(r.checks.accepted, o.accepted, c.name)
     if (o.offset_ms !== null) assert(Math.abs(r.offsetMs - o.offset_ms) <= 0.5, `${c.name}: ${r.offsetMs} vs ${o.offset_ms}`)
   }
@@ -904,7 +949,7 @@ test('tracker: a chained turn is spliced onto the turn before it and locks at pr
  * A chained Y is announced while X still plays and, as on the page, gets the chain's place as its
  * onset prior (analyze() places a chained turn from the end of the turn before it).
  */
-function twoTurns({ xMs, gapMs, y = {}, xEnd = {}, abortX = false }) {
+function twoTurns({ xMs, gapMs, y = {}, xEnd = {}, abortX = false, endThenAbortX = false }) {
   const cut = ms(xMs)
   const pcmX = ORACLE_PCM.subarray(0, cut)
   const pcmY = ORACLE_PCM.subarray(cut)
@@ -918,6 +963,7 @@ function twoTurns({ xMs, gapMs, y = {}, xEnd = {}, abortX = false }) {
   const tracker = runTracker(track, [
     { pos: arrival, data: mx.start }, ...mx.envelopes.map(d => ({ pos: arrival, data: d })),
     { pos: first + cut, data: abortX ? mx.abort : mx.end },
+    ...(endThenAbortX ? [{ pos: first + cut + 1, data: mx.abort }] : []),
     { pos: yArrival, data: my.start }, ...my.envelopes.map(d => ({ pos: yArrival, data: d })),
     ...(y.prev ? [{ pos: yArrival, onsetPrior: { id: TURN_Y, pos: yFirst } }] : []),
   ])
@@ -940,6 +986,16 @@ test('tracker: never spliced on gap_ms 0 for an unchained turn, nor onto an abor
   const aborted = twoTurns({ xMs: 1000, gapMs: 200, y: { gapMs: 200 }, abortX: true }).tracker.summary()[TURN_Y]
   assert.equal(aborted.splice, null)
   assert(aborted.ticks.length > 0)
+  // Where the abort flag alone decides: X has its turn_end (pcm_ms known) and then a turn_abort,
+  // and a chained Y, whose join does not need X's turn_end at all.
+  const endedThenAborted = twoTurns({ xMs: 1000, gapMs: 200, y: { gapMs: 200 }, endThenAbortX: true }).tracker.summary()[TURN_Y]
+  assert.equal(endedThenAborted.splice, null)
+  const chainedAfterAbort = twoTurns({ xMs: 1000, gapMs: 0, y: { prev: TURN_X, prevPcmMs: 1000 }, abortX: true }).tracker.summary()[TURN_Y]
+  assert.equal(chainedAfterAbort.splice, null)
+  assert(chainedAfterAbort.ticks.length > 0)
+  // ... and the same two without the abort are spliced.
+  assert.equal(twoTurns({ xMs: 1000, gapMs: 200, y: { gapMs: 200 } }).tracker.summary()[TURN_Y].splice.kind, 'gap')
+  assert.equal(twoTurns({ xMs: 1000, gapMs: 0, y: { prev: TURN_X, prevPcmMs: 1000 } }).tracker.summary()[TURN_Y].splice.kind, 'chained')
 })
 
 test('tracker: a chained turn joins at its prev_turn_pcm_ms (1498 ms, off the grid: index 300), not at the turn_end before it (1500 ms)', () => {
