@@ -40,6 +40,7 @@ from pipecat.tests.utils import SleepFrame, run_test
 from pipecat_spatialreal import SpatialRealAvatarProcessor
 from pipecat_spatialreal.driven import DrivenIngress
 from pipecat_spatialreal.fingerprint import Envelope
+from pipecat_spatialreal.processor import _Turn
 
 
 def make_proc(fake, **kw):
@@ -2745,3 +2746,59 @@ async def test_the_fill_is_plain_output_audio_on_the_turns_track(fake):
     assert all(len(f.audio) == CHUNK_BYTES and not any(f.audio) for f in fill)
     assert {f.transport_destination for f in fill} == {"voice"}
     assert {f.sample_rate for f in fill} == {24000} and {f.num_channels for f in fill} == {1}
+
+
+async def test_an_end_frame_waiting_for_the_last_turn_stops_the_fill(fake):
+    """An EndFrame that arrives while the last turn still plays waits for that turn to end, as
+    before, and no fill is started behind it: the pipeline ends at the turn's end."""
+    proc = make_proc(fake, lead_ms=1000)  # the turn drains a second before it has played out
+    pushed = record_pushes(proc)
+    await play(
+        proc,
+        [
+            link_up(proc),
+            TTSStartedFrame(),
+            tone_frame(600),
+            TTSStoppedFrame(),
+            Until(
+                "the turn to drain", lambda: any(isinstance(f, TTSStoppedFrame) for _, f in pushed)
+            ),
+        ],
+    )  # the EndFrame comes now, long before the turn has played out
+    order = [f for _, f in pushed]
+    end = next(i for i, f in enumerate(order) if isinstance(f, EndFrame))
+    assert isinstance(order[end - 1], RTVIServerMessageFrame) and "turn_end" in order[end - 1].data
+    assert fill_frames(order) == [] and order[end + 1 :] == []
+
+
+class _Clock:
+    """A loop stand-in whose time a test sets."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def time(self):
+        return self.now
+
+
+def test_an_unchained_turn_starts_with_one_chunk_of_its_quiet_left(fake):
+    """The fill already holds the quiet the rule asks for when the turn is ready, two chunks
+    ahead of the room: the turn waits until one chunk of it is left, as a stall resumes, rather
+    than going out up to the lead early. The clock is stepped by hand: in a pipeline the fill's
+    own pacing hides the difference except inside one chunk."""
+    proc = make_proc(fake)  # min_silence_ms 150 + silence_chunk_ms 40: 190 ms of quiet
+    proc._loop = _Clock(10.0)
+    proc._stall_ahead_s = CHUNK_MS / 1000
+    turn = _Turn(TTSStartedFrame(), rate=24000, chunk_bytes=CHUNK_BYTES, tracker=None, sends=True)
+    turn.ready = True
+    # The last sound ended at 10.0; 200 ms of fill is queued behind it, without a break.
+    proc._sound_end, proc._playout_end, proc._fed = 10.0, 10.2, True
+    proc._loop.now = 10.12  # the fill's last chunk just went: two chunks left to play
+    deadlines = []
+    assert proc._may_start(turn, deadlines) is False
+    assert deadlines == [pytest.approx(10.16)]
+    proc._loop.now = 10.16  # one chunk left
+    assert proc._may_start(turn, []) is True
+    proc._sound_end, proc._playout_end, proc._loop.now = 10.0, 10.12, 10.08  # 120 ms: too little
+    deadlines = []
+    assert proc._may_start(turn, deadlines) is False and deadlines == [pytest.approx(10.12)]
