@@ -2984,3 +2984,248 @@ async def test_a_cancel_frame_during_the_fill_stops_it_and_ends_the_pipeline(fak
     fill = fill_frames(order)
     assert fill and isinstance(order[-1], CancelFrame)  # nothing after it, the fill least of all
     assert quiet_ms(fill) < FILL_CAP_MS
+
+
+# --- Post-merge follow-ups: the envelope fed as chunks join the hold (R68a), and the playout
+# --- clamped on an interruption that aborts no announced turn (R68b).
+
+
+async def test_the_release_of_a_long_held_run_does_no_fingerprinting(fake, monkeypatch):
+    """R68a: 12 s held whole at 48 kHz (one turn_envelope's worth) is fingerprinted as it joins
+    the hold, so between the decision to start the turn and its first audio push nothing is fed to
+    the envelope (at release it cost ~41 ms, long enough to dry the room after the start). The
+    message is still the one run, from index 0, of the bytes the room gets."""
+    rate = 48000
+    fake.first_segment_ms = 2000  # the whole turn is in hand when its release starts
+    proc = make_proc(fake, hold_cap_s=5.0)
+    pushed = record_pushes(proc)
+    events = []  # ("feed", bytes) | ("start",) | ("audio",), in the order they happened
+    feed = Envelope.feed
+
+    def counted(self, pcm):
+        events.append(("feed", len(pcm)))
+        return feed(self, pcm)
+
+    monkeypatch.setattr(Envelope, "feed", counted)
+    may_start = proc._may_start
+
+    def deciding(turn, deadlines):
+        ok = may_start(turn, deadlines)
+        if ok:
+            events.append(("start",))
+        return ok
+
+    proc._may_start = deciding
+
+    @proc.event_handler("on_before_push_frame")
+    async def _audio(processor, frame):
+        if isinstance(frame, TTSAudioRawFrame):
+            events.append(("audio",))
+
+    down, _ = await play(
+        proc,
+        [
+            link_up(proc),
+            TTSStartedFrame(),
+            *[tone_frame(100, rate=rate) for _ in range(120)],
+            TTSStoppedFrame(),
+            tts_audio_released(pushed),
+            InterruptionFrame(),  # nothing more to see: no need to play 12 s out
+            interruption_pushed(pushed),
+        ],
+        params=PipelineParams(audio_out_sample_rate=rate),
+    )
+    start = events.index(("start",))
+    first_audio = events.index(("audio",), start)
+    fed_meanwhile = sum(e[1] for e in events[start:first_audio] if e[0] == "feed")
+    assert fed_meanwhile == 0, f"{fed_meanwhile} B fingerprinted between the start and the audio"
+    assert sum(e[1] for e in events[:start] if e[0] == "feed") == 2 * rate * 12
+    (run,) = envelope_runs(down, req_of(down))
+    values = base64.b64decode(run["values"])
+    assert run["first_index"] == 0 and len(values) == values_for(rate * 12, rate)
+    assert values == Envelope(rate).feed(pcm16(sine(100, rate)) * 120)
+
+
+async def test_values_queued_in_the_hold_go_with_an_interrupted_turn(fake):
+    """R68a: a turn held whole is fingerprinted before it is announced; interrupted then, none of
+    those values is ever sent, and the next turn's envelope starts again from index 0."""
+    fake.first_segment_ms = 10_000  # never ready: the interruption finds it held
+    proc = make_proc(fake, hold_cap_s=30.0)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
+            link_up(proc),
+            TTSStartedFrame(),
+            tone_frame(600),  # still open: no end flush brings its animation back
+            audio_at_driveningress(fake),
+            Until(
+                "the hold to be fingerprinted",
+                lambda: proc._turns and proc._turns[0].envelope.index,
+            ),
+            InterruptionFrame(),
+            interruption_pushed(pushed),
+            Do(lambda: setattr(fake, "first_segment_ms", 200)),
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            message_pushed(pushed, "turn_end"),
+        ],
+    )
+    (start,) = messages(down, "turn_start")  # the first turn was never announced
+    runs = messages(down, "turn_envelope")
+    assert runs and {r["turn_id"] for r in runs} == {start["turn_id"]}
+    (audio,) = turn_audio(down)
+    assert envelope_values(down, start["turn_id"]) == fingerprint(audio)
+    assert_turn_lifecycle(down)
+
+
+def interrupted_at(proc):
+    """Wrap ``proc._interrupt`` to record (loop time, _playout_end, _sound_end) on entry and the
+    two after it returns."""
+    seen = {}
+    interrupt = proc._interrupt
+
+    async def recorded(frame, direction):
+        seen["at"] = asyncio.get_running_loop().time()
+        seen["before"] = (proc._playout_end, proc._sound_end)
+        await interrupt(frame, direction)
+        seen["after"] = (proc._playout_end, proc._sound_end)
+
+    proc._interrupt = recorded
+    return seen
+
+
+async def test_a_barge_in_during_the_fill_lets_the_next_turn_lead_and_end_on_time(fake):
+    """R68b: an interruption while only the fill plays aborts no announced turn, but the transport
+    drops the fill it holds (up to two chunks). The playout end is clamped to now, so a turn
+    released right after it has its full lead and its turn_end goes when its audio has played."""
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    seen = interrupted_at(proc)
+    async with heartbeat() as ticks:
+        down, _ = await play(
+            proc,
+            [
+                link_up(proc),
+                TTSStartedFrame(),
+                tone_frame(300),
+                TTSStoppedFrame(),
+                message_pushed(pushed, "turn_end"),
+                SleepFrame(0.2),  # the fill is under way: one or two chunks queued
+                InterruptionFrame(),
+                interruption_pushed(pushed),
+                TTSStartedFrame(),  # ready within milliseconds: released at once
+                tone_frame(1000),
+                TTSStoppedFrame(),
+                message_pushed(pushed, "turn_end", count=2),
+            ],
+        )
+    before_end, _ = seen["before"]
+    assert before_end > seen["at"] + 0.01  # fill was queued when the barge-in came
+    assert seen["after"][0] == pytest.approx(seen["at"], abs=0.002)  # and is dropped
+    _, second = messages(down, "turn_start")
+    assert second["gap_ms"] == 0 and second["prev_turn_id"] == ""
+    barge = next(i for i, (_, f) in enumerate(pushed) if isinstance(f, InterruptionFrame))
+    audio = [
+        (t, f) for i, (t, f) in enumerate(pushed) if i > barge and isinstance(f, TTSAudioRawFrame)
+    ]
+    assert len(audio) == chunks(1000)
+    t2 = audio[0][0]
+    ahead = queued_ahead(audio)  # the room is dry at the first push: the fill was dropped
+    assert max(ahead) <= LEAD_S + 0.005
+    end2 = turn_end_time(pushed, 2)
+    assert end2 >= t2 + padded(1000) / 1000 - 0.002
+    # Turn 2 is normally released while the dropped fill would still have played (t2 < the old
+    # playout end), which is what tells a clamped playout end from a stale one; a slow backend can
+    # make it ready later, when both rules agree and the checks below still hold.
+    if not held_up(ticks, seen["at"], end2):
+        # The lead fills to lead_ms (a late wake-up only lowers a sample, so the max carries it),
+        # and turn_end goes when the room has played the turn, not when the dropped fill would end.
+        assert max(ahead) >= LEAD_S - 0.01
+        assert end2 <= t2 + padded(1000) / 1000 + 0.015
+    assert_turn_lifecycle(down)
+
+
+async def test_a_barge_in_does_not_clamp_an_uninterruptible_tail_short(fake):
+    """R68b: the transport keeps uninterruptible audio. A barge-in while an uninterruptible turn's
+    last chunks are still queued, with the fill already behind them, drops the fill only: the
+    playout end is clamped to the tail's end, not to now."""
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    seen = interrupted_at(proc)
+    turn1 = {}
+
+    def keep_turn1():
+        turn1["turn"] = proc._turns[0]
+
+    async def until_near_its_end():
+        turn = turn1["turn"]
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(max(0.0, turn.playout_end - 0.025 - loop.time()))
+
+    await play(
+        proc,
+        [
+            link_up(proc),
+            uninterruptible(TTSStartedFrame()),
+            *[uninterruptible(tone_frame(100)) for _ in range(3)],
+            uninterruptible(TTSStoppedFrame()),
+            Until("turn 1 to be held", lambda: bool(proc._turns)),
+            Do(keep_turn1),
+            Until("turn 1 to drain", lambda: turn1["turn"].drained),
+            Do(until_near_its_end),  # the fill went 40 ms before its end, behind its tail
+            InterruptionFrame(),
+            interruption_pushed(pushed),
+            message_pushed(pushed, "turn_end"),
+        ],
+    )
+    tail_end = turn1["turn"].playout_end
+    at = seen["at"]
+    before_end, before_sound = seen["before"]
+    after_end, after_sound = seen["after"]
+    assert before_sound == pytest.approx(tail_end, abs=1e-6)  # the last sound is the tail
+    fill = fill_frames([f for _, f in pushed])
+    assert fill and before_end > max(at, tail_end) + 0.01  # fill queued behind it
+    # The fill is dropped, the uninterruptible tail is not: the room plays until its end.
+    assert after_end == pytest.approx(max(at, tail_end), abs=0.002)
+    assert after_sound == pytest.approx(tail_end, abs=1e-6)
+    if at >= tail_end - 0.002:
+        # Normally the barge-in comes ~25 ms before the tail's end, so a clamp to now would cut
+        # the tail short; on a loaded machine it can come after it, and then both rules agree.
+        pytest.skip("the barge-in came after the tail had played: nothing told the rules apart")
+
+
+async def test_a_barge_in_does_not_clamp_uninterruptible_stall_silence_short(fake):
+    """R68b: stall silence of an uninterruptible turn is uninterruptible too, so the transport keeps
+    it: a barge-in while that silence is the last audio released drops nothing, and the playout end
+    stays where the silence ends."""
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    seen = interrupted_at(proc)
+    await play(
+        proc,
+        [
+            link_up(proc),
+            uninterruptible(TTSStartedFrame()),
+            uninterruptible(tone_frame(300)),
+            tts_audio_released(pushed),
+            SleepFrame(0.6),  # the TTS falls behind: stall silence bridges it, a chunk ahead
+            InterruptionFrame(),
+            interruption_pushed(pushed),
+            uninterruptible(tone_frame(200)),
+            uninterruptible(TTSStoppedFrame()),
+            message_pushed(pushed, "turn_end"),
+        ],
+    )
+    at = seen["at"]
+    before_end, before_sound = seen["before"]
+    after_end, after_sound = seen["after"]
+    barge = next(i for i, (_, f) in enumerate(pushed) if isinstance(f, InterruptionFrame))
+    last = next(f for _, f in reversed(pushed[:barge]) if isinstance(f, OutputAudioRawFrame))
+    assert type(last) is OutputAudioRawFrame and not any(last.audio)  # stall silence
+    assert not last.interruptible
+    assert after_end == pytest.approx(before_end, abs=1e-6)  # nothing of it dropped
+    assert after_sound == pytest.approx(before_sound, abs=1e-6)
+    if before_end <= at + 0.002:
+        pytest.skip("the room had run dry at the barge-in: nothing queued to keep or drop")

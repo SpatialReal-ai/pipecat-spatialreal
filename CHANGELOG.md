@@ -43,6 +43,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The sdist leaves out `hack/` and the paired captures, so it stays at about 4 MB; the wheel is
   unchanged. The tests that need them skip without them.
+- The probe page places a turn that follows silence the processor released (`gap_ms` > 0, the
+  turn before it ended and was not aborted) at the previous turn's place plus its `pcm_ms` plus
+  `gap_ms` until its first lock, as the web SDK does (an onset prior still takes over); it used the
+  arrival of `turn_start` plus 200 ms, 78-182 ms off on the splice capture's gap turns that locked
+  before their onset. `replay_capture.py` reports both priors and replays with the new one on
+  `--r72-prior`.
+- The envelope is computed as a turn's chunks join its hold, not when its release starts: a long run
+  held whole (tens of ms of work: 12 s at 48 kHz measured 20-41 ms) no longer delays the turn's
+  first audio after the decision to start it. The `turn_envelope` messages are the same bytes, sent
+  at the same points.
+- An interruption that aborts no announced turn (only the fill was playing) now also moves the
+  processor's playout clock back to the moment of the interruption, as the transport drops the
+  fill it held (up to 80 ms): the next turn gets its full lead and its `turn_end` goes when its
+  audio has played. On any interruption the clock is never moved back past uninterruptible audio
+  already released, which the transport keeps.
 
 ## [0.1.0] - 2026-11-03
 
