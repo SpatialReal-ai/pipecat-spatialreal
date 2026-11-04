@@ -824,6 +824,8 @@ async def test_audio_for_another_track_keeps_its_place_and_is_not_counted(fake):
     assert audio[chunks(200)] is music and len(audio) == 2 * chunks(200) + 1
     assert fake.received_audio_ms(req_of(down)) == 400
     assert messages(down, "turn_end")[0]["pcm_ms"] == 400.0
+    # Nor is it described: the turn's envelope is that of its own track's audio only.
+    assert envelope_values(down, req_of(down)) == fingerprint([f for f in audio if f is not music])
 
 
 async def test_stereo_tts_audio_is_downmixed(fake):
@@ -2855,3 +2857,130 @@ def test_a_turn_that_waited_for_its_quiet_waits_for_all_of_it_once_the_room_runs
     fresh = _Turn(TTSStartedFrame(), rate=24000, chunk_bytes=CHUNK_BYTES, tracker=None, sends=True)
     proc._loop.now = 10.16
     assert proc._may_start(fresh, []) is True  # min_silence_ms already there when it came
+
+
+# --- Fix round 1: the fill's state across several turns, a dry room, a sound after the cap, and
+# --- a CancelFrame.
+
+
+async def test_each_gap_is_its_own_fill_not_the_sum_of_the_earlier_ones(fake):
+    """Three turns, each starting 50 ms after the one before has played out: every unchained turn
+    reports the fill right before it (200 ms at the defaults), not that plus earlier gaps."""
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+
+    def after_turn(n, ms=50):
+        async def wait():
+            t, _ = first_audio_pushes(pushed)[n - 1]
+            loop = asyncio.get_running_loop()
+            await asyncio.sleep(max(0.0, t + padded(300) / 1000 + ms / 1000 - loop.time()))
+
+        return Do(wait)
+
+    def turn(n):
+        return [
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            tts_audio_released(pushed, count=chunks(300) * (n - 1) + 1),
+        ]
+
+    async with heartbeat() as ticks:
+        down, _ = await play(
+            proc,
+            [
+                link_up(proc),
+                *turn(1),
+                after_turn(1),
+                *turn(2),
+                after_turn(2),
+                *turn(3),
+                message_pushed(pushed, "turn_end", count=3),
+            ],
+        )
+    starts = messages(down, "turn_start")
+    assert [s["prev_turn_id"] for s in starts] == ["", "", ""]
+    firsts = [t for t, _ in first_audio_pushes(pushed)]
+    assert starts[0]["gap_ms"] == 0
+    for n in (2, 3):
+        if held_up(ticks, firsts[n - 2], firsts[n - 1]):  # the room may have run dry (accepted)
+            assert starts[n - 1]["gap_ms"] in (0, EMITTED_GAP_MS)
+        else:
+            assert starts[n - 1]["gap_ms"] == EMITTED_GAP_MS, n
+    assert_turn_lifecycle(down)
+
+
+def test_a_fill_push_that_finds_the_room_dry_reports_no_gap(fake):
+    """The fill went on but the room ran dry before one of its chunks (a loop held up past it):
+    the quiet is no longer all fill, so the turn after it reports no gap."""
+    proc = make_proc(fake)
+    proc._loop = _Clock(10.0)
+    prev = _Turn(TTSStartedFrame(), rate=24000, chunk_bytes=CHUNK_BYTES, tracker=None, sends=True)
+    prev.finished, prev.playout_end = True, 10.0
+    proc._chain = prev
+    turn = _Turn(TTSStartedFrame(), rate=24000, chunk_bytes=CHUNK_BYTES, tracker=None, sends=True)
+    proc._queue_playout(0.0)  # the previous turn's last sample: the last sound ends at 10.0
+    proc._queue_playout(CHUNK_MS / 1000, fill=True)  # one chunk of fill, right behind it
+    proc._fill_bytes += CHUNK_BYTES
+    assert proc._gap_before(turn) == CHUNK_MS  # all fill so far: the gap is known
+    proc._loop.now = 10.1  # held up: the room ran dry at 10.04
+    proc._queue_playout(CHUNK_MS / 1000, fill=True)
+    proc._fill_bytes += CHUNK_BYTES
+    assert proc._playout_end > proc._loop.now  # fed again from here on...
+    assert proc._gap_before(turn) == 0  # ...but the gap holds an idle of unknown length
+
+
+async def test_a_sound_after_the_fill_has_stopped_starts_no_fill(fake):
+    """The fill stopped at its cap. A sound that plays after that (a chime, no turn) does not
+    start it again: it follows a turn's end only."""
+    chime = OutputAudioRawFrame(
+        audio=pcm16(sine(100, 24000, 880)), sample_rate=24000, num_channels=1
+    )
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
+            link_up(proc),
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            message_pushed(pushed, "turn_end"),
+            SleepFrame(1.5),  # the fill has run its second and stopped
+            chime,  # straight through: no turn holds it
+            Until("the chime to go", lambda: any(f is chime for _, f in pushed)),
+            TTSStartedFrame(),  # wakes the release task; no audio yet, so nothing plays
+            SleepFrame(0.4),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            message_pushed(pushed, "turn_end", count=2),
+        ],
+    )
+    _, _, between = between_turns(down)
+    at = next(i for i, f in enumerate(between) if f is chime)
+    assert quiet_ms(between[:at]) <= FILL_CAP_MS  # the fill after turn 1, capped
+    assert between[at + 1 :] == []  # and nothing after the chime
+    assert_turn_lifecycle(down)
+
+
+async def test_a_cancel_frame_during_the_fill_stops_it_and_ends_the_pipeline(fake):
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    await play(
+        proc,
+        [
+            link_up(proc),
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            message_pushed(pushed, "turn_end"),
+            SleepFrame(0.3),  # the fill is under way
+            CancelFrame(),
+            SleepFrame(0.5),
+        ],
+        send_end_frame=False,
+    )  # play() returns only once the pipeline has ended
+    order = [f for _, f in pushed]
+    fill = fill_frames(order)
+    assert fill and isinstance(order[-1], CancelFrame)  # nothing after it, the fill least of all
+    assert quiet_ms(fill) < FILL_CAP_MS
