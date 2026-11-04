@@ -2377,7 +2377,8 @@ async def test_unchained_turn_emits_its_gap_as_silence_and_reports_gap_ms(fake):
     stopped, started, gap = between_turns(down)
     t2 = next(t for t, f in pushed if f is turn_audio(down)[1][0])
     assert first["gap_ms"] == 0
-    if held_up(ticks, t2 - 1.0, t2):  # the room may have run dry (an accepted limit)
+    held = held_up(ticks, t2 - 1.0, t2)
+    if held:  # the room may have run dry (an accepted limit), even before any of the quiet
         assert second["gap_ms"] in (0, quiet_ms(gap))
     else:
         assert second["gap_ms"] == quiet_ms(gap) == EMITTED_GAP_MS
@@ -2393,9 +2394,10 @@ async def test_unchained_turn_emits_its_gap_as_silence_and_reports_gap_ms(fake):
         if isinstance(f, RTVIServerMessageFrame)
         and f.data.get("turn_start", {}).get("turn_id") == second["turn_id"]
     )
-    assert down.index(gap[-1]) < announce < started
+    assert all(down.index(g) < announce for g in gap) and announce < started
     # The silence went out without a gap of its own: pushed one chunk ahead, up to turn 2's audio.
-    assert_bridged([t for t, f in pushed if any(f is g for g in gap)], t2, ticks)
+    if not held:
+        assert_bridged([t for t, f in pushed if any(f is g for g in gap)], t2, ticks)
     # Neither turn's envelope or inference stream has it.
     assert envelope_values(down, second["turn_id"]) == fingerprint(turn_audio(down)[1])
     assert fake.received_audio_ms(second["turn_id"]) == padded(300)
