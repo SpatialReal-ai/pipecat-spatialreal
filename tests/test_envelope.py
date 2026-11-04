@@ -13,6 +13,7 @@ from pipecat_spatialreal.envelope import (
     to_dict,
     turn_abort,
     turn_end,
+    turn_envelope,
     turn_onsets,
     turn_start,
 )
@@ -40,6 +41,7 @@ def test_turn_start_shape():
             "prev_turn_id": "",
             "prev_turn_pcm_ms": 0.0,
             "degraded": False,
+            "gap_ms": 0.0,
         },
     }
 
@@ -86,8 +88,15 @@ def test_turn_start_chains_previous_turn_and_keeps_empty_onsets():
             "prev_turn_id": "r1",
             "prev_turn_pcm_ms": 2400.0,
             "degraded": True,
+            "gap_ms": 0.0,
         },
     }
+
+
+def test_turn_start_carries_a_non_zero_gap_ms():
+    d = turn_start("r2", sample_rate=16000, onsets_ms=[], gap_ms=312.5)
+    assert d["turn_start"]["gap_ms"] == 312.5
+    assert ParseDict(d, avatar_pb2.AvatarMessage()).turn_start.gap_ms == 312.5
 
 
 def test_turn_onsets_shape():
@@ -180,3 +189,54 @@ def test_frames_rejects_a_chunk_size_below_one(bad):
     # Without the guard a negative size would silently return one empty chunk and drop the wire.
     with pytest.raises(ValueError, match="max_chunk_bytes"):
         frames("r1", 0, b"abc", end=False, max_chunk_bytes=bad)
+
+
+def test_turn_envelope_keys_and_base64():
+    values = bytes([0, 1, 2, 250, 255])
+    msgs = turn_envelope("r1", 7, values)
+    assert msgs == [
+        {
+            "tag": TAG,
+            "turn_envelope": {
+                "turn_id": "r1",
+                "first_index": 7,
+                "hop_ms": 5,
+                "window_ms": 10,
+                "values": base64.b64encode(values).decode(),
+            },
+        }
+    ]
+
+
+def test_turn_envelope_carries_custom_hop_and_window():
+    (msg,) = turn_envelope("r1", 0, b"\x01", hop_ms=10, window_ms=20)
+    assert (msg["turn_envelope"]["hop_ms"], msg["turn_envelope"]["window_ms"]) == (10, 20)
+
+
+def test_turn_envelope_chunks_at_2400_bytes():
+    values = bytes(i % 256 for i in range(5000))
+    msgs = turn_envelope("r1", 0, values)
+    assert [m["turn_envelope"]["first_index"] for m in msgs] == [0, 2400, 4800]
+    chunks = [base64.b64decode(m["turn_envelope"]["values"]) for m in msgs]
+    assert [len(c) for c in chunks] == [2400, 2400, 200]
+    assert b"".join(chunks) == values
+
+
+def test_turn_envelope_first_index_offsets_every_chunk():
+    msgs = turn_envelope("r1", 100, bytes(2401))
+    assert [m["turn_envelope"]["first_index"] for m in msgs] == [100, 2500]
+
+
+def test_turn_envelope_empty_values_gives_no_messages():
+    assert turn_envelope("r1", 0, b"") == []
+
+
+def test_turn_envelope_round_trips_through_the_generated_message():
+    values = bytes(i % 256 for i in range(2500))
+    msgs = turn_envelope("r1", 40, values, hop_ms=5, window_ms=10)
+    parsed = [ParseDict(m, avatar_pb2.AvatarMessage()) for m in msgs]
+    assert all(p.WhichOneof("payload") == "turn_envelope" for p in parsed)
+    assert [p.turn_envelope.first_index for p in parsed] == [40, 2440]
+    assert all(p.turn_envelope.turn_id == "r1" for p in parsed)
+    assert all((p.turn_envelope.hop_ms, p.turn_envelope.window_ms) == (5, 10) for p in parsed)
+    assert b"".join(p.turn_envelope.values for p in parsed) == values

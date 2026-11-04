@@ -56,6 +56,7 @@ def turn_start(
     prev_turn_id: str = "",
     prev_turn_pcm_ms: float = 0.0,
     degraded: bool = False,
+    gap_ms: float = 0.0,
 ) -> dict[str, Any]:
     """Build the message that announces a bot turn.
 
@@ -68,6 +69,8 @@ def turn_start(
             empty string.
         prev_turn_pcm_ms: Exact PCM length of ``prev_turn_id`` in ms; 0 when that is empty.
         degraded: True when no animation arrived in time, so the client plays audio only.
+        gap_ms: Silence in ms the processor measured between the previous turn's end and this
+            turn's first sample; 0 when there is none.
 
     Returns:
         The ``turn_start`` envelope, with ``fps`` set to :data:`FPS`.
@@ -83,6 +86,7 @@ def turn_start(
                 prev_turn_id=prev_turn_id,
                 prev_turn_pcm_ms=prev_turn_pcm_ms,
                 degraded=degraded,
+                gap_ms=gap_ms,
             ),
         )
     )
@@ -105,6 +109,47 @@ def turn_onsets(turn_id: str, onsets_ms: list[float]) -> dict[str, Any]:
             turn_onsets=avatar_pb2.TurnOnsets(turn_id=turn_id, onsets_ms=onsets_ms),
         )
     )
+
+
+def turn_envelope(
+    turn_id: str,
+    first_index: int,
+    values: bytes,
+    *,
+    hop_ms: int = 5,
+    window_ms: int = 10,
+) -> list[dict[str, Any]]:
+    """Split a run of audio-envelope values into ``turn_envelope`` messages that each fit one app message.
+
+    The values are one byte each, so a chunk of ``n`` bytes covers ``n`` consecutive indices.
+
+    Args:
+        turn_id: The driveningress req_id of the turn.
+        first_index: 0-based index, counted from the turn's first released sample, of
+            ``values[0]``.
+        values: The envelope values, one byte per index, contiguous and in order.
+        hop_ms: Spacing in ms between consecutive values.
+        window_ms: Length in ms of the window each value is measured over.
+
+    Returns:
+        One envelope per :data:`MAX_CHUNK_BYTES` of ``values`` in index order, each with its own
+        ``first_index``; an empty list when ``values`` is empty.
+    """
+    return [
+        to_dict(
+            avatar_pb2.AvatarMessage(
+                tag=TAG,
+                turn_envelope=avatar_pb2.TurnEnvelope(
+                    turn_id=turn_id,
+                    first_index=first_index + offset,
+                    hop_ms=hop_ms,
+                    window_ms=window_ms,
+                    values=values[offset : offset + MAX_CHUNK_BYTES],
+                ),
+            )
+        )
+        for offset in range(0, len(values), MAX_CHUNK_BYTES)
+    ]
 
 
 def frames(
