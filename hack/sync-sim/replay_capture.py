@@ -16,7 +16,11 @@ What it does, per turn:
   unconditionally), else ``turn_start`` + 200 ms, and after the first lock the last accepted
   position; after 10 held ticks with speech before a lock the search widens to +/- 600 ms around
   the onset prior; the ticks stop once the 1 s window lies past the turn's end (``turn_end`` known
-  by then) or 1 s after ``turn_abort``. The reference is the one the page correlated (spliced onto
+  by then) or 1 s after ``turn_abort``. The replay uses the turn's final onset prior (the page's
+  ``onset_prior_pos``) from the first tick on, while live the page has it only once the onset has
+  been heard, so its first ticks use ``turn_start`` + 200 ms; on a borderline turn the live first
+  lock can differ (Daily fixture turn 0: 125 ms live, 338 ms replayed). ``page first lock`` prints
+  the live one. The reference is the one the page correlated (spliced onto
   the previous turn when the page spliced it). The received envelope is the oracle's: the whole
   track high-passed at 30 Hz with the zero-phase filter (:func:`dsp.envelope_db`, ``dc_block``);
   ``--causal`` uses the browser's first-order IIR instead (sync.js ``ReceivedEnvelope``).
@@ -450,7 +454,8 @@ def main():
     )
     hdr = (
         "| turn | kind | ref ms | rx ms | truth peak | drift ms | held/acc | first lock ms | offset ms "
-        "| prior err ms | err p50 | err p95 | err max | false | err local p95 | page acc | page err p95 | page false |"
+        "| prior err ms | err p50 | err p95 | err max | false | err local p95 | page first lock ms | page acc "
+        "| page err p95 | page false |"
     )
     print(hdr)
     print("|" + "|".join(["---"] * (hdr.count("|") - 1)) + "|")
@@ -528,6 +533,11 @@ def main():
             first_lock = (k["pos"] - (k["l"] * hop + o0 * fs / 1000)) / fs * 1000
         offset = None if not acc else (acc[-1]["l"] * hop - t["start_tap"]) / fs * 1000
         page_acc = [k for k in t["ticks"] if k["accepted"]]
+        # the page's own first lock, same definition (its ticks are in capture.sync.json)
+        page_first_lock = None
+        if page_acc:
+            k = page_acc[0]
+            page_first_lock = (k["pos"] - (k["first_sample_pos"] + o0 * fs / 1000)) / fs * 1000
         page_err = (
             [abs(k["first_sample_pos"] / hop - l_truth) * HOP_MS for k in page_acc]
             if l_truth is not None
@@ -566,6 +576,7 @@ def main():
             "phrase_l": [(a, b, la, pk) for a, b, la, pk in phrases],
             "local_errors_ms": local,
             "onsets": onset_rows,
+            "page_first_lock_ms": page_first_lock,
             "page_accepted": len(page_acc),
             "page_errors_ms": page_err,
             "page_false": sum(e > FALSE_LOCK_MS for e in page_err),
@@ -582,7 +593,7 @@ def main():
         print(
             f"| {tid} | {','.join(kind) or '-'} | {res['ref_ms']} | {fmt(rx_ms, 0)} | {fmt(truth_pk, 3)} "
             f"| {fmt(drift, 1)} | {len(held)}/{len(acc)} | {fmt(first_lock, 0)} | {fmt(offset, 1)} | {fmt(prior_err, 1)} | {fmt(pct(errs, 50), 2)} "
-            f"| {fmt(pct(errs, 95), 2)} | {fmt(max(errs) if errs else None, 2)} | {false} | {fmt(pct(local, 95), 2)} | {len(page_acc)} "
+            f"| {fmt(pct(errs, 95), 2)} | {fmt(max(errs) if errs else None, 2)} | {false} | {fmt(pct(local, 95), 2)} | {fmt(page_first_lock, 0)} | {len(page_acc)} "
             f"| {fmt(pct(page_err, 95), 2)} | {res['page_false']} |"
         )
         if args.features and l_truth is not None:

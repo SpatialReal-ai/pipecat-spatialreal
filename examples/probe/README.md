@@ -321,15 +321,36 @@ Against the design's minimum (backend-ng `2026-11-03-pipecat-sync-fingerprint-de
 the p95 error is 5.00 ms on Daily (at the limit; 5.02 with the browser's causal high-pass) and 1.24 ms
 on LiveKit. The late first locks are turns whose first second is mostly the silence before the turn:
 the candidate is right (peak 0.99 or more, within 7 ms of the whole-turn alignment) but its
-sharpness is under 0.03 or its peak ratio under 1.2. Until the lock the frames follow the onset prior, which was within 7 ms of the
-truth on every turn here. The Daily p95 comes from the two greetings at the start of the call, where
+sharpness is under 0.03 or its peak ratio under 1.2. Until the lock the frames follow the onset
+prior, which was within 7 ms of the truth on every turn here. The Daily p95 comes from the two greetings at the start of the call, where
 the received audio moved by up to 10 ms inside the turn (the jitter buffer settling); against each
 phrase's own alignment the p95 is 1.8 ms. Lowering the thresholds would meet the first-lock minimum on
 these captures, but every relaxation tried re-opens false locks on the spike's impaired simulation
-(sharpness 0.025: one at 21.5 ms; ratio 1.1: six, up to 130 ms), and these clean captures cannot
+(sharpness 0.025: one at 21.5 ms; ratio 1.1 with sharpness 0.03: six, up to 130 ms; ratio 1.1 with
+sharpness 0.02: seven), and these clean captures cannot
 show a false lock at any threshold (no tick of theirs is more than 7 ms off at the fixed first prior,
 so `thrsearch.py` on them finds zero for all 500 combinations). The
 thresholds were not changed.
+
+On the fixtures themselves (the trimmed subsets, which keep the slow turns and so weigh them more):
+
+| | `daily-clean` (9 turns) | `livekit-clean` (8 turns) |
+|---|---|---|
+| false locks | 0 of 165 accepted | 0 of 133 accepted |
+| first lock within 300 ms of speech | 6 / 9 | 6 / 8 |
+| first lock, latest (replay / live page) | 685 / 679 ms | 718 / 732 ms |
+| p95 error, whole-turn truth | 6.07 ms | 1.28 ms |
+| p95 error, phrase-by-phrase truth | 2.32 ms | 0.84 ms |
+| \|onset prior - truth\| before the first lock, max | 6.7 ms | 5.1 ms |
+
+**The criteria as restated by the owner after these captures** (they replace the two that failed as
+written; zero false locks stays): the error is measured against the **phrase-by-phrase** alignment,
+p95 at most 5 ms (R63), because the whole-turn alignment charges the rule for audio that really moved
+inside the turn; and the first lock is **every turn locks within 750 ms of speech, and until it
+locks the onset prior is within 10 ms of the truth on at least 95 % of turns** (R62). Both fixtures,
+and both full recordings, meet all three: no false lock, every turn locked by 732 ms (live) / 718 ms
+(replay), the prior within 6.7 ms on every turn, and a phrase-truth p95 of 2.32 and 0.84 ms (1.82 and
+1.07 ms on the full recordings). `replay_capture.py` still prints the minimum as §4.1 first wrote it.
 
 **Pauses and late onsets (design §8, item 2).** 26 pauses of 0.3 s or more were received. The audio
 after each pause sat where the audio before it did, within -4.8 to +5.1 ms (each phrase aligned on
