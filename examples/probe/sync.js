@@ -618,6 +618,8 @@ export class SyncTracker {
       turn.locked = true
       turn.lastL = r.offsetMs / hopMs + ref.ownOffset + base
     } else if (r.checks.speech && !turn.locked) {
+      // Toward the widening: ticks before the first lock whose window passed the speech gate and
+      // were not accepted. Gated ticks (silence) and too-short windows do not count.
       turn.heldNoLock++
     }
     turn.nextDue = pos + this.samples(turn.locked ? cadence.afterLockMs : cadence.beforeLockMs)

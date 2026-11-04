@@ -556,9 +556,33 @@ const ORACLE_PCM = (() => {
 })()
 const oracleNumber = x => (x === 'Infinity' ? Infinity : x)
 
+/** The turn's source of an oracle case (make_oracle_fixture.build_source): the samples, tiled, or held. */
+function oracleSource(c) {
+  const spec = c.source
+  if (!spec) return ORACLE_PCM
+  if (spec.kind === 'repeat') return Int16Array.from({ length: spec.total }, (_, n) => ORACLE_PCM[spec.from + (n % spec.length)])
+  if (spec.kind === 'hold') return Int16Array.from({ length: spec.total }, (_, n) => ORACLE_PCM[Math.floor(n / spec.factor)])
+  throw new Error(`unknown source ${spec.kind}`)
+}
+
+/** The case's reference: the oracle's envelope_bytes of its source, at its rate. */
+const oracleReference = c => sync.envelopeBytes(oracleSource(c), c.rate ?? ORACLE.rate)
+
+/** make_oracle_fixture.lcg_noise: (state >> 16) % (2A + 1) - A, the 32-bit LCG state updated first. */
+function lcgNoise(count, amplitude, seed) {
+  const out = new Int32Array(count)
+  let state = seed >>> 0
+  for (let i = 0; i < count; i++) {
+    state = (Math.imul(1664525, state) + 1013904223) >>> 0
+    out[i] = ((state >>> 16) % (2 * amplitude + 1)) - amplitude
+  }
+  return out
+}
+
 /** The received track of an oracle case, rebuilt from the same samples (make_oracle_fixture.build_received). */
 function oracleReceived(c) {
-  const src = c.silent ? new Int16Array(ORACLE_PCM.length) : c.reverse ? ORACLE_PCM.slice().reverse() : ORACLE_PCM
+  const source = oracleSource(c)
+  const src = c.silent ? new Int16Array(source.length) : c.reverse ? source.slice().reverse() : source
   const out = new Int16Array(c.samples)
   const bounds = c.segments.map(g => g.from).concat([c.samples])
   c.segments.forEach((g, i) => {
@@ -567,8 +591,15 @@ function oracleReceived(c) {
       if (k >= 0 && k < src.length) out[n] = src[k]
     }
   })
+  if (c.noise) {
+    const noise = lcgNoise(c.samples, c.noise.amplitude, c.noise.seed)
+    for (let n = 0; n < c.samples; n++) out[n] = Math.max(-32768, Math.min(32767, out[n] + noise[n]))
+  }
   return out
 }
+
+/** The received envelope (dB) of an oracle case: given, or measured on the rebuilt track. */
+const oracleReceivedDb = (c, opts) => (c.received_db ? Float64Array.from(c.received_db) : sync.receivedEnvelope(oracleReceived(c), c.rate ?? ORACLE.rate, opts))
 
 test('sync: envelopeBytes equals the oracle\'s bytes at every rate, from int16 and from Web Audio floats', () => {
   for (const [rate, b64] of Object.entries(ORACLE.envelope_bytes)) {
@@ -590,11 +621,16 @@ test('sync: the received envelope without the high-pass equals the oracle\'s env
 })
 
 test('sync: align equals the oracle on every case (high-pass off): offset within 0.1 ms, checks within 1e-6', () => {
-  const reference = sync.envelopeBytes(ORACLE_PCM, ORACLE.rate)
   for (const c of ORACLE.cases) {
     const o = c.oracle_no_hp
-    const r = sync.align(sync.receivedEnvelope(oracleReceived(c), ORACLE.rate, { highPassHz: null }), reference, c.prior_index)
+    const r = sync.align(oracleReceivedDb(c, { highPassHz: null }), oracleReference(c), c.prior_index)
     const k = r.checks
+    if (c.gate_only) {
+      // A synthetic window that only pins the speech gate: its correlation curve is flat enough
+      // that the peak's lag is decided by rounding, so only the gate and the outcome are compared.
+      assert.deepEqual([k.speech, k.windowOk, k.accepted], [o.speech, o.window_ok, o.accepted], c.name)
+      continue
+    }
     if (o.offset_ms === null) assert.equal(r.offsetMs, null, c.name)
     else assert(Math.abs(r.offsetMs - o.offset_ms) <= 0.1, `${c.name}: offset ${r.offsetMs} vs ${o.offset_ms}`)
     assert.deepEqual(
@@ -608,17 +644,70 @@ test('sync: align equals the oracle on every case (high-pass off): offset within
       else assert(Math.abs(k[mine] - want) <= 1e-6, `${c.name} ${mine}: ${k[mine]} vs ${want}`)
     }
   }
-  // The cases cover what they claim to.
+  // The cases cover what they claim to: each threshold and branch decides at least one of them.
   const byName = Object.fromEntries(ORACLE.cases.map(c => [c.name, c.oracle_no_hp]))
+  const failing = o => ['peak_ok', 'ratio_ok', 'sharpness_ok', 'halves_ok', 'interior_ok'].filter(k => !o[k])
   assert(byName.shifted.accepted && !byName['halves-disagree'].halves_ok && !byName['other-audio'].accepted)
   assert(byName.edge.edge && !byName.silent.speech && !byName.short.window_ok)
+  assert(byName['room-noise'].accepted && byName['shifted-48k'].accepted)
+  assert.deepEqual(failing(byName['ratio-only']), ['ratio_ok'])
+  assert.deepEqual(failing(byName['sharpness-only']), ['sharpness_ok'])
+  assert.equal(byName['older-half-jump'].half_deviation_ms, 'Infinity')   // a half peaked at the edge of its +/- 40 ms
+  assert.equal(byName['newer-half-jump'].half_deviation_ms, 'Infinity')
+  assert(!byName['gate-1.5'].speech && !byName['gate-1.999'].speech && byName['gate-2.0'].speech)
+})
+
+test('sync: the room-noise case puts the floor above -70 dB, from the 3 s history', () => {
+  const c = ORACLE.cases.find(k => k.name === 'room-noise')
+  const env = oracleReceivedDb(c, { highPassHz: null })
+  const floor = sync.align(env, oracleReference(c), c.prior_index).checks.floor
+  assert(floor > -60, `floor ${floor}`)
+  // The 5th percentile interpolates (numpy's linear rule), and the last 1 s alone would give another floor.
+  const all = Array.from(env.subarray(Math.max(0, env.length - 600)))
+  assert.equal(floor, sync.percentile(all, 5) + 6)
+  assert.notEqual(floor, sync.percentile(all.slice(-200), 5) + 6)
+  const sorted = all.slice().sort((a, b) => a - b)
+  assert(!sorted.includes(sync.percentile(all, 5)), 'the 5th percentile falls between two values')
+})
+
+test('sync: the received hop is the oracle\'s round(0.005 * rate), half to even', () => {
+  for (const [rate, hop] of Object.entries(ORACLE.received_hops)) assert.equal(new sync.ReceivedEnvelope(Number(rate)).hop, hop, `${rate} Hz`)
+})
+
+test('sync: the high-pass is a first-order y = a (y\' + x - x\'), a = RC / (RC + dt) at the track\'s rate, 30 Hz', () => {
+  const rc = 1 / (2 * Math.PI * 30)
+  assert.equal(sync.HIGH_PASS_HZ, 30)
+  assert.equal(sync.highPassCoefficient(30, 48000), rc / (rc + 1 / 48000))
+  for (const rate of [24000, 48000]) assert(Math.abs(sync.highPassCoefficient(30, rate) - 1 / (1 + (2 * Math.PI * 30) / rate)) < 1e-15)
+  // A step of 0.5 (Web Audio scale): the filter's output is 0.5 * 32768 * a^(n + 1); every
+  // frame's dB must be that of the same samples measured by hand.
+  for (const rate of [24000, 48000]) {
+    const a = rc / (rc + 1 / rate)
+    const hop = new sync.ReceivedEnvelope(rate).hop
+    const env = sync.receivedEnvelope(new Float32Array(rate / 10).fill(0.5), rate)
+    for (let g = 0; g < env.length; g++) {
+      let sum = 0
+      for (let n = g * hop; n < g * hop + 2 * hop; n++) sum += (0.5 * 32768 * a ** (n + 1)) ** 2
+      const want = 10 * Math.log10(sum / (2 * hop) / (32768 * 32768) + 1e-10)
+      assert(Math.abs(env[g] - want) < 1e-9, `${rate} Hz frame ${g}: ${env[g]} vs ${want}`)
+    }
+  }
+})
+
+test('sync: Web Audio floats are measured x 32768 (a level on a byte boundary tells it from 32767)', () => {
+  // A constant level 0.0001 dB above the boundary between bytes 199 and 200; x 32767 would put it
+  // 0.00027 dB lower, under the boundary.
+  const boundaryDb = (199.5 * 96) / 255 - 96
+  const level = Math.fround(10 ** ((boundaryDb + 0.0001) / 20))
+  const bytes = sync.envelopeBytes(new Float32Array(4800).fill(level), 48000)
+  assert(bytes.every(b => b === 200), `${bytes[0]}`)
+  assert.equal(sync.quantise(20 * Math.log10((level * 32767) / 32768)), 199)
 })
 
 test('sync: with the causal 30 Hz high-pass the offset stays within 0.5 ms of the oracle\'s (zero-phase) one', () => {
-  const reference = sync.envelopeBytes(ORACLE_PCM, ORACLE.rate)
-  for (const c of ORACLE.cases) {
+  for (const c of ORACLE.cases.filter(k => k.oracle_hp)) {
     const o = c.oracle_hp
-    const r = sync.align(sync.receivedEnvelope(oracleReceived(c), ORACLE.rate), reference, c.prior_index)
+    const r = sync.align(oracleReceivedDb(c), oracleReference(c), c.prior_index)
     assert.equal(r.checks.accepted, o.accepted, c.name)
     if (o.offset_ms !== null) assert(Math.abs(r.offsetMs - o.offset_ms) <= 0.5, `${c.name}: ${r.offsetMs} vs ${o.offset_ms}`)
   }
@@ -651,11 +740,16 @@ test('sync: splice rule: any gap_ms > 0 exactly, never on 0 unchained, never ont
   assert.equal(sync.splicePlan({ prevTurnId: '', prevTurnPcmMs: 0, gapMs: 200 }, { ...prev, endPcmMs: null }), null)
   assert.deepEqual(sync.splicePlan({ prevTurnId: 'p', prevTurnPcmMs: 1480, gapMs: 0 }, { ...prev, endPcmMs: null }), { kind: 'chained', from: 'p', joinMs: 1480 })
   assert.equal(sync.splicePlan({ prevTurnId: 'p', prevTurnPcmMs: 1480, gapMs: 0 }, { ...prev, aborted: true }), null)
+  // A chained turn joins at its own prev_turn_pcm_ms, not at the turn_end of the turn before it.
+  assert.deepEqual(sync.splicePlan({ prevTurnId: 'p', prevTurnPcmMs: 1480, gapMs: 0 }, prev), { kind: 'chained', from: 'p', joinMs: 1480 })
   assert.equal(sync.splicePlan({ prevTurnId: '', prevTurnPcmMs: 0, gapMs: 200 }, null), null)
   // previous envelope, then floor up to the join, then this turn's
   const { values, ownOffset } = sync.spliceReference(Uint8Array.of(9, 9, 9), Uint8Array.of(7, 7), 30)
   assert.equal(ownOffset, 6)
   assert.deepEqual([...values], [9, 9, 9, 0, 0, 0, 7, 7])
+  // A join off the 5 ms grid rounds to the nearest index: 88 ms is 17.6 hops -> 18, 87 ms is 17.4 -> 17.
+  assert.equal(sync.spliceReference(Uint8Array.of(9), Uint8Array.of(7), 88).ownOffset, 18)
+  assert.equal(sync.spliceReference(Uint8Array.of(9), Uint8Array.of(7), 87).ownOffset, 17)
 })
 
 // ------------------------------------------------------------------ sync.js: the live tracker
@@ -666,13 +760,13 @@ const TURN_Y = 'yyyyyyyy-0000-4000-8000-000000000000'
 const ms = v => Math.round((v * SR) / 1000)
 
 /** turn_start + turn_envelope messages of a turn whose audio is `pcm` (the processor's view), via the package's builders' shape. */
-function turnMessages(id, pcm, { prev = '', prevPcmMs = 0, gapMs = 0, split = 200 } = {}) {
+function turnMessages(id, pcm, { prev = '', prevPcmMs = 0, gapMs = 0, split = 200, endPcmMs = (pcm.length * 1000) / SR } = {}) {
   const env = sync.envelopeBytes(pcm, SR)
   const start = clone(E.A_start)
   Object.assign(start.turn_start, { turn_id: id, sample_rate: SR, onsets_ms: [0], prev_turn_id: prev, prev_turn_pcm_ms: prevPcmMs, gap_ms: gapMs })
   const chunk = (first, bytes) => ({ tag: 'spatialreal-avatar', turn_envelope: { turn_id: id, first_index: first, hop_ms: 5, window_ms: 10, values: b64(bytes) } })
   // Out of order on purpose: the tail first.
-  return { start, envelopes: [chunk(split, env.subarray(split)), chunk(0, env.subarray(0, split))], end: { tag: 'spatialreal-avatar', turn_end: { turn_id: id, pcm_ms: (pcm.length * 1000) / SR, segment_count: 1 } } }
+  return { start, envelopes: [chunk(split, env.subarray(split)), chunk(0, env.subarray(0, split))], end: { tag: 'spatialreal-avatar', turn_end: { turn_id: id, pcm_ms: endPcmMs, segment_count: 1 } }, abort: { tag: 'spatialreal-avatar', turn_abort: { turn_id: id } } }
 }
 
 /**
@@ -740,6 +834,14 @@ test('tracker: locks on the turn, 50 ms ticks until the first lock and 200 ms af
   gaps.slice(0, lock).forEach(g => assert(g >= ms(50) && g < ms(50) + 128, `before the lock: ${g}`))
   gaps.slice(lock).forEach(g => assert(g >= ms(200) && g < ms(200) + 128, `after the lock: ${g}`))
   assert(t.ticks.every(k => k.search_ms === 300 && k.prior_pos !== null))
+  // After a lock the prior is the last accepted position, not the arrival prior.
+  let last = null
+  for (const k of t.ticks) {
+    if (last !== null) assert.equal(k.prior_pos, last, 'the prior after a lock is the last accepted position')
+    else assert.equal(k.prior_pos, delivered(arrival) + ms(200))
+    if (k.accepted) last = k.first_sample_pos
+  }
+  assert(t.ticks.slice(lock + 1).some(k => k.prior_pos !== t.ticks[lock].first_sample_pos), 'the prior moves with each lock')
   // The ticks stop once the 1 s window is past the turn's end.
   assert(t.ticks[t.ticks.length - 1].pos <= first + ORACLE_PCM.length + ms(1000) + ms(200) + 128)
   assert(tracker.ticks === t.ticks.length)
@@ -795,6 +897,78 @@ test('tracker: a chained turn is spliced onto the turn before it and locks at pr
   const exported = tracker.export().turns.find(t => t.turn_id === TURN_Y)
   assert.equal(exported.splice.own_offset, 200)
   assert.equal(exported.splice.values, b64(sync.spliceReference(sync.envelopeBytes(pcmX, SR), sync.envelopeBytes(pcmY, SR), 1000).values))
+})
+
+/**
+ * Turn X (the first `xMs` of the samples), then turn Y (the rest) `gapMs` after X's last sample.
+ * A chained Y is announced while X still plays and, as on the page, gets the chain's place as its
+ * onset prior (analyze() places a chained turn from the end of the turn before it).
+ */
+function twoTurns({ xMs, gapMs, y = {}, xEnd = {}, abortX = false }) {
+  const cut = ms(xMs)
+  const pcmX = ORACLE_PCM.subarray(0, cut)
+  const pcmY = ORACLE_PCM.subarray(cut)
+  const mx = turnMessages(TURN_X, pcmX, xEnd)
+  const my = turnMessages(TURN_Y, pcmY, y)
+  const arrival = ms(1000)
+  const first = arrival + ms(140)
+  const yFirst = first + cut + ms(gapMs)
+  const track = placeAudio(ms(5000), [{ at: first, pcm: pcmX }, { at: yFirst, pcm: pcmY }])
+  const yArrival = y.prev ? arrival + ms(600) : yFirst - ms(140)
+  const tracker = runTracker(track, [
+    { pos: arrival, data: mx.start }, ...mx.envelopes.map(d => ({ pos: arrival, data: d })),
+    { pos: first + cut, data: abortX ? mx.abort : mx.end },
+    { pos: yArrival, data: my.start }, ...my.envelopes.map(d => ({ pos: yArrival, data: d })),
+    ...(y.prev ? [{ pos: yArrival, onsetPrior: { id: TURN_Y, pos: yFirst } }] : []),
+  ])
+  return { tracker, yFirst, pcmX, pcmY }
+}
+
+test('tracker: an unchained turn with gap_ms > 0 is spliced onto the turn announced before it, gap_ms of floor in between', () => {
+  const { tracker, yFirst, pcmX, pcmY } = twoTurns({ xMs: 1000, gapMs: 200, y: { gapMs: 200 } })
+  const y = tracker.summary()[TURN_Y]
+  assert.deepEqual(plain(y.splice), { kind: 'gap', from: TURN_X, joinMs: 1200, ownOffset: 240 })
+  lockErrors(y.ticks, yFirst)
+  const exported = tracker.export().turns.find(t => t.turn_id === TURN_Y)
+  assert.equal(exported.splice.values, b64(sync.spliceReference(sync.envelopeBytes(pcmX, SR), sync.envelopeBytes(pcmY, SR), 1200).values))
+})
+
+test('tracker: never spliced on gap_ms 0 for an unchained turn, nor onto an aborted turn', () => {
+  const zero = twoTurns({ xMs: 1000, gapMs: 200, y: { gapMs: 0 } }).tracker.summary()[TURN_Y]
+  assert.equal(zero.splice, null)
+  assert(zero.ticks.length > 0)
+  const aborted = twoTurns({ xMs: 1000, gapMs: 200, y: { gapMs: 200 }, abortX: true }).tracker.summary()[TURN_Y]
+  assert.equal(aborted.splice, null)
+  assert(aborted.ticks.length > 0)
+})
+
+test('tracker: a chained turn joins at its prev_turn_pcm_ms (1498 ms, off the grid: index 300), not at the turn_end before it (1500 ms)', () => {
+  const { tracker, yFirst } = twoTurns({ xMs: 1498, gapMs: 0, y: { prev: TURN_X, prevPcmMs: 1498 }, xEnd: { endPcmMs: 1500 } })
+  const y = tracker.summary()[TURN_Y]
+  assert.deepEqual(plain(y.splice), { kind: 'chained', from: TURN_X, joinMs: 1498, ownOffset: 300 })
+  // The join rounds to the 5 ms grid, so the spliced reference holds Y 2 ms later than it plays:
+  // the lock, driven mostly by X's audio in the window, puts Y's first sample there.
+  lockErrors(y.ticks, yFirst + ms(2))
+})
+
+test('tracker: an onset prior far from the arrival prior is the prior from the first tick, and stays the centre once the search widens', () => {
+  // The onset rule's place is 450 ms past the truth (and 650 ms past the arrival prior): the normal
+  // search (+/- 300 ms around it) misses the audio, the widened one (+/- 600 ms around it) finds it.
+  const m = turnMessages(TURN_X, ORACLE_PCM)
+  const arrival = ms(1000)
+  const first = arrival + ms(400)
+  const onsetPrior = first + ms(450)                  // outside +/- 300 of the truth, inside +/- 600
+  const track = placeAudio(ms(4500), [{ at: first, pcm: ORACLE_PCM }])
+  const ticks = runTracker(track, [
+    { pos: arrival, data: m.start }, ...m.envelopes.map(d => ({ pos: arrival, data: d })),
+    { pos: arrival, onsetPrior: { id: TURN_X, pos: onsetPrior } },
+  ]).summary()[TURN_X].ticks
+  const lock = ticks.findIndex(k => k.accepted)
+  assert(lock >= 0, 'never locked')
+  ticks.slice(0, lock + 1).forEach(k => assert.equal(k.prior_pos, onsetPrior))
+  assert.equal(ticks[lock].search_ms, 600)
+  assert.equal(ticks.slice(0, lock).filter(k => k.gate).length, 10)
+  lockErrors(ticks, first)
 })
 
 test('the table: the header has the alignment columns and every row has one cell per header', () => {

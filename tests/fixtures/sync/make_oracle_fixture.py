@@ -2,11 +2,13 @@
 
 ``examples/probe/sync.js`` ports ``envelope_bytes`` and ``align`` from ``hack/sync-sim/dsp.py``;
 ``tests/probe_check.mjs`` checks the port against this file. It holds one stretch of speech-like
-int16 audio and, for each case, a recipe that builds the received track from it with integer sample
-delays only, so the browser code can rebuild every received track exactly from the same samples
-instead of the file carrying them. For each case the oracle's ``align`` result is stored twice: on
-the envelope without a high-pass (the port must match it to 1e-6) and with the oracle's zero-phase
-30 Hz high-pass (the port's causal one must land within 0.5 ms of its offset).
+int16 audio and, for each case, a recipe that builds the turn's source and the received track from
+it with integer operations only (sample delays, tiling, sample-and-hold, a 32-bit LCG for room
+noise), so the browser code can rebuild every track exactly from the same samples instead of the
+file carrying them. For each case the oracle's ``align`` result is stored twice: on the envelope
+without a high-pass (the port must match it to 1e-6) and with the oracle's zero-phase 30 Hz
+high-pass (the port's causal one must land within 0.5 ms of its offset). A few cases give the
+received envelope in dB directly, to put the speech gate exactly on its boundary.
 
 usage: ``uv run python tests/fixtures/sync/make_oracle_fixture.py`` (rewrites ``oracle.json`` next
 to this file; ``tests/test_probe_page.py`` fails when the committed file differs from a fresh run).
@@ -56,20 +58,60 @@ def speechlike(seconds: float, seed: int, rate: int = RATE) -> np.ndarray:
     return np.round(rng.standard_normal(n) * env * 32767 * 0.5).astype(np.int16)
 
 
-def build_received(pcm: np.ndarray, case: dict) -> np.ndarray:
-    """The received track of ``case``: from each segment's ``from`` sample on, the source delayed by
-    that segment's ``lead`` samples (zeros where it has no sample), ``samples`` long in all.
+def build_source(pcm: np.ndarray, case: dict) -> np.ndarray:
+    """The turn's audio as the processor released it (its envelope is the reference).
 
-    The source is ``pcm`` reversed when ``reverse`` is set, and all zeros when ``silent`` is.
+    ``source`` is absent for ``pcm`` itself; ``{"kind": "repeat", "from", "length", "total"}``
+    tiles ``pcm[from:from + length]`` to ``total`` samples (a periodic envelope: a second peak as
+    high as the first); ``{"kind": "hold", "factor", "total"}`` holds every sample ``factor`` times
+    (a slow envelope: a blunt peak).
     """
-    src = np.zeros_like(pcm) if case.get("silent") else pcm[::-1] if case.get("reverse") else pcm
+    spec = case.get("source")
+    if spec is None:
+        return pcm
+    n = np.arange(spec["total"])
+    if spec["kind"] == "repeat":
+        return pcm[spec["from"] + n % spec["length"]]
+    if spec["kind"] == "hold":
+        return pcm[n // spec["factor"]]
+    raise ValueError(spec)
+
+
+def lcg_noise(count: int, amplitude: int, seed: int) -> np.ndarray:
+    """Uniform integer noise in [-amplitude, amplitude] from a 32-bit LCG (Numerical Recipes'
+    constants), ``(state >> 16) % (2 * amplitude + 1) - amplitude``, state updated first."""
+    out = np.empty(count, dtype=np.int64)
+    state = seed
+    for i in range(count):
+        state = (1664525 * state + 1013904223) % 2**32
+        out[i] = (state >> 16) % (2 * amplitude + 1) - amplitude
+    return out
+
+
+def build_received(source: np.ndarray, case: dict) -> np.ndarray:
+    """The received track of ``case``: from each segment's ``from`` sample on, the source delayed by
+    that segment's ``lead`` samples (zeros where it has no sample), ``samples`` long in all, plus
+    the case's ``noise`` (LCG, see :func:`lcg_noise`) clipped to the int16 range.
+
+    The source is reversed when ``reverse`` is set, and all zeros when ``silent`` is.
+    """
+    src = (
+        np.zeros_like(source)
+        if case.get("silent")
+        else source[::-1]
+        if case.get("reverse")
+        else source
+    )
     out = np.zeros(case["samples"], dtype=np.float64)
     bounds = [s["from"] for s in case["segments"]] + [case["samples"]]
     for seg, end in zip(case["segments"], bounds[1:]):
-        for n in range(seg["from"], end):
-            k = n - seg["lead"]
-            if 0 <= k < len(src):
-                out[n] = src[k]
+        n = np.arange(seg["from"], end)
+        k = n - seg["lead"]
+        inside = (k >= 0) & (k < len(src))
+        out[n[inside]] = src[k[inside]]
+    if "noise" in case:
+        noise = lcg_noise(case["samples"], case["noise"]["amplitude"], case["noise"]["seed"])
+        out = np.clip(out + noise, -32768, 32767)
     return out
 
 
@@ -105,9 +147,18 @@ def result(res) -> dict:
     }
 
 
-def ms(value: float) -> int:
-    """Samples in ``value`` ms at :data:`RATE` (every value used here is exact)."""
-    return round(value * RATE / 1000)
+def ms(value: float, rate: int = RATE) -> int:
+    """Samples in ``value`` ms at ``rate`` (every value used here is exact)."""
+    return round(value * rate / 1000)
+
+
+def gate_window(half_range_db: float) -> list[float]:
+    """A received envelope (dB) whose last 1 s alternates ``-48 -/+ half_range_db``: its standard
+    deviation is exactly ``half_range_db``. Two seconds of -90 dB before it keep the floor at
+    -70 dB, below every value of the window, so the gate sees the window unclipped."""
+    return [-90.0] * 400 + [
+        -48.0 + (half_range_db if i % 2 else -half_range_db) for i in range(200)
+    ]
 
 
 # The received tracks. "lead" is where the source's sample 0 sits in the received track; the
@@ -135,20 +186,59 @@ CASES = [
     # Less than one 1 s window of envelope: not enough to decide.
     {"name": "short", "segments": [{"from": 0, "lead": ms(137.25)}], "samples": ms(900),
      "prior_index": 25},
+    # Room noise at about -43 dB: the floor is the received envelope's 5th percentile + 6 dB over
+    # the last 3 s (here the whole 2.4 s), well above -70, and it clips both sides.
+    {"name": "room-noise", "segments": [{"from": 0, "lead": ms(637.25)}], "samples": ms(2400),
+     "prior_index": 125, "noise": {"amplitude": 400, "seed": 20261103}},
+    # A 250 ms period: the side lobes are as high as the peak. Fails on the ratio alone.
+    {"name": "ratio-only", "source": {"kind": "repeat", "from": 0, "length": ms(250), "total": ms(2000)},
+     "segments": [{"from": 0, "lead": ms(637.25)}], "samples": ms(2400), "prior_index": 125},
+    # Every sample held 6 times: syllables six times longer, a blunt peak. Fails on sharpness alone.
+    {"name": "sharpness-only", "source": {"kind": "hold", "factor": 6, "total": ms(4000)},
+     "segments": [{"from": 0, "lead": ms(637.25)}], "samples": ms(2400), "prior_index": 125},
+    # The audio 50 ms later until 1.85 s: the older half peaks past its +/- 40 ms search.
+    {"name": "older-half-jump",
+     "segments": [{"from": 0, "lead": ms(687.25)}, {"from": ms(1850), "lead": ms(637.25)}],
+     "samples": ms(2400), "prior_index": 125},
+    # The audio 50 ms later from 2.0 s: the newer half peaks past its +/- 40 ms search.
+    {"name": "newer-half-jump",
+     "segments": [{"from": 0, "lead": ms(637.25)}, {"from": ms(2000), "lead": ms(687.25)}],
+     "samples": ms(2400), "prior_index": 125},
+    # The same samples read at 48 kHz (half the length): the rule at the browser's usual rate.
+    {"name": "shifted-48k", "rate": 48000,
+     "segments": [{"from": 0, "lead": ms(637.25, 48000)}], "samples": ms(2000, 48000),
+     "prior_index": 125},
+    # The speech gate on its boundary: std 1.5 dB (silence), 1.999 dB (silence, though the
+    # sample standard deviation would be 2.004) and exactly 2 dB (speech: the gate is "< 2").
+    # "gate_only": the window's correlation is nearly flat, so only the gate is compared.
+    {"name": "gate-1.5", "received_db": gate_window(1.5), "prior_index": 125, "gate_only": True},
+    {"name": "gate-1.999", "received_db": gate_window(1.999), "prior_index": 125, "gate_only": True},
+    {"name": "gate-2.0", "received_db": gate_window(2.0), "prior_index": 125, "gate_only": True},
 ]  # fmt: skip
+
+# Received hop in samples per rate (dsp.envelope_db: Python's round, half to even); 44 100 Hz is
+# a tie (220.5 -> 220) and 44 140 Hz is not (220.7 -> 221).
+HOP_RATES = (16000, 22050, 24000, 44100, 44140, 48000)
 
 
 def build() -> dict:
     """The fixture, as a JSON-ready dict."""
     dsp = load_oracle()
     pcm = speechlike(SECONDS, SEED)
-    reference = dsp.envelope_bytes(pcm, RATE)
     cases = []
     for case in CASES:
-        received = build_received(pcm, case)
-        plain = dsp.envelope_db(received, RATE, 0.005)
-        filtered = dsp.envelope_db(received, RATE, 0.005, dc_block=True)
+        rate = case.get("rate", RATE)
+        source = build_source(pcm, case)
+        reference = dsp.envelope_bytes(source, rate)
         entry = dict(case)
+        if "received_db" in case:
+            received_db = np.asarray(case["received_db"])
+            entry["oracle_no_hp"] = result(dsp.align(received_db, reference, case["prior_index"]))
+            cases.append(entry)
+            continue
+        received = build_received(source, case)
+        plain = dsp.envelope_db(received, rate, 0.005)
+        filtered = dsp.envelope_db(received, rate, 0.005, dc_block=True)
         entry["oracle_no_hp"] = result(dsp.align(plain, reference, case["prior_index"]))
         entry["oracle_hp"] = result(dsp.align(filtered, reference, case["prior_index"]))
         if case["name"] == "shifted":
@@ -164,6 +254,7 @@ def build() -> dict:
             str(rate): base64.b64encode(dsp.envelope_bytes(pcm, rate).tobytes()).decode()
             for rate in ENVELOPE_RATES
         },
+        "received_hops": {str(rate): round(0.005 * rate) for rate in HOP_RATES},
         "cases": cases,
     }
 
