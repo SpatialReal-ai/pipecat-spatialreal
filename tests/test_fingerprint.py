@@ -3,6 +3,7 @@ import struct
 
 import pytest
 
+from pipecat_spatialreal import fingerprint
 from pipecat_spatialreal.fingerprint import Envelope
 
 RATE = 24000
@@ -112,3 +113,83 @@ def test_every_supported_rate_yields_values(rate):
     out = Envelope(rate).feed(_pcm([500] * rate))
     hop, win = 5 * rate // 1000, 10 * rate // 1000  # truncated, see the module docstring
     assert len(out) == (rate - win) // hop + 1
+
+
+def test_reset_drops_a_pending_odd_byte():
+    even = _pcm([i * 11 % 4000 for i in range(RATE // 20)])
+    fresh = Envelope(RATE)
+    expected = fresh.feed(even)
+    env = Envelope(RATE)
+    env.feed(b"\x01\x02\x03")  # odd length: one whole sample, the third byte stays pending
+    env.reset()
+    assert env.index == 0
+    assert env.feed(even) == expected
+    assert env.index == fresh.index
+
+
+def _window_with_mean_square_near(target: float, samples: int) -> tuple[list[int], list[int]]:
+    """Two sample windows whose mean squares straddle ``target`` as closely as the grid allows.
+
+    ``a = floor(sqrt(target))`` for all samples and ``a + 1`` for ``k`` of them gives
+    ``S(k) / samples = a^2 + k * (2a + 1) / samples``, a grid of steps ``(2a + 1) / samples``.
+    Returns the windows for the largest ``k`` still below ``target`` and the smallest ``k`` above.
+    """
+    a = math.isqrt(int(target))
+    k = next(
+        k for k in range(samples + 1) if (samples * a * a + k * (2 * a + 1)) / samples > target
+    )
+    assert 1 <= k, "target must be at least a^2 + one step"
+
+    def window(count: int) -> list[int]:
+        return [a + 1] * count + [a] * (samples - count)
+
+    return window(k - 1), window(k)
+
+
+@pytest.mark.parametrize("b", [0, 1, 100, 254])
+def test_rounding_is_half_up_around_x_point_5(b):
+    # The byte is b + 1 exactly when (db + 96) / 96 * 255 >= b + 0.5, i.e. from
+    #   db_b = (b + 0.5) * 96 / 255 - 96
+    # upwards. Inverting 10 * log10(ms / 32768^2 + 1e-10) = db_b gives the mean square where the
+    # byte flips:
+    #   ms_b = 32768^2 * (10^(db_b / 10) - 1e-10)
+    # e.g. b = 100: db_b = 100.5 * 96 / 255 - 96 = -58.1647, ms_b = 32768^2 * (1.5265e-6 - 1e-10)
+    # = 1639.7. A 4800-sample window (100 ms at 48 kHz) makes the grid of reachable mean squares
+    # fine enough (about 0.01 byte) to sit just below and just above ms_b.
+    rate, window_ms = 48000, 100
+    samples = rate * window_ms // 1000
+    db_b = (b + 0.5) * 96 / 255 - 96
+    ms_b = 32768**2 * (10 ** (db_b / 10) - 1e-10)
+    below, above = _window_with_mean_square_near(ms_b, samples)
+    assert Envelope(rate, window_ms=window_ms).feed(_pcm(below)) == bytes([b])
+    assert Envelope(rate, window_ms=window_ms).feed(_pcm(above)) == bytes([b + 1])
+
+
+def _db_whose_x_is_exactly(tie: float) -> float:
+    """A float db for which the mapping's arithmetic yields exactly ``tie``, or ``nan``."""
+    start = tie * 96 / 255 - 96
+    for ulps in range(-40, 41):
+        db = start
+        for _ in range(abs(ulps)):
+            db = math.nextafter(db, math.inf if ulps > 0 else -math.inf)
+        if (db + 96.0) / 96.0 * 255 == tie:
+            return db
+    return math.nan
+
+
+def test_rounding_at_an_exact_tie_is_half_up():
+    # x = (db + 96) / 96 * 255. db = -48 gives exactly 127.5 and must map to 128, but 127.5 rounds
+    # up under half-even too (128 is even). The ties n + 0.5 with even n tell the two apart, and
+    # for some of them a float db exists whose x comes out exactly n + 0.5; half-up gives n + 1,
+    # half-even n.
+    assert fingerprint._to_byte(-48.0) == 128
+    for n in (10, 20, 32, 42, 54, 64):
+        db = _db_whose_x_is_exactly(n + 0.5)
+        assert not math.isnan(db), f"no float db maps to exactly x = {n + 0.5}"
+        assert fingerprint._to_byte(db) == n + 1
+
+
+def test_hop_longer_than_window_is_rejected():
+    with pytest.raises(ValueError, match="hop_ms"):
+        Envelope(RATE, hop_ms=20, window_ms=10)
+    Envelope(RATE, hop_ms=10, window_ms=10)  # equal is fine: windows then do not overlap

@@ -16,11 +16,12 @@ The definition is a contract and must not drift:
 * The sum of squares is exact integer arithmetic over int16 little-endian mono samples; the only
   floating-point step is one ``math.log10`` per value. There is no numpy.
 
-Hop and window lengths in samples are ``ms * sample_rate // 1000``. For 22 050 Hz and 44 100 Hz
-the 5 ms hop is not a whole number of samples (110.25 and 220.5): the count is truncated, so the
-hop is 110 and 220 samples, and the envelope runs fractionally fast against a true 5 ms clock. The
-processor only ever uses the transport's sample rate, which is 16, 24 or 48 kHz in practice, where
-every length is exact.
+Hop and window lengths in samples are ``ms * sample_rate // 1000``. At 22 050 Hz the 5 ms hop is
+110.25 samples and the 10 ms window 220.5; at 44 100 Hz the hop is 220.5 and the window 441. Where
+a length is not whole it is truncated: the hops are 110 and 220 samples, the 22 050 Hz window 220
+samples (the 44 100 Hz window, 441, is exact), and the envelope runs fractionally fast against a
+true 5 ms clock. The processor only ever uses the transport's sample rate, which is 16, 24 or 48 kHz in
+practice, where every length is exact. ``hop_ms`` may not exceed ``window_ms``.
 """
 
 import math
@@ -53,8 +54,11 @@ class Envelope:
             window_ms: Length of one window in milliseconds.
 
         Raises:
-            ValueError: If a length in samples would be zero.
+            ValueError: If ``hop_ms`` exceeds ``window_ms`` (samples would go unmeasured) or a
+                length in samples would be zero.
         """
+        if hop_ms > window_ms:
+            raise ValueError(f"hop_ms={hop_ms} exceeds window_ms={window_ms}")
         self._hop = hop_ms * sample_rate // 1000
         self._window = window_ms * sample_rate // 1000
         if self._hop < 1 or self._window < 1:
@@ -66,7 +70,6 @@ class Envelope:
     def reset(self) -> None:
         """Forget everything fed so far; the next value produced is index 0 again."""
         self._squares: list[int] = []  # squares of the samples not yet past the next window start
-        self._skip = 0  # samples still to drop before the next window start (only if hop > window)
         self._index = 0
         self._carry = b""  # a trailing odd byte of the last chunk
 
@@ -88,10 +91,7 @@ class Envelope:
         count = len(data) // 2
         self._carry = data[count * 2 :]
         if count:
-            fresh = [s * s for s in struct.unpack(f"<{count}h", data[: count * 2])]
-            dropped = min(self._skip, len(fresh))
-            self._skip -= dropped
-            self._squares.extend(fresh[dropped:])
+            self._squares.extend(s * s for s in struct.unpack(f"<{count}h", data[: count * 2]))
         out = bytearray()
         squares = self._squares
         window, hop = self._window, self._hop
@@ -101,15 +101,18 @@ class Envelope:
             out.append(_quantise(mean_square))
             start += hop
             self._index += 1
-        # Samples before the next window start are never read again.
-        dropped = min(start, len(squares))
-        del squares[:dropped]
-        self._skip += start - dropped
+        # Samples before the next window start are never read again (hop <= window, so they are
+        # all in the buffer).
+        del squares[:start]
         return bytes(out)
 
 
 def _quantise(mean_square: float) -> int:
     """Map a mean square (int16 units) to its envelope byte."""
-    db = 10 * math.log10(mean_square / _FULL_SCALE_SQUARED + _FLOOR)
+    return _to_byte(10 * math.log10(mean_square / _FULL_SCALE_SQUARED + _FLOOR))
+
+
+def _to_byte(db: float) -> int:
+    """Clamp a level in dB to ``[-96, 0]`` and map it to ``[0, 255]``, rounding half up."""
     db = max(_DB_MIN, min(_DB_MAX, db))
     return math.floor((db - _DB_MIN) / (_DB_MAX - _DB_MIN) * 255 + 0.5)
