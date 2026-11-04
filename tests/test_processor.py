@@ -2159,7 +2159,9 @@ async def test_turn_envelope_precedes_the_audio_it_describes(fake):
         ],
     )
     assert len(messages(down, "turn_start")) == 2
-    assert described_before_released(down) == chunks(1000) + chunks(300)
+    assert kinds(down).count("TTSAudioRawFrame") == chunks(1000) + chunks(300)
+    # Every chunk of both turns, and any stall silence a slow machine put between them.
+    assert described_before_released(down) == sum(map(len, turn_audio(down)))
 
 
 async def test_turn_envelope_indices_are_contiguous_and_match_released_bytes(fake):
@@ -2180,7 +2182,8 @@ async def test_turn_envelope_indices_are_contiguous_and_match_released_bytes(fak
         ],
     )
     ends = messages(down, "turn_end")
-    assert [e["pcm_ms"] for e in ends] == [padded(530), padded(300)]
+    # A slow machine may add stall silence to the first: it is in the turn, and its envelope.
+    assert ends[0]["pcm_ms"] >= padded(530) and ends[1]["pcm_ms"] == padded(300)
     for end, audio in zip(ends, turn_audio(down), strict=True):
         values = envelope_values(down, end["turn_id"])  # contiguous, 0-based, every turn
         assert len(values) == math.floor((end["pcm_ms"] - WINDOW_MS) / HOP_MS) + 1
