@@ -72,6 +72,13 @@ path = "src/pipecat_spatialreal/version.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pipecat_spatialreal"]
 
+# The sdist carries the tests, but not what only the maintainers' tooling reads: hack/ is the
+# simulation behind the alignment thresholds (its scripts need numpy and libopus, and make_speech.sh
+# writes tens of MB of audio into hack/sync-sim/clean) and the paired captures are 17 MB of
+# recordings. The tests that need either skip when they are absent. The wheel is unaffected.
+[tool.hatch.build.targets.sdist]
+exclude = ["/hack", "/tests/fixtures/sync/*-clean"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

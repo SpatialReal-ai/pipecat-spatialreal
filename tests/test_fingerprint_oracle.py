@@ -18,6 +18,8 @@ from pipecat_spatialreal.fingerprint import Envelope
 np = pytest.importorskip("numpy")
 
 _ORACLE = Path(__file__).resolve().parent.parent / "hack" / "sync-sim" / "dsp.py"
+if not _ORACLE.exists():
+    pytest.skip("hack/sync-sim is not in the sdist", allow_module_level=True)
 _spec = importlib.util.spec_from_file_location("sync_sim_dsp", _ORACLE)
 dsp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dsp)

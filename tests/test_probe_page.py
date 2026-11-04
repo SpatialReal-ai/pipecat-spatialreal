@@ -114,6 +114,8 @@ def test_the_oracle_fixture_is_what_its_generator_writes():
     # probe_check.mjs trusts tests/fixtures/sync/oracle.json as the oracle's numbers: it must be a
     # current run of make_oracle_fixture.py over hack/sync-sim/dsp.py.
     pytest.importorskip("numpy")
+    if not (ORACLE_FIXTURE.parents[3] / "hack" / "sync-sim" / "dsp.py").exists():
+        pytest.skip("hack/sync-sim is not in the sdist")
     spec = importlib.util.spec_from_file_location(
         "make_oracle_fixture", ORACLE_FIXTURE.with_name("make_oracle_fixture.py")
     )
