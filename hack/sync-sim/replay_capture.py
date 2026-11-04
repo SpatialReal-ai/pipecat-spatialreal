@@ -78,6 +78,11 @@ PAUSE_DB, PAUSE_MIN_MS, PHRASE_GAP_MS = -45.0, 300, 150
 PHRASE_CONTEXT_MS, PHRASE_SEARCH_MS = 150, 200
 LEADIN_MS = 150
 ONSET_THR, ONSET_SIL_S = 328, 0.15
+# The restated minimum (design 4.1, R62/R63): the criteria tests/test_sync_replay.py asserts.
+FIRST_LOCK_MAX_MS = 750  # every turn locks within this much speech
+PRIOR_TOL_MS, PRIOR_SHARE = 10.0, 0.95  # until the lock the onset prior is this close, this often
+P95_MAX_MS = 5.0  # p95 of the accepted ticks' error against the phrase truth
+SPEECH_TURN_MS = 300  # a turn counts for the first-lock criteria when this much of it was received
 
 
 # ---------------------------------------------------------------- inputs
@@ -421,6 +426,38 @@ def stage_a_features(t, env, hop, fs, l_truth, params=dsp.DEFAULTS):
 # ---------------------------------------------------------------- report
 
 
+def minimum(results):
+    """The restated design 4.1 numbers of one capture, from ``main``'s per-turn results.
+
+    The truth the criteria use is each phrase's own alignment (``local_errors_ms``): the jitter
+    buffer moves the audio by a few ms inside a call, and the rule tracks it. The first-lock and
+    prior criteria count the turns with at least 300 ms of received speech that the rule saw.
+    """
+    seen = [r for r in results if r["accepted"] or r["held"]]
+    speech = [r for r in seen if (r["rx_ms"] or 0) >= SPEECH_TURN_MS]
+    local = [e for r in results for e in r["local_errors_ms"]]
+    fl = [r["first_lock_ms"] for r in speech]
+    locked = [v for v in fl if v is not None]
+    prior = [abs(r["prior_error_ms"]) for r in speech if r["prior_error_ms"] is not None]
+    return {
+        "turns": len(seen),
+        "speech_turns": len(speech),
+        "ticks": len(local),
+        "false_locks": sum(e > FALSE_LOCK_MS for e in local),
+        "locked_in_time": sum(v is not None and v <= FIRST_LOCK_MAX_MS for v in fl),
+        "within_300": sum(v is not None and v <= 300 for v in fl),
+        "never_locked": len(fl) - len(locked),
+        "first_lock_p50": pct(locked, 50),
+        "first_lock_p95": pct(locked, 95),
+        "first_lock_max": max(locked) if locked else None,
+        "prior_turns": len(prior),
+        "prior_ok": sum(e <= PRIOR_TOL_MS for e in prior),
+        "local_p50": pct(local, 50),
+        "local_p95": pct(local, 95),
+        "local_max": max(local) if local else None,
+    }
+
+
 def pct(v, q):
     return float(np.percentile(v, q)) if len(v) else float("nan")
 
@@ -429,14 +466,15 @@ def fmt(v, nd=1):
     return "-" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{v:.{nd}f}"
 
 
-def main():
+def main(argv=None):
+    """Replay one capture directory, print the tables, and return the per-turn numbers."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("capture_dir")
     ap.add_argument("--causal", action="store_true", help="the browser's causal 30 Hz high-pass")
     ap.add_argument("--thr", help="replay with these thresholds: peak,ratio,sharpness,half_tol_ms")
     ap.add_argument("--features", help="write sim.py stage-A features for thrsearch.py")
     ap.add_argument("--json", help="write the per-turn numbers as JSON")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     params = dsp.DEFAULTS
     if args.thr:
@@ -636,38 +674,39 @@ def main():
                 f"| {fmt(o['delta_ms'], 1)} | {fmt(o['delta_local_ms'], 1)} |"
             )
 
-    locked_turns = [r for r in results if r["accepted"] or r["held"]]
-    speech_turns = [r for r in locked_turns if (r["rx_ms"] or 0) >= 300]
-    fl = [r["first_lock_ms"] for r in speech_turns]
-    within = sum(v is not None and v <= 300 for v in fl)
-    total_false = sum(r["false_locks"] for r in results)
-    p95 = pct(all_err, 95)
-    print("\n## Design 4.1 minimum\n")
+    m = minimum(results)
+    print("\n## Design 4.1 minimum (restated, R62/R63)\n")
     print(
-        f"turns with speech ticks: {len(locked_turns)}; with >= 300 ms of received speech: {len(speech_turns)}"
+        f"turns with speech ticks: {m['turns']}; with >= 300 ms of received speech: "
+        f"{m['speech_turns']}; accepted ticks: {m['ticks']}"
     )
     print(
-        f"accepted ticks: {len(all_err)}; false locks (> 20 ms): {total_false}  -> {'PASS' if total_false == 0 else 'FAIL'}"
+        f"false locks (accepted > {FALSE_LOCK_MS:.0f} ms off the phrase truth): {m['false_locks']}"
+        f"  -> {'PASS' if m['false_locks'] == 0 else 'FAIL'}"
     )
     print(
-        f"first lock within 300 ms of speech: {within}/{len(speech_turns)} = "
-        f"{within / max(1, len(speech_turns)):.1%} (>= 95 %) -> {'PASS' if within >= 0.95 * len(speech_turns) else 'FAIL'}"
+        f"first lock within {FIRST_LOCK_MAX_MS} ms of speech: {m['locked_in_time']}/{m['speech_turns']}"
+        f" (every turn), never locked {m['never_locked']}  -> "
+        f"{'PASS' if m['locked_in_time'] == m['speech_turns'] else 'FAIL'}"
     )
     print(
-        f"  first lock ms: p50 {fmt(pct([v for v in fl if v is not None], 50), 0)}, "
-        f"p95 {fmt(pct([v for v in fl if v is not None], 95), 0)}, never locked {sum(v is None for v in fl)}"
+        f"  first lock ms: p50 {fmt(m['first_lock_p50'], 0)}, p95 {fmt(m['first_lock_p95'], 0)}, "
+        f"max {fmt(m['first_lock_max'], 0)}; within 300 ms (the original criterion): "
+        f"{m['within_300']}/{m['speech_turns']}"
     )
     print(
-        f"error p50 {fmt(pct(all_err, 50), 2)} ms, p95 {fmt(p95, 2)} ms (<= 5) -> {'PASS' if p95 <= 5 else 'FAIL'}"
+        f"until the first lock the onset prior is within {PRIOR_TOL_MS:.0f} ms of the truth on "
+        f"{m['prior_ok']}/{m['prior_turns']} turns = {m['prior_ok'] / max(1, m['prior_turns']):.1%}"
+        f" (>= {PRIOR_SHARE:.0%})  -> {'PASS' if m['prior_ok'] >= PRIOR_SHARE * m['prior_turns'] else 'FAIL'}"
     )
     print(
-        f"  against the local (phrase) truth: p50 {fmt(pct(all_local, 50), 2)} ms, p95 {fmt(pct(all_local, 95), 2)} ms, "
-        f"max {fmt(max(all_local) if all_local else None, 2)} ms"
+        f"error against the phrase truth: p50 {fmt(m['local_p50'], 2)} ms, p95 {fmt(m['local_p95'], 2)} ms"
+        f" (<= {P95_MAX_MS:.0f}), max {fmt(m['local_max'], 2)} ms  -> "
+        f"{'PASS' if m['local_p95'] <= P95_MAX_MS else 'FAIL'}"
     )
-    pe = [abs(r["prior_error_ms"]) for r in speech_turns if r["prior_error_ms"] is not None]
     print(
-        f"  before the first lock the frames follow the prior; |prior - truth|: p50 {fmt(pct(pe, 50), 1)} ms, "
-        f"max {fmt(max(pe) if pe else None, 1)} ms"
+        f"  against the whole-turn truth (not the criterion; the jitter buffer moves the audio "
+        f"inside a turn): p50 {fmt(pct(all_err, 50), 2)} ms, p95 {fmt(pct(all_err, 95), 2)} ms"
     )
     print(
         f"page's own ticks (causal high-pass, live): accepted {len(all_page_err)}, "
@@ -683,6 +722,7 @@ def main():
         with open(args.features, "wb") as fh:
             pickle.dump([{"feat": {"F1": F, "F2": empty, "F3": empty}}], fh)
         print(f"\nwrote {len(F)} stage-A ticks to {args.features}")
+    return results
 
 
 if __name__ == "__main__":
