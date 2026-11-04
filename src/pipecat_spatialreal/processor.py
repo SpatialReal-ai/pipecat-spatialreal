@@ -191,6 +191,7 @@ class _Turn:
         self.announced = False  # turn_start pushed, or released without one (silent)
         self.chained = False  # its turn_start names the turn it follows back to back
         self.releasing = False  # its release has begun: the room plays its hold from here
+        self.waited = False  # it has had to wait for the quiet before it
         self.silent = False  # it stopped without audio: released, never announced
         self.stopped = False  # its audio is complete: _END_OF_AUDIO is in the hold
         self.finished = False  # its last sample has been released
@@ -1070,7 +1071,8 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         is queued, then starts when the room has one chunk of it left, as a stall resumes (not
         up to the lead early, which would announce it sooner after the last sound than the quiet
         it waited for). Once the room has run dry, the transport's own idle is part of the quiet,
-        which is then measured on the clock.
+        which is then measured on the clock: a turn that found ``min_silence_ms`` of it already
+        there starts at once, one that had to wait starts once the whole quiet has passed.
         """
         if turn.chained or turn.degraded or turn.silent:
             return True
@@ -1078,6 +1080,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         now = self._now()
         if self._fed_now():
             if self._playout_end - self._sound_end < quiet_s - _TOLERANCE_S:
+                turn.waited = True
                 deadlines.append(self._playout_end)  # the fill brings it closer, or ends
                 return False
             due = self._next_release(self._stall_ahead_s)
@@ -1085,10 +1088,11 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 deadlines.append(due)
                 return False
             return True
-        if now - self._sound_end >= self._min_silence_ms / 1000:
+        if not turn.waited and now - self._sound_end >= self._min_silence_ms / 1000:
             return True
         start = self._sound_end + quiet_s
         if start > now + _TOLERANCE_S:
+            turn.waited = True
             deadlines.append(start)
             return False
         return True

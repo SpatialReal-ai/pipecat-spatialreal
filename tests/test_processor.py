@@ -906,11 +906,29 @@ def room_quiet(pushed, quiet, at, sound_end):
     return max(ends, at) - sound_end
 
 
+def ran_dry(pushed, quiet, at, sound_end):
+    """Whether the room ran dry inside the quiet: a push of it, or the turn's first chunk, came
+    after everything before it had played (``room_quiet``'s rebuild)."""
+    ends = sound_end
+    for t, f in pushed:
+        if any(f is q for q in quiet):
+            if t > ends + 0.001:
+                return True
+            ends += len(f.audio) / (2 * f.sample_rate)
+    return at > ends + 0.001
+
+
 def assert_quiet_before(pushed, quiet, at, sound_end, need_s):
-    """The room was quiet for at least ``need_s`` before the turn pushed at ``at``, and the turn
-    was pushed with at most one chunk of that quiet left to play: as a stall resumes, not up to
-    the lead early. On a loaded machine the room may run dry inside the quiet; it is then
-    measured on the clock, which the same bounds hold for."""
+    """The room was quiet for at least ``need_s`` before the turn pushed at ``at``.
+
+    While the room stayed fed, the quiet is the silence queued: at least ``need_s`` of it, and
+    the turn pushed with at most one chunk of it left to play, as a stall resumes, not up to the
+    lead early. On a loaded machine the room may run dry inside the quiet; the quiet is then
+    measured on the clock, and the turn pushed no earlier than ``need_s`` after the last sound.
+    """
+    if ran_dry(pushed, quiet, at, sound_end):
+        assert at - sound_end >= need_s - GAP_SLACK_S
+        return
     total = room_quiet(pushed, quiet, at, sound_end)
     assert total >= need_s - GAP_SLACK_S
     assert at - sound_end >= total - CHUNK_MS / 1000 - GAP_SLACK_S
@@ -1988,24 +2006,27 @@ async def test_a_turn_after_a_degraded_turn_is_not_chained(fake):
     fake.first_segment_ms = 10_000  # turn 1 gets no animation before its link goes
     proc = make_proc(fake, reconnect_backoff_s=(0.1,))
     pushed = record_pushes(proc)
-    down, _ = await play(
-        proc,
-        [
-            link_up(proc),
-            TTSStartedFrame(),
-            tone_frame(1000),
-            audio_at_driveningress(fake),
-            Do(lambda: fake.close_with(4001)),  # turn 1 is degraded: it plays at once, unanimated
-            message_pushed(pushed, "state"),
-            message_pushed(pushed, "state", count=2),  # the link is back while it still plays
-            Do(lambda: setattr(fake, "first_segment_ms", 200)),
-            TTSStoppedFrame(),
-            TTSStartedFrame(),  # turn 2, ready long before turn 1 has played out
-            tone_frame(300),
-            TTSStoppedFrame(),
-            SleepFrame(2.0),
-        ],
-    )
+    async with heartbeat() as ticks:
+        down, _ = await play(
+            proc,
+            [
+                link_up(proc),
+                TTSStartedFrame(),
+                tone_frame(1000),
+                audio_at_driveningress(fake),
+                Do(
+                    lambda: fake.close_with(4001)
+                ),  # turn 1 is degraded: it plays at once, unanimated
+                message_pushed(pushed, "state"),
+                message_pushed(pushed, "state", count=2),  # the link is back while it still plays
+                Do(lambda: setattr(fake, "first_segment_ms", 200)),
+                TTSStoppedFrame(),
+                TTSStartedFrame(),  # turn 2, ready long before turn 1 has played out
+                tone_frame(300),
+                TTSStoppedFrame(),
+                SleepFrame(2.0),
+            ],
+        )
     first, second = messages(down, "turn_start")
     assert first["degraded"] is True and second["degraded"] is False
     assert second["prev_turn_id"] == "" and second["prev_turn_pcm_ms"] == 0
@@ -2015,13 +2036,15 @@ async def test_a_turn_after_a_degraded_turn_is_not_chained(fake):
     # Turn 2 was ready while turn 1 still played, so the quiet is played as silence, right
     # behind turn 1's last sample: the room's gap is that silence, exactly (gap_ms).
     _, _, gap = between_turns(down)
-    assert gap and all(type(f) is OutputAudioRawFrame and set(f.audio) == {0} for f in gap)
-    quiet = sum(len(f.audio) for f in gap) / (2 * 24000)
-    assert quiet == second["gap_ms"] / 1000 >= GAP_S
+    assert all(type(f) is OutputAudioRawFrame and set(f.audio) == {0} for f in gap)
     # Announced at its release, after the quiet: when the room has one chunk of it left to play.
     announced = turn_start_time(pushed, second["turn_id"])
-    assert announced > max(t for t, f in pushed if f is gap[-1])
-    assert announced - end1 >= quiet - CHUNK_MS / 1000 - GAP_SLACK_S
+    assert all(announced > t for t, f in pushed if any(f is g for g in gap))
+    assert_quiet_before(pushed, gap, announced, end1, GAP_S)
+    if held_up(ticks, end1 - CHUNK_MS / 1000, t2):  # the room may have run dry (accepted)
+        assert second["gap_ms"] in (0, quiet_ms(gap))
+    else:
+        assert second["gap_ms"] == quiet_ms(gap) == EMITTED_GAP_MS
     assert type(second_audio) is TTSAudioRawFrame and 0 <= t2 - announced < LATE_S
     assert_turn_lifecycle(down)
 
@@ -2351,14 +2374,18 @@ async def test_unchained_turn_emits_its_gap_as_silence_and_reports_gap_ms(fake):
         )
     first, second = messages(down, "turn_start")
     assert first["degraded"] is True and second["prev_turn_id"] == ""
-    assert first["gap_ms"] == 0 and second["gap_ms"] == EMITTED_GAP_MS
     stopped, started, gap = between_turns(down)
+    t2 = next(t for t, f in pushed if f is turn_audio(down)[1][0])
+    assert first["gap_ms"] == 0
+    if held_up(ticks, t2 - 1.0, t2):  # the room may have run dry (an accepted limit)
+        assert second["gap_ms"] in (0, quiet_ms(gap))
+    else:
+        assert second["gap_ms"] == quiet_ms(gap) == EMITTED_GAP_MS
     # Right behind turn 1's last sample (its TTSStoppedFrame follows it directly): only silence,
     # in whole output chunks, as long as gap_ms, in the class stall silence has.
     assert isinstance(down[stopped - 1], TTSAudioRawFrame)
     assert all(type(f) is OutputAudioRawFrame and set(f.audio) == {0} for f in gap)
     assert all(len(f.audio) == CHUNK_BYTES for f in gap)
-    assert len(gap) * CHUNK_MS == second["gap_ms"]
     # Announced once its release starts, after the silence: nothing it could take for an onset.
     announce = next(
         i
@@ -2368,7 +2395,6 @@ async def test_unchained_turn_emits_its_gap_as_silence_and_reports_gap_ms(fake):
     )
     assert down.index(gap[-1]) < announce < started
     # The silence went out without a gap of its own: pushed one chunk ahead, up to turn 2's audio.
-    t2 = next(t for t, f in pushed if f is turn_audio(down)[1][0])
     assert_bridged([t for t, f in pushed if any(f is g for g in gap)], t2, ticks)
     # Neither turn's envelope or inference stream has it.
     assert envelope_values(down, second["turn_id"]) == fingerprint(turn_audio(down)[1])
@@ -2614,12 +2640,15 @@ async def test_an_unchained_turn_after_a_short_gap_hears_exactly_gap_ms_of_silen
     assert quiet and all(type(f) is OutputAudioRawFrame and not any(f.audio) for f in quiet)
     assert all(len(f.audio) == CHUNK_BYTES for f in quiet)
     assert_quiet_before(pushed, quiet, t2, end1, GAP_S)
-    if second["gap_ms"] == 0:  # the room ran dry inside the quiet: only a held-up loop may
-        assert held_up(ticks, end1 - CHUNK_MS / 1000, t2)
+    if held_up(ticks, end1 - CHUNK_MS / 1000, t2):
+        # A loop held up for more than a chunk lets the room run dry, as for stall silence (an
+        # accepted limit): the gap is then not all fill, or not known to be, and may say 0.
+        assert second["gap_ms"] in (0, quiet_ms(quiet))
     else:
         # What the room hears between the two turns' samples is exactly gap_ms of silence.
-        assert second["gap_ms"] == quiet_ms(quiet) >= EMITTED_GAP_MS
-        assert room_quiet(pushed, quiet, t2, end1) * 1000 == pytest.approx(second["gap_ms"])
+        assert second["gap_ms"] == quiet_ms(quiet) == EMITTED_GAP_MS
+        # (to the processor's own 1 ms tolerance on the clock)
+        assert room_quiet(pushed, quiet, t2, end1) * 1000 == pytest.approx(second["gap_ms"], abs=1)
     for start, audio in zip((first, second), turn_audio(down), strict=True):
         assert envelope_values(down, start["turn_id"]) == fingerprint(audio)
         assert fake.received_audio_ms(start["turn_id"]) == padded(300)
@@ -2657,8 +2686,10 @@ async def test_a_turn_after_an_idle_longer_than_the_fill_reports_gap_zero(fake):
     _, _, fill = between_turns(down)
     assert all(type(f) is OutputAudioRawFrame and not any(f.audio) for f in fill)
     assert quiet_ms(fill) <= FILL_CAP_MS  # never more than the cap
+    # The last fill chunk goes one chunk before the cap ends, counted from turn 1's last sample;
+    # turn 1's turn_end, pushed at its playout end, bounds that from above on any machine.
     last = max(t for t, f in pushed if any(f is g for g in fill))
-    assert last < end1 + FILL_CAP_MS / 1000 < t2  # it stopped before the cap, long before turn 2
+    assert last < turn_end_time(pushed, 1) + FILL_CAP_MS / 1000 < t2
     if not held_up(ticks, end1 - CHUNK_MS / 1000, end1 + FILL_CAP_MS / 1000):
         assert quiet_ms(fill) == FILL_CAP_MS  # and, with the loop there, went on up to it
     assert_turn_lifecycle(down)
