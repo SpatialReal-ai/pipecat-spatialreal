@@ -1,9 +1,8 @@
 """Streaming log-RMS envelope of PCM audio, quantised to one byte per value.
 
 The envelope is the audio half of a content fingerprint: the plugin computes it from the audio it
-releases to the output transport and sends it to the server, which computes the same curve from the
-audio it drove the animation with, so the two sides can be lined up on content rather than on
-arrival time.
+releases to the output transport and sends it to the browser, which computes the same curve on the
+track it receives, so the two sides can be lined up on content rather than on arrival time.
 
 The definition is a contract and must not drift:
 

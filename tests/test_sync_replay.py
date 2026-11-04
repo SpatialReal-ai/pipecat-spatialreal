@@ -13,6 +13,15 @@ the rule tracks it. The criteria are the ones design 4.1 restates after the firs
   on at least 95 % of the turns;
 * p95 of the accepted ticks' error against the phrase truth is at most 5 ms.
 
+"Every turn" means every turn the rule saw with at least 300 ms of received speech. Each capture
+is replayed twice: with the oracle's zero-phase 30 Hz high-pass and with the browser's causal one.
+
+The truth shares the reference with the rule: both correlate the same reassembled reference
+envelope, so a wrong index origin in that reference would move both alike and not show here. The
+origin is pinned at the processor level, in ``tests/test_processor.py``:
+``test_envelope_values_equal_fingerprint_on_the_pushed_bytes`` and
+``test_one_chunk_turn_has_seven_values``.
+
 The fixtures are not in the sdist (see ``pyproject.toml``); without them the tests skip.
 """
 
@@ -58,20 +67,27 @@ def replay():
     return _load_replay()
 
 
-def _run(replay, capture: Path):
+def _run(replay, capture: Path, causal: bool):
     """The replay's per-turn results; its tables go to a buffer."""
     with contextlib.redirect_stdout(io.StringIO()):
-        results = replay.main([str(capture)])
+        results = replay.main([str(capture)] + (["--causal"] if causal else []))
     seen = [r for r in results if r["accepted"] or r["held"]]
     speech = [r for r in seen if (r["rx_ms"] or 0) >= 300]
     return results, speech
 
 
-@pytest.fixture(scope="module", params=_FIXTURES or [None], ids=lambda p: p.name if p else "none")
+_CASES = [(f, causal) for f in _FIXTURES for causal in (False, True)]
+
+
+@pytest.fixture(
+    scope="module",
+    params=_CASES or [None],
+    ids=lambda c: f"{c[0].name}-{'causal' if c[1] else 'zero-phase'}" if c else "none",
+)
 def capture(request, replay):
     if request.param is None:
         pytest.skip("tests/fixtures/sync/*-clean is not in the sdist")
-    return _run(replay, request.param)
+    return _run(replay, *request.param)
 
 
 def test_the_capture_still_holds_its_speech_turns(capture):

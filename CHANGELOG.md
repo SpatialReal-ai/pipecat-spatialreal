@@ -27,8 +27,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SpatialReal.
 - The probe page (`examples/probe`) runs the alignment live on the tapped track, prints its
   alignment columns (`first lock ms`, `offset ms`, `p95 err ms`, `held / acc` and the four checks)
-  and saves paired captures: the bot's track, the server's envelope and every message. Two clean captures, one on
-  Daily and one on LiveKit, are fixtures in `tests/fixtures/sync/`.
+  and saves paired captures: the bot's track, the server's envelope and every message. Two clean
+  captures, one on Daily and one on LiveKit, are fixtures in `tests/fixtures/sync/`.
 - `hack/sync-sim/`: the simulation behind the alignment rule and its thresholds (`dsp.py` is the
   normative definition the web SDK ports), and `replay_capture.py`, which replays the rule over a
   paired capture and prints the design's validation minimum.
@@ -39,7 +39,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- The sdist leaves out `hack/` and the paired captures (4 MB instead of 10); the wheel is
+- The sdist leaves out `hack/` and the paired captures, so it stays at about 4 MB; the wheel is
   unchanged. The tests that need them skip without them.
 
 ## [0.1.0] - 2026-11-03

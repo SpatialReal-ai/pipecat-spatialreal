@@ -84,8 +84,11 @@ The thresholds were chosen with these definitions; redefining any of them means 
 
 Known difference to the browser: the simulation's receiver high-pass (30 Hz, `dsp.band_mask_filter`
 with `dc_block`) is **zero phase**, applied in the FFT domain over the whole signal. The browser's
-will be **causal** (a first-order IIR at 30 Hz); its effect on the thresholds is to be checked on
-the paired Chrome captures.
+is **causal** (a first-order IIR at 30 Hz). Its effect has been checked and is negligible: it
+moves the oracle fixture's offset by 0.04 ms; on the paired Chrome captures (`replay_capture.py`
+with and without `--causal`) the Daily recording's p95 error against the whole-turn truth is
+5.00 ms zero phase and 5.02 ms causal, and the `daily-clean` fixture's against the phrase truth
+2.32 and 2.31 ms. `tests/test_sync_replay.py` replays the captures both ways.
 
 ## Rerunning
 

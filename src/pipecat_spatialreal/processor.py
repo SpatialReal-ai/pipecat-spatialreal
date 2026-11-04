@@ -85,9 +85,9 @@ CONNECT_TIMEOUT_S = 10.0
 # Timers may fire this early; a deadline this close counts as reached.
 _TOLERANCE_S = 0.001
 
-# Longest the room is kept fed with silence after a turn's last sample while no turn plays. The web
-# SDK treats a longer quiet as an idle and cuts its alignment window there, so a longer fill would
-# tell it nothing; past it the transport's own idle takes over, and the next turn reports no gap.
+# Longest the room is kept fed with silence after a turn's last sample while no turn plays. Past it
+# the transport's own idle takes over and the next turn, unchained, reports gap_ms 0; the web SDK
+# never splices on that, so the turn's alignment starts on its own envelope.
 _FILL_CAP_S = 1.0
 
 # Writes waiting for the writer task, at most. The writer keeps up with the TTS on a healthy
