@@ -96,7 +96,7 @@ def build_received(source: np.ndarray, case: dict) -> np.ndarray:
 
     The source is reversed when the case's ``reverse`` is set, and all zeros when ``silent`` is. A
     segment may set its own ``reverse`` (other audio for that stretch) and ``shift`` (its samples
-    arithmetic-shifted right by that many bits: quieter by 6 dB a bit).
+    arithmetic-shifted right by that many bits: each bit is 6 dB quieter, so shift 2 is 12 dB).
     """
     src = (
         np.zeros_like(source)

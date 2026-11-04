@@ -683,25 +683,17 @@ test('sync: the room-noise cases put the floor above -70 dB, from the 3 s histor
     const env = oracleReceivedDb(c, { highPassHz: null })
     const floor = sync.align(env, oracleReference(c), c.prior_index).checks.floor
     const history = Array.from(env.subarray(Math.max(0, env.length - 600)))
+    assert(floor > -60, `${name}: floor ${floor}`)
     assert.equal(floor, sync.percentile(history, 5) + 6, name)
+    // The 5th percentile interpolates (numpy's linear rule), and the last 1 s alone would give another floor.
+    assert(!history.slice().sort((a, b) => a - b).includes(sync.percentile(history, 5)), `${name}: the 5th percentile falls between two values`)
+    assert.notEqual(floor, sync.percentile(history.slice(-200), 5) + 6, `${name}: 1 s of history would give another floor`)
     if (name === 'room-noise-long') {
+      // 3.4 s of track: a 4 s history would be all of it, and gives another floor.
       assert(env.length > 600, 'longer than the 3 s history')
-      assert.notEqual(floor, sync.percentile(Array.from(env.subarray(env.length - 800)), 5) + 6, '4 s of history would give another floor')
+      assert.notEqual(floor, sync.percentile(Array.from(env.subarray(0)), 5) + 6, '4 s of history would give another floor')
     }
   }
-})
-
-test('sync: the room-noise case puts the floor above -70 dB, from the 3 s history (details)', () => {
-  const c = ORACLE.cases.find(k => k.name === 'room-noise')
-  const env = oracleReceivedDb(c, { highPassHz: null })
-  const floor = sync.align(env, oracleReference(c), c.prior_index).checks.floor
-  assert(floor > -60, `floor ${floor}`)
-  // The 5th percentile interpolates (numpy's linear rule), and the last 1 s alone would give another floor.
-  const all = Array.from(env.subarray(Math.max(0, env.length - 600)))
-  assert.equal(floor, sync.percentile(all, 5) + 6)
-  assert.notEqual(floor, sync.percentile(all.slice(-200), 5) + 6)
-  const sorted = all.slice().sort((a, b) => a - b)
-  assert(!sorted.includes(sync.percentile(all, 5)), 'the 5th percentile falls between two values')
 })
 
 test('sync: the rule\'s fixed terms and the cadence are the design\'s values', () => {
