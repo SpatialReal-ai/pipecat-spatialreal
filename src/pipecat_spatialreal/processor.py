@@ -12,6 +12,13 @@ It sits between the TTS service and ``transport.output()``. Each TTS context, fr
   hand. Keyframes that come later are pushed at once, ahead of the audio they belong to.
 * When the TTS falls behind playback, the processor plays silence and sends the same silence to
   driveningress, so the audio inference saw and the audio in the room stay sample-identical.
+* Every sample of a turn the room plays, stall silence and padding included, is described by the
+  turn's envelope (:mod:`pipecat_spatialreal.fingerprint`), sent as ``turn_envelope`` messages
+  after ``turn_start`` and before the audio they describe, so the browser can line the audio it
+  receives up with the animation by its content.
+* A turn that does not follow the previous one back to back starts after a quiet the browser can
+  find its onset in. When the previous turn is still playing, the processor plays that quiet
+  itself, as silence right behind it, and ``turn_start`` reports its exact length (``gap_ms``).
 
 The audio is released in whole output chunks (``output_chunk_ms``, the transport's own chunk),
 and every turn ends on a chunk boundary: its tail is padded with silence that inference sees
@@ -41,6 +48,8 @@ that does not return within ``wire_timeout_s`` is a loss like any other.
 
 import asyncio
 import dataclasses
+import itertools
+import math
 import sys
 from array import array
 from collections import deque
@@ -65,6 +74,7 @@ from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 
 from pipecat_spatialreal import envelope
 from pipecat_spatialreal.driven import DrivenIngress, Segment, _describe, close_code
+from pipecat_spatialreal.fingerprint import Envelope
 from pipecat_spatialreal.onset import OnsetTracker
 from pipecat_spatialreal.proto.generated import avatar_pb2
 
@@ -189,6 +199,12 @@ class _Turn:
         self.segments: deque[Segment] = deque()  # arrived and not pushed yet
         self.segment_count = 0  # pushed
         self.end_pushed = False  # the segment with driveningress's end flag was pushed
+        # The fingerprint of the turn's released samples, in the order the room plays them, from
+        # its first sample (index 0); turn_envelope messages carry it ahead of the audio.
+        self.envelope = Envelope(rate)
+        self.described = 0  # chunks at the front of the hold already in the envelope
+        self.gap_chunks = 0  # chunks of the quiet before it still to release, before its audio
+        self.gap_ms = 0.0  # that quiet in ms, when it follows the previous turn's last sample
 
     @property
     def interruptible(self) -> bool:
@@ -304,7 +320,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 setting for it, so do not change it on its own. A turn that does not follow
                 the previous one back to back starts at least this long after the last audio
                 before it, so that the web SDK can find its onset; one that would have started
-                sooner waits until this long plus one ``silence_chunk_ms`` have passed.
+                sooner waits until this long plus one ``silence_chunk_ms`` have passed. When the
+                previous turn is still playing then, that quiet is played as silence, rounded up
+                to whole ``output_chunk_ms``, and reported to the browser as ``gap_ms``.
             lead_ms: How far ahead of real time the audio is released.
             hold_cap_s: Longest time a turn's audio is held for its first animation, counted
                 from the turn's first audio; after it, the turn plays without animation. Also
@@ -981,6 +999,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 prev_turn_id=prev_turn_id,
                 prev_turn_pcm_ms=prev_turn_pcm_ms,
                 degraded=turn.degraded,
+                gap_ms=turn.gap_ms,
             )
         )
 
@@ -1022,15 +1041,35 @@ class SpatialRealAvatarProcessor(FrameProcessor):
 
         A turn that is chained, or that plays without animation, starts as soon as it can. Any
         other starts once the last audio released before it has been followed by
-        ``min_silence_ms`` and one chunk of quiet. The room's transport fills that gap; nothing
-        is sent to inference for it.
+        ``min_silence_ms`` and one chunk of quiet. Nothing is sent to inference for that quiet:
+        it lies between two requests.
+
+        When the room is still playing the previous turn's last sample as this is decided, the
+        processor plays the quiet itself, as silence in whole output chunks right behind that
+        sample (``turn.gap_chunks``; see ``_release``): the gap between the two turns is then
+        known to the sample, and ``turn_start`` reports it as ``gap_ms``, so the client can join
+        the two envelopes into one. Otherwise the gap holds sound that is not the previous turn's,
+        or the transport's own idle, whose length is not known to the sample: the room's transport
+        fills it as before, and ``gap_ms`` stays 0.
         """
         if turn.chained or turn.degraded or turn.silent:
             return 0.0
         quiet_since = self._playout_end
-        if self._now() - quiet_since >= self._min_silence_ms / 1000:
+        now = self._now()
+        if now - quiet_since >= self._min_silence_ms / 1000:
             return 0.0
-        return quiet_since + (self._min_silence_ms + self._silence_chunk_ms) / 1000
+        quiet_ms = self._min_silence_ms + self._silence_chunk_ms
+        prev = self._chain
+        if (
+            prev is not None
+            and prev.finished
+            and prev.playout_end > now + _TOLERANCE_S  # the room still plays its audio...
+            and quiet_since <= prev.playout_end + _TOLERANCE_S  # ...and nothing after it
+        ):
+            turn.gap_chunks = math.ceil(quiet_ms / self._output_chunk_ms)
+            turn.gap_ms = turn.gap_chunks * (self._chunk_bytes // 2) * 1000 / self._out_rate
+            return 0.0
+        return quiet_since + quiet_ms / 1000
 
     async def _forward_segments(self, turn: _Turn) -> None:
         while turn.segments:
@@ -1057,6 +1096,20 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             if turn.release_at > self._now() + _TOLERANCE_S:
                 deadlines.append(turn.release_at)  # no silence for the gap: the room plays it
                 return
+            while turn.gap_chunks:  # the quiet before it, right behind the previous turn's audio
+                due = self._next_release(self._stall_ahead_s)
+                if due is not None:
+                    deadlines.append(due)
+                    return
+                await self._play_gap(turn)
+            if not turn.announced and turn.gap_ms:
+                # Its quiet is queued: it starts when the room has one chunk of that left, as a
+                # stall resumes, and not up to the lead early, which would announce it sooner
+                # after the previous turn's last sound than the quiet it waited for.
+                due = self._next_release(self._stall_ahead_s)
+                if due is not None:
+                    deadlines.append(due)
+                    return
             if not turn.announced:  # unchained: announced now, with the animation in hand
                 await self._announce(turn)
                 await self._forward_segments(turn)
@@ -1080,6 +1133,10 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                     if due is not None:
                         deadlines.append(due)
                         return
+                    if not turn.finished:  # the turn's own audio: described before it goes
+                        if not turn.described:
+                            await self._describe_held(turn)
+                        turn.described -= 1
                     self._playout_end = max(self._playout_end, self._now()) + _duration(item)
                 turn.hold.popleft()
                 await self.push_frame(item)
@@ -1090,17 +1147,56 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         due = self._playout_end - ahead
         return None if due <= self._now() + _TOLERANCE_S else due
 
+    async def _describe_held(self, turn: _Turn) -> None:
+        """Send the envelope of all of the turn's own audio that waits in its hold, in order.
+
+        Called when the next chunk to release is not described yet. The turn's own audio in the
+        hold is what the room plays next, in this order: stall silence is only played once the
+        hold is empty, the quiet before a turn comes before its first sample, and what follows
+        the turn's end in its hold is not the turn's. So one message describes the whole run that
+        is in hand, rather than one per 40 ms chunk, and it goes out before the run's first chunk.
+        """
+        pcm = [
+            item.audio
+            for item in itertools.takewhile(lambda item: item is not _END_OF_AUDIO, turn.hold)
+            if turn.on_track(item)
+        ]
+        turn.described = len(pcm)
+        await self._push_envelope(turn, b"".join(pcm))
+
+    async def _push_envelope(self, turn: _Turn, pcm: bytes) -> None:
+        """Add samples about to be released for ``turn`` to its envelope; send what they complete."""
+        first = turn.envelope.index
+        for data in envelope.turn_envelope(turn.turn_id, first, turn.envelope.feed(pcm)):
+            await self._push_message(data)
+
     async def _play_silence(self, turn: _Turn) -> None:
-        """Play one chunk of silence for the turn, and queue the same samples for inference."""
+        """Play one chunk of silence for the turn, and queue the same samples for inference.
+
+        The silence is part of the turn: counted, in its envelope, sent to inference.
+        """
         pcm = self._silence
         turn.onsets.extend(turn.tracker.feed(pcm))
         turn.pcm_bytes += len(pcm)
+        await self._push_envelope(turn, pcm)  # described before it plays, as any of its audio
+        self._queue_write(turn, pcm)  # the same samples inference sees; never waited for here
+        await self._push_quiet(turn, pcm)
+
+    async def _play_gap(self, turn: _Turn) -> None:
+        """Play one output chunk of the quiet before ``turn`` (see ``_release_start``).
+
+        It belongs to no turn: it is not counted, described or sent to inference.
+        """
+        turn.gap_chunks -= 1
+        await self._push_quiet(turn, bytes(self._chunk_bytes))
+
+    async def _push_quiet(self, turn: _Turn, pcm: bytes) -> None:
+        """Push silence on the turn's track; not TTS audio, so Pipecat does not count it as speech."""
         frame = OutputAudioRawFrame(audio=pcm, sample_rate=self._out_rate, num_channels=1)
         frame.transport_destination = turn.started.transport_destination
         frame.interruptible = turn.interruptible
         self._playout_end = max(self._playout_end, self._now()) + _duration(frame)
-        self._queue_write(turn, pcm)  # the same samples inference sees; never waited for here
-        await self.push_frame(frame)  # not TTS audio: Pipecat does not count it as speech
+        await self.push_frame(frame)
 
     async def _close(self, deadlines: list[float]) -> None:
         """End the turns whose audio has played out and whose animation is complete."""
