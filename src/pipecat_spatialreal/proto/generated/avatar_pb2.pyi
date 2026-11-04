@@ -8,7 +8,7 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class AvatarMessage(_message.Message):
-    __slots__ = ("tag", "turn_start", "turn_onsets", "frames", "turn_end", "turn_abort", "state")
+    __slots__ = ("tag", "turn_start", "turn_onsets", "frames", "turn_end", "turn_abort", "state", "turn_envelope")
     TAG_FIELD_NUMBER: _ClassVar[int]
     TURN_START_FIELD_NUMBER: _ClassVar[int]
     TURN_ONSETS_FIELD_NUMBER: _ClassVar[int]
@@ -16,6 +16,7 @@ class AvatarMessage(_message.Message):
     TURN_END_FIELD_NUMBER: _ClassVar[int]
     TURN_ABORT_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
+    TURN_ENVELOPE_FIELD_NUMBER: _ClassVar[int]
     tag: str
     turn_start: TurnStart
     turn_onsets: TurnOnsets
@@ -23,10 +24,11 @@ class AvatarMessage(_message.Message):
     turn_end: TurnEnd
     turn_abort: TurnAbort
     state: State
-    def __init__(self, tag: _Optional[str] = ..., turn_start: _Optional[_Union[TurnStart, _Mapping]] = ..., turn_onsets: _Optional[_Union[TurnOnsets, _Mapping]] = ..., frames: _Optional[_Union[Frames, _Mapping]] = ..., turn_end: _Optional[_Union[TurnEnd, _Mapping]] = ..., turn_abort: _Optional[_Union[TurnAbort, _Mapping]] = ..., state: _Optional[_Union[State, _Mapping]] = ...) -> None: ...
+    turn_envelope: TurnEnvelope
+    def __init__(self, tag: _Optional[str] = ..., turn_start: _Optional[_Union[TurnStart, _Mapping]] = ..., turn_onsets: _Optional[_Union[TurnOnsets, _Mapping]] = ..., frames: _Optional[_Union[Frames, _Mapping]] = ..., turn_end: _Optional[_Union[TurnEnd, _Mapping]] = ..., turn_abort: _Optional[_Union[TurnAbort, _Mapping]] = ..., state: _Optional[_Union[State, _Mapping]] = ..., turn_envelope: _Optional[_Union[TurnEnvelope, _Mapping]] = ...) -> None: ...
 
 class TurnStart(_message.Message):
-    __slots__ = ("turn_id", "sample_rate", "fps", "onsets_ms", "prev_turn_id", "prev_turn_pcm_ms", "degraded")
+    __slots__ = ("turn_id", "sample_rate", "fps", "onsets_ms", "prev_turn_id", "prev_turn_pcm_ms", "degraded", "gap_ms")
     TURN_ID_FIELD_NUMBER: _ClassVar[int]
     SAMPLE_RATE_FIELD_NUMBER: _ClassVar[int]
     FPS_FIELD_NUMBER: _ClassVar[int]
@@ -34,6 +36,7 @@ class TurnStart(_message.Message):
     PREV_TURN_ID_FIELD_NUMBER: _ClassVar[int]
     PREV_TURN_PCM_MS_FIELD_NUMBER: _ClassVar[int]
     DEGRADED_FIELD_NUMBER: _ClassVar[int]
+    GAP_MS_FIELD_NUMBER: _ClassVar[int]
     turn_id: str
     sample_rate: int
     fps: int
@@ -41,7 +44,8 @@ class TurnStart(_message.Message):
     prev_turn_id: str
     prev_turn_pcm_ms: float
     degraded: bool
-    def __init__(self, turn_id: _Optional[str] = ..., sample_rate: _Optional[int] = ..., fps: _Optional[int] = ..., onsets_ms: _Optional[_Iterable[float]] = ..., prev_turn_id: _Optional[str] = ..., prev_turn_pcm_ms: _Optional[float] = ..., degraded: bool = ...) -> None: ...
+    gap_ms: float
+    def __init__(self, turn_id: _Optional[str] = ..., sample_rate: _Optional[int] = ..., fps: _Optional[int] = ..., onsets_ms: _Optional[_Iterable[float]] = ..., prev_turn_id: _Optional[str] = ..., prev_turn_pcm_ms: _Optional[float] = ..., degraded: bool = ..., gap_ms: _Optional[float] = ...) -> None: ...
 
 class TurnOnsets(_message.Message):
     __slots__ = ("turn_id", "onsets_ms")
@@ -76,6 +80,20 @@ class TurnEnd(_message.Message):
     pcm_ms: float
     segment_count: int
     def __init__(self, turn_id: _Optional[str] = ..., pcm_ms: _Optional[float] = ..., segment_count: _Optional[int] = ...) -> None: ...
+
+class TurnEnvelope(_message.Message):
+    __slots__ = ("turn_id", "first_index", "hop_ms", "window_ms", "values")
+    TURN_ID_FIELD_NUMBER: _ClassVar[int]
+    FIRST_INDEX_FIELD_NUMBER: _ClassVar[int]
+    HOP_MS_FIELD_NUMBER: _ClassVar[int]
+    WINDOW_MS_FIELD_NUMBER: _ClassVar[int]
+    VALUES_FIELD_NUMBER: _ClassVar[int]
+    turn_id: str
+    first_index: int
+    hop_ms: int
+    window_ms: int
+    values: bytes
+    def __init__(self, turn_id: _Optional[str] = ..., first_index: _Optional[int] = ..., hop_ms: _Optional[int] = ..., window_ms: _Optional[int] = ..., values: _Optional[bytes] = ...) -> None: ...
 
 class TurnAbort(_message.Message):
     __slots__ = ("turn_id",)
