@@ -137,7 +137,10 @@ async def test_two_turns_back_to_back_reach_the_room_as_inference_saw_them(fake)
     # ...and the room's track is exactly those two, one after the other: nothing padded by the
     # transport before B, nothing of B discarded at A's end.
     written = bytes(room.written)
-    assert written == heard_a + heard_b
+    assert written[: len(heard_a + heard_b)] == heard_a + heard_b
+    # After B, only the silence that keeps the room fed after a turn, in whole chunks.
+    fill = written[len(heard_a + heard_b) :]
+    assert not any(fill) and len(fill) % (2 * RATE * 40 // 1000) == 0
     assert written.index(pcm_b) == len(heard_a)
     assert second["prev_turn_pcm_ms"] == len(heard_a) * 1000 / (2 * RATE) == 720.0
     assert [e["pcm_ms"] for e in messages(down, "turn_end")] == [720.0, 520.0]

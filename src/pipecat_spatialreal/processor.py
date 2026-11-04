@@ -16,9 +16,11 @@ It sits between the TTS service and ``transport.output()``. Each TTS context, fr
   turn's envelope (:mod:`pipecat_spatialreal.fingerprint`), sent as ``turn_envelope`` messages
   after ``turn_start`` and before the audio they describe, so the browser can line the audio it
   receives up with the animation by its content.
-* A turn that does not follow the previous one back to back starts after a quiet the browser can
-  find its onset in. When the previous turn is still playing, the processor plays that quiet
-  itself, as silence right behind it, and ``turn_start`` reports its exact length (``gap_ms``).
+* After a turn's last sample the processor keeps the room fed with silence until the next turn
+  starts, for up to a second. That silence belongs to no turn: it is not sent to inference and
+  is in no envelope. A turn that does not follow the previous one back to back starts once that
+  quiet is long enough for the browser to find its onset in, and ``turn_start`` reports the
+  quiet's exact length (``gap_ms``), so the browser can join the two turns' envelopes.
 
 The audio is released in whole output chunks (``output_chunk_ms``, the transport's own chunk),
 and every turn ends on a chunk boundary: its tail is padded with silence that inference sees
@@ -49,7 +51,6 @@ that does not return within ``wire_timeout_s`` is a loss like any other.
 import asyncio
 import dataclasses
 import itertools
-import math
 import sys
 from array import array
 from collections import deque
@@ -83,6 +84,11 @@ CONNECT_TIMEOUT_S = 10.0
 
 # Timers may fire this early; a deadline this close counts as reached.
 _TOLERANCE_S = 0.001
+
+# Longest the room is kept fed with silence after a turn's last sample while no turn plays. The web
+# SDK treats a longer quiet as an idle and cuts its alignment window there, so a longer fill would
+# tell it nothing; past it the transport's own idle takes over, and the next turn reports no gap.
+_FILL_CAP_S = 1.0
 
 # Writes waiting for the writer task, at most. The writer keeps up with the TTS on a healthy
 # link; a backlog this long means it is stuck, and the write it is stuck on is about to time out.
@@ -184,7 +190,7 @@ class _Turn:
         self.ready = False  # its animation is in hand (or given up on): it may be announced
         self.announced = False  # turn_start pushed, or released without one (silent)
         self.chained = False  # its turn_start names the turn it follows back to back
-        self.release_at: float | None = None  # loop time its release may start, once decided
+        self.releasing = False  # its release has begun: the room plays its hold from here
         self.silent = False  # it stopped without audio: released, never announced
         self.stopped = False  # its audio is complete: _END_OF_AUDIO is in the hold
         self.finished = False  # its last sample has been released
@@ -203,8 +209,7 @@ class _Turn:
         # its first sample (index 0); turn_envelope messages carry it ahead of the audio.
         self.envelope = Envelope(rate)
         self.described = 0  # chunks at the front of the hold already in the envelope
-        self.gap_chunks = 0  # chunks of the quiet before it still to release, before its audio
-        self.gap_ms = 0.0  # that quiet in ms, when it follows the previous turn's last sample
+        self.gap_ms = 0.0  # the fill between the previous turn's last sample and its first
 
     @property
     def interruptible(self) -> bool:
@@ -320,9 +325,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 setting for it, so do not change it on its own. A turn that does not follow
                 the previous one back to back starts at least this long after the last audio
                 before it, so that the web SDK can find its onset; one that would have started
-                sooner waits until this long plus one ``silence_chunk_ms`` have passed. When the
-                previous turn is still playing then, that quiet is played as silence, rounded up
-                to whole ``output_chunk_ms``, and reported to the browser as ``gap_ms``.
+                sooner waits until this long plus one ``silence_chunk_ms`` have passed. The
+                processor plays that quiet itself, as silence in whole ``output_chunk_ms``, and
+                reports its length to the browser as ``gap_ms``.
             lead_ms: How far ahead of real time the audio is released.
             hold_cap_s: Longest time a turn's audio is held for its first animation, counted
                 from the turn's first audio; after it, the turn plays without animation. Also
@@ -427,6 +432,13 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         self._chain: _Turn | None = None  # the latest announced turn, which the next may follow
         self._end_frame: EndFrame | None = None  # waits until every turn is closed
         self._playout_end = 0.0  # loop time by which everything released has played
+        # The quiet between turns. _sound_end is where the last audio that is not the fill ends;
+        # the fill is the silence released since then, while no turn plays (see _fill).
+        self._sound_end = 0.0
+        self._filling = False  # a turn has played out and the room is kept fed after it
+        self._fill_track: str | None = None  # the track the fill plays on: that turn's
+        self._fill_bytes = 0  # fill released since _sound_end
+        self._fed = False  # the room has played without a break since _sound_end
         self._wake = asyncio.Event()  # something changed for the release task
 
     # --- Pipecat
@@ -617,7 +629,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             await self._keep(last, frame)  # nothing overtakes a turn's frames
             return
         if _plays(frame) and frame.transport_destination == self._track:
-            self._playout_end = max(self._playout_end, self._now()) + _duration(frame)
+            self._queue_playout(_duration(frame))
         await self.push_frame(frame)
 
     async def _keep(self, turn: _Turn, item: Frame | _EndOfAudio) -> None:
@@ -792,6 +804,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         An uninterruptible TTS context (a backchannel, say) plays on, as it does in Pipecat, and
         so does every uninterruptible frame held in an aborted turn.
         """
+        # An interruption ends the quiet after a turn: the room stops being fed, and what the
+        # transport still held of the fill is dropped with the rest, so no gap is known after it.
+        self._filling = self._fed = False
         victims = [turn for turn in self._turns if turn.interruptible]
         if not victims:
             await self.push_frame(frame, direction)
@@ -822,6 +837,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             self._chain = None
         if any(turn.announced for turn in victims):  # the transport drops what it still holds
             self._playout_end = min(self._playout_end, self._now())
+            self._sound_end = min(self._sound_end, self._now())
         interrupt = self._driven is not None and self._last_sent in victims
         if interrupt:
             self._last_sent = None
@@ -842,7 +858,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
         for item in unplaced:
             if _plays(item):
-                self._playout_end = max(self._playout_end, self._now()) + _duration(item)
+                self._queue_playout(_duration(item))
             await self.push_frame(item)
         self._start_driver()
 
@@ -886,6 +902,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 await self._announce_and_forward(deadlines)
                 await self._release(deadlines)
                 await self._close(deadlines)
+                await self._fill(deadlines)
                 if self._wake.is_set():
                     continue
                 try:
@@ -1017,12 +1034,16 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         and by then its audio has long gone to inference at TTS speed, so no silence can be put
         in front of it there. A turn that does not follow back to back is therefore unchained:
         its release waits until the room has been quiet for ``min_silence_ms`` and one chunk
-        (see ``_release_start``), which lets the browser find its onset itself, and it is
+        (see ``_may_start``), which lets the browser find its onset itself, and it is
         announced only as that release starts, so that no sound the room plays before it can be
         taken for that onset.
 
         A previous turn that plays without animation gives the browser no frame to place this
         one from, so the turn is unchained then too.
+
+        The fill (see ``_fill``) is audio after the previous turn as well: a turn ready only once
+        its first chunk is out, which is one chunk (``min(lead_ms, silence_chunk_ms)``) before the
+        previous turn's playout end, is unchained, and starts after the quiet.
 
         Returns:
             ``(prev_turn_id, prev_turn_pcm_ms)``, or ``("", 0.0)`` when the turn is not chained.
@@ -1036,40 +1057,55 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             return "", 0.0  # the room has gone quiet: this turn would start after a gap
         return prev.turn_id, prev.pcm_ms
 
-    def _release_start(self, turn: _Turn) -> float:
-        """The loop time ``turn`` may start releasing at; see ``_follows``.
+    def _may_start(self, turn: _Turn, deadlines: list[float]) -> bool:
+        """Whether ``turn`` may start releasing now; if not, add when to look again.
 
         A turn that is chained, or that plays without animation, starts as soon as it can. Any
         other starts once the last audio released before it has been followed by
-        ``min_silence_ms`` and one chunk of quiet. Nothing is sent to inference for that quiet:
-        it lies between two requests.
+        ``min_silence_ms`` and one chunk of quiet (see ``_follows``). Nothing is sent to
+        inference for that quiet: it lies between two requests.
 
-        When the room is still playing the previous turn's last sample as this is decided, the
-        processor plays the quiet itself, as silence in whole output chunks right behind that
-        sample (``turn.gap_chunks``; see ``_release``): the gap between the two turns is then
-        known to the sample, and ``turn_start`` reports it as ``gap_ms``, so the client can join
-        the two envelopes into one. Otherwise the gap holds sound that is not the previous turn's,
-        or the transport's own idle, whose length is not known to the sample: the room's transport
-        fills it as before, and ``gap_ms`` stays 0.
+        While the room has been fed without a break since that audio, the quiet is the fill
+        (see ``_fill``), whose length is known to the sample: the turn waits until enough of it
+        is queued, then starts when the room has one chunk of it left, as a stall resumes (not
+        up to the lead early, which would announce it sooner after the last sound than the quiet
+        it waited for). Once the room has run dry, the transport's own idle is part of the quiet,
+        which is then measured on the clock.
         """
         if turn.chained or turn.degraded or turn.silent:
-            return 0.0
-        quiet_since = self._playout_end
+            return True
+        quiet_s = (self._min_silence_ms + self._silence_chunk_ms) / 1000
         now = self._now()
-        if now - quiet_since >= self._min_silence_ms / 1000:
-            return 0.0
-        quiet_ms = self._min_silence_ms + self._silence_chunk_ms
+        if self._fed_now():
+            if self._playout_end - self._sound_end < quiet_s - _TOLERANCE_S:
+                deadlines.append(self._playout_end)  # the fill brings it closer, or ends
+                return False
+            due = self._next_release(self._stall_ahead_s)
+            if due is not None:
+                deadlines.append(due)
+                return False
+            return True
+        if now - self._sound_end >= self._min_silence_ms / 1000:
+            return True
+        start = self._sound_end + quiet_s
+        if start > now + _TOLERANCE_S:
+            deadlines.append(start)
+            return False
+        return True
+
+    def _gap_before(self, turn: _Turn) -> float:
+        """The fill in ms between the previous turn's last sample and ``turn``'s first, or 0.
+
+        0 for a chained turn, after an interruption, and wherever the gap is not all fill: other
+        audio played after the previous turn, or the room ran dry (the transport's idle, whose
+        length is not known to the sample).
+        """
         prev = self._chain
-        if (
-            prev is not None
-            and prev.finished
-            and prev.playout_end > now + _TOLERANCE_S  # the room still plays its audio...
-            and quiet_since <= prev.playout_end + _TOLERANCE_S  # ...and nothing after it
-        ):
-            turn.gap_chunks = math.ceil(quiet_ms / self._output_chunk_ms)
-            turn.gap_ms = turn.gap_chunks * (self._chunk_bytes // 2) * 1000 / self._out_rate
+        if turn.chained or prev is None or not prev.finished or not self._fed_now():
             return 0.0
-        return quiet_since + quiet_ms / 1000
+        if abs(self._sound_end - prev.playout_end) > _TOLERANCE_S:
+            return 0.0  # audio that is not the previous turn's played after it
+        return (self._fill_bytes // 2) * 1000 / self._out_rate
 
     async def _forward_segments(self, turn: _Turn) -> None:
         while turn.segments:
@@ -1091,25 +1127,12 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 continue
             if not turn.ready:
                 return  # it holds everything behind it until its animation is in hand
-            if turn.release_at is None:  # its turn to release has come: decide when it starts
-                turn.release_at = self._release_start(turn)
-            if turn.release_at > self._now() + _TOLERANCE_S:
-                deadlines.append(turn.release_at)  # no silence for the gap: the room plays it
-                return
-            while turn.gap_chunks:  # the quiet before it, right behind the previous turn's audio
-                due = self._next_release(self._stall_ahead_s)
-                if due is not None:
-                    deadlines.append(due)
-                    return
-                await self._play_gap(turn)
-            if not turn.announced and turn.gap_ms:
-                # Its quiet is queued: it starts when the room has one chunk of that left, as a
-                # stall resumes, and not up to the lead early, which would announce it sooner
-                # after the previous turn's last sound than the quiet it waited for.
-                due = self._next_release(self._stall_ahead_s)
-                if due is not None:
-                    deadlines.append(due)
-                    return
+            if not turn.releasing:  # its turn to release has come: may it start?
+                if not self._may_start(turn, deadlines):
+                    return  # meanwhile the room is kept fed (see _fill)
+                turn.releasing = True
+                if not turn.announced:
+                    turn.gap_ms = self._gap_before(turn)
             if not turn.announced:  # unchained: announced now, with the animation in hand
                 await self._announce(turn)
                 await self._forward_segments(turn)
@@ -1137,10 +1160,13 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                         if not turn.described:
                             await self._describe_held(turn)
                         turn.described -= 1
-                    self._playout_end = max(self._playout_end, self._now()) + _duration(item)
+                    self._queue_playout(_duration(item))
                 turn.hold.popleft()
                 await self.push_frame(item)
             turn.drained = True  # the next turn may start at once
+            if not turn.silent:  # the room is kept fed after it until the next turn starts
+                self._filling = True
+                self._fill_track = turn.started.transport_destination
 
     def _next_release(self, ahead: float) -> float | None:
         """None when audio may go now, ``ahead`` s of playout at most, else the loop time it may."""
@@ -1180,23 +1206,55 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         turn.pcm_bytes += len(pcm)
         await self._push_envelope(turn, pcm)  # described before it plays, as any of its audio
         self._queue_write(turn, pcm)  # the same samples inference sees; never waited for here
-        await self._push_quiet(turn, pcm)
-
-    async def _play_gap(self, turn: _Turn) -> None:
-        """Play one output chunk of the quiet before ``turn`` (see ``_release_start``).
-
-        It belongs to no turn: it is not counted, described or sent to inference.
-        """
-        turn.gap_chunks -= 1
-        await self._push_quiet(turn, bytes(self._chunk_bytes))
-
-    async def _push_quiet(self, turn: _Turn, pcm: bytes) -> None:
-        """Push silence on the turn's track; not TTS audio, so Pipecat does not count it as speech."""
-        frame = OutputAudioRawFrame(audio=pcm, sample_rate=self._out_rate, num_channels=1)
-        frame.transport_destination = turn.started.transport_destination
+        frame = _silence_frame(pcm, self._out_rate, turn.started.transport_destination)
         frame.interruptible = turn.interruptible
-        self._playout_end = max(self._playout_end, self._now()) + _duration(frame)
-        await self.push_frame(frame)
+        self._queue_playout(_duration(frame))
+        await self.push_frame(frame)  # not TTS audio: Pipecat does not count it as speech
+
+    async def _fill(self, deadlines: list[float]) -> None:
+        """Keep the room fed with silence after a turn's last sample, until the next turn starts.
+
+        One output chunk at a time, one chunk ahead of the room, as stall silence is, for at most
+        ``_FILL_CAP_S`` after the last sound. It is in the same class as stall silence, so it
+        does not count as the bot speaking, but it belongs to no turn: it is not sent to
+        inference, counted or described, and only ``gap_ms`` tells the browser of it. It stops
+        for good at the cap, at an interruption, and once the pipeline is ending: an
+        ``EndFrame`` waiting for the turns to close, or gone already, or a ``CancelFrame``.
+        """
+        if not self._filling or self._finished or self._broken or self._end_frame is not None:
+            return
+        if any(turn.releasing and not turn.drained for turn in self._turns):
+            return  # a turn plays: its own stall silence keeps the room fed
+        while (self._playout_end - self._sound_end) < _FILL_CAP_S - _TOLERANCE_S:
+            due = self._next_release(self._stall_ahead_s)
+            if due is not None:
+                deadlines.append(due)
+                return
+            pcm = bytes(self._chunk_bytes)
+            self._queue_playout(len(pcm) / (2 * self._out_rate), fill=True)
+            self._fill_bytes += len(pcm)
+            await self.push_frame(_silence_frame(pcm, self._out_rate, self._fill_track))
+        self._filling = False  # the cap: from here the transport's own idle fills the room
+
+    def _queue_playout(self, seconds: float, *, fill: bool = False) -> None:
+        """Account for ``seconds`` of audio released now behind what the room already has.
+
+        Audio that is not the fill moves ``_sound_end``, where the quiet before the next turn
+        is measured from; the fill only tells whether the room has stayed fed since then.
+        """
+        now = self._now()
+        if fill:
+            if self._playout_end < now - _TOLERANCE_S:
+                self._fed = False  # the room ran dry before this: the quiet is not all fill
+        else:
+            self._fed, self._fill_bytes = True, 0
+        self._playout_end = max(self._playout_end, now) + seconds
+        if not fill:
+            self._sound_end = self._playout_end
+
+    def _fed_now(self) -> bool:
+        """Whether the room has played without a break since the last audio that was not fill."""
+        return self._fed and self._playout_end >= self._now() - _TOLERANCE_S
 
     async def _close(self, deadlines: list[float]) -> None:
         """End the turns whose audio has played out and whose animation is complete."""
@@ -1234,6 +1292,13 @@ class SpatialRealAvatarProcessor(FrameProcessor):
     def _now(self) -> float:
         assert self._loop is not None
         return self._loop.time()
+
+
+def _silence_frame(pcm: bytes, rate: int, destination: str | None) -> OutputAudioRawFrame:
+    """Silence for the room: plain output audio, which Pipecat does not count as bot speech."""
+    frame = OutputAudioRawFrame(audio=pcm, sample_rate=rate, num_channels=1)
+    frame.transport_destination = destination
+    return frame
 
 
 def _rtvi_enabled(worker: object) -> bool:
