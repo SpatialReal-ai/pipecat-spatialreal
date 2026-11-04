@@ -2451,3 +2451,31 @@ async def test_envelope_values_equal_fingerprint_on_the_pushed_bytes(fake):
     assert envelope_values(down, req_of(down)) == fingerprint(audio)
     (end,) = messages(down, "turn_end")
     assert end["pcm_ms"] == sum(len(f.audio) for f in audio) * 1000 / (2 * 24000)
+
+
+async def test_audio_after_a_turns_end_is_not_in_its_envelope(fake):
+    """A sound held behind a turn's last sample plays after it but is not the turn's: the turn's
+    envelope ends with the turn's own audio, and the next turn's starts with its own."""
+    chime = OutputAudioRawFrame(
+        audio=pcm16(sine(100, 24000, 880)), sample_rate=24000, num_channels=1
+    )
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
+            link_up(proc),
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            chime,  # held behind turn 1's end, in hand when turn 1's release starts
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            message_pushed(pushed, "turn_end", count=2),
+        ],
+    )
+    assert any(f is chime for f in down)
+    for start, audio in zip(messages(down, "turn_start"), turn_audio(down), strict=True):
+        assert all(f is not chime for f in audio)
+        assert envelope_values(down, start["turn_id"]) == fingerprint(audio)
