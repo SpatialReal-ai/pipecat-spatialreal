@@ -23,6 +23,16 @@ newest release and opens a pull request that moves this line when they pass on a
   (`lead_ms`) so that the transport never runs dry.
 * When the TTS falls behind playback, the processor plays silence and sends the same silence to
   SpatialReal, so that the audio inference saw and the audio in the room stay sample-identical.
+* Every sample the room plays for a turn, stall silence and the padding of its last chunk included,
+  is described by the turn's envelope: the log-RMS of the released audio over 10 ms windows, one
+  window every 5 ms, one byte each (200 bytes per second of audio). The processor sends it as
+  `turn_envelope` messages, ahead of the audio they describe, and the browser aligns the animation
+  to the audio by that content.
+* After a turn's last sample the processor keeps the room fed with silence until the next turn
+  starts, for up to one second. That silence is plain audio, not bot speech, and belongs to no turn:
+  it is not sent to SpatialReal and is in no envelope. A turn that does not follow the previous one
+  back to back reports the exact length of the silence before it as `gap_ms` in `turn_start`, so
+  that the browser can join the two turns' envelopes.
 * Pipecat's own frames keep their order: the bot speaks, is interrupted and has its context
   aggregated as before, at the delayed playout. An interruption ends the turn in the browser
   (`turn_abort`) and stops its inference.
@@ -104,7 +114,7 @@ All of them are keyword arguments. The first three are required and must not be 
 | `environment` | `"us-west"` | The SpatialReal deployment to use when the two URLs are not given. |
 | `console_endpoint_url` | `""` | Root URL of the console API that issues session tokens, as in `https://<host>`; the token path is added to it. The older form ending in `/v1/console` is accepted too. Empty takes it from `environment`. |
 | `ingress_endpoint_url` | `""` | URL of SpatialReal's inference ingress with its path, as in `https://<host>/v2/driveningress`. A bare origin, `https://<host>`, is accepted too and gets that path. Empty takes it from `environment`. |
-| `threshold` | `328` | Largest absolute sample value that still counts as silence when finding the audible onsets the browser anchors the animation to. Must equal the web SDK's value, which is fixed at 328 (see below). |
+| `threshold` | `328` | Largest absolute sample value that still counts as silence when finding the audible onsets, which are only a prior for where the animation starts. Must equal the web SDK's value, which is fixed at 328 (see below). |
 | `min_silence_ms` | `150` | Shortest silence, in ms, after which the next sound is a new onset. Must equal the web SDK's value, which is fixed at 150 (see below). A turn that does not follow the previous one back to back starts at least this long after the last audio before it, so that the web SDK can find its onset; one that would have started sooner waits until this long plus one `silence_chunk_ms` have passed. |
 | `lead_ms` | `200` | How far ahead of real time the audio is released. |
 | `hold_cap_s` | `1.5` | Longest time a turn's audio is held for its first animation, counted from the turn's first audio; after it, the turn plays without animation. Also the longest wait, once a turn's audio has played, for the last segment of its animation. |
@@ -119,8 +129,8 @@ onsets in the same audio: a sample `x` is audible when `abs(x) > threshold`, and
 first audible sample after at least `min_silence_ms` of silence. The web SDK applies that rule with
 fixed values, 328 and 150, and takes no setting for either. The two parameters exist so that the
 processor can be kept equal to the web SDK if its rule ever changes; changing either on its own
-makes the two ends find different onsets, and the animation is then anchored to the wrong points of
-the voice.
+makes the two ends find different onsets, and the prior that places the animation until the
+envelope locks is then wrong (see [the browser side](#the-browser-side)).
 
 The constructor raises `ValueError` for an empty credential or a setting out of range. It connects
 to nothing: the connection opens when the pipeline sets the processor up.
@@ -152,8 +162,21 @@ SDK repository, which is not public yet.
 [`examples/client`](https://github.com/SpatialReal-ai/pipecat-spatialreal/tree/main/examples/client)
 is a page that uses it, and its README says how to wire the session in until the release.
 
-The messages between the processor and the browser (`turn_start`, `turn_onsets`, `frames`,
-`turn_end`, `turn_abort` and `state`) are defined in
+The animation is aligned to the audio by content. The processor sends `turn_envelope` messages, the
+envelope of the exact audio it released (one byte per 5 ms, see [How it works](#how-it-works)),
+ahead of the audio they describe. The session computes the same measure on the track it receives and
+correlates the last second of it against the envelope. It accepts an alignment only when the
+correlation peak is high, clearly the best, sharp and the same in both halves of that second; when a
+check fails it changes nothing and the face keeps its last alignment. The onsets (`onsets_ms` in
+`turn_start`, and `turn_onsets`) are only a prior: they place the frames until the turn's first lock,
+and never after it. `gap_ms` in `turn_start` is the silence the processor itself released between
+the previous turn's last sample and this turn's first; it is 0 for a turn that follows the previous
+one back to back, for the first turn, after an interruption and when the room ran dry in between. For
+any `gap_ms` above 0 the session joins the previous turn's envelope, that much silence and this
+turn's envelope, so that the audio it receives can be matched across the turn boundary.
+
+The messages between the processor and the browser (`turn_start`, `turn_onsets`, `turn_envelope`,
+`frames`, `turn_end`, `turn_abort` and `state`) are defined in
 [`pipecat/v1/avatar.proto`](https://github.com/SpatialReal-ai/shared-proto/blob/main/pipecat/v1/avatar.proto),
 a file in SpatialReal's shared contract repository, which is not public yet either. The generated
 code in `src/pipecat_spatialreal/proto/` comes from it, and `src/pipecat_spatialreal/envelope.py`
@@ -190,15 +213,31 @@ rule, because a session token can open SpatialReal sessions billed to your accou
 * **Transports.** Built for Daily and LiveKit rooms. SmallWebRTC has not been tried.
 * **TTS bots only.** A turn is a TTS context and its audio is `TTSAudioRawFrame`. Speech-to-speech
   services that produce audio without TTS frames are not supported in this release.
-* **No background mixer on the bot's output track.** The browser anchors the animation to the
-  audible onsets it finds in the track, and the processor finds them in the voice alone. Other audio
-  mixed into the bot's track is not supported.
+* **No background mixer on the bot's output track.** The envelope and the onsets are both computed
+  on the voice alone, and the browser matches them against the track. Other audio mixed into the
+  bot's track is not supported.
 * **A TTS that ends a context late.** A service that closes a context only when its 3 s idle timeout
   runs out makes the processor play up to 3 s of silence at the end of the turn (sent to inference
   too) and send `turn_end` late.
 * **A sound between two turns.** A sound that is not TTS, played between two turns, can in rare
-  timing be taken by the browser for the next turn's first onset. The animation re-anchors at the
-  next pause in the speech.
+  timing be taken by the browser for the next turn's first onset. That only misplaces the prior
+  (the frames follow it until the envelope locks), and the turn's `gap_ms` is then 0, so its first
+  lock can come later.
+* **A lock takes about a word of speech.** The browser needs that much audio to line the track up
+  with the envelope: in the paired captures (`tests/fixtures/sync`) the median was about 0.15 s and
+  the slowest 0.73 s, on turns that start with silence. Until the lock the frames follow the onset
+  prior, which was within 7 ms of the truth on every turn there.
+* **A mid-turn jitter-buffer jump costs about a second.** When the browser's jitter buffer deletes
+  or inserts audio inside a turn, the one-second window straddles the jump and is refused, so for
+  about a second the face is off by the length of the jump, and then locks again. A jump in the last
+  second of a turn may never be corrected.
+* **Message volume.** While the TTS is behind, each chunk of stall silence (`silence_chunk_ms`, 40 ms
+  by default) is described by a `turn_envelope` message of its own: up to 25 small messages per
+  second.
+* **Sample rates of 22 050 and 44 100 Hz** cannot hold the 5 ms hop in whole samples. It is
+  truncated to 110 or 220 samples, which is 4.989 ms, so the envelope runs fast against a true
+  5 ms clock by about 2.3 ms per second of audio. At 16, 24 and 48 kHz (and 8 and 32 kHz) the hop
+  is exact.
 * **Transcripts run ahead.** Held frames keep the presentation time the TTS stamped on them, which is
   already past when they are released. Word-timestamped text and the assistant aggregator therefore
   run up to `lead_ms` ahead of the speech they report.

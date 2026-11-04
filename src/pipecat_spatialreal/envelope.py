@@ -65,13 +65,15 @@ def turn_start(
         turn_id: The driveningress req_id of the turn.
         sample_rate: Hz of the audio sent to inference, which is also the room track's rate.
         onsets_ms: Offsets in ms from the turn's first sample of the audible onsets found so
-            far, ascending; empty when none was found yet.
+            far, ascending; empty when none was found yet. A prior only: the browser places the
+            frames by them until the turn's envelope locks.
         prev_turn_id: The previous turn when this one follows it without a silence gap, or an
             empty string.
         prev_turn_pcm_ms: Exact PCM length of ``prev_turn_id`` in ms; 0 when that is empty.
         degraded: True when no animation arrived in time, so the client plays audio only.
-        gap_ms: Silence in ms the processor measured between the previous turn's end and this
-            turn's first sample; 0 when there is none.
+        gap_ms: Silence in ms the processor itself released between the previous turn's last
+            sample and this turn's first, so the browser can join the two envelopes; 0 for a
+            chained turn, the first turn, after an interruption and when the room ran dry.
 
     Returns:
         The ``turn_start`` envelope, with ``fps`` set to :data:`FPS`.
