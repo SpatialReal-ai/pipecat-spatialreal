@@ -94,7 +94,8 @@ message, tapped onset and conversation marker in order.
 The five alignment columns do not decide `pass` or `fail`: they are what the paired captures of the
 sync-fingerprint plan's Task 7 (Chrome, Daily and LiveKit) record, and they become measurements
 there, against the design's minimum (no false lock, a first lock within 300 ms of speech on 95 % of
-turns, p95 error within 5 ms). Until then the page reports them without judging them.
+turns, p95 error within 5 ms). The page reports them without judging them; the measurements are in
+*Paired captures* below.
 
 How the page runs the rule, per turn, from its `turn_start` on (design §3.2):
 
@@ -272,3 +273,71 @@ expectations; the runs above are the measurement.
 
 LiveKit has no probe: run the bot with `-t livekit` and use the example page
 (`/avatar/?transport=livekit`, see [../client/README.md](../client/README.md)).
+
+## Paired captures
+
+`tests/fixtures/sync/daily-clean/` and `tests/fixtures/sync/livekit-clean/` are the first paired
+captures (2026-11-03): the processor's per-turn envelope and messages next to the bot's track as a
+real Chrome (156, headless) decoded it, in the format of *The capture* above. They were recorded
+unattended against the SpatialReal test deployment with the example bot as shipped (Deepgram,
+Gemini, Cartesia):
+
+* **Speaker**: a scripted second participant (daily-python, or the LiveKit Python SDK) joins the room
+  and plays ten spoken prompts, two of them as barge-ins 2.5 s into the bot's answer, four of them
+  asking for a list with pauses ("Count slowly from one to five, with a pause between each number").
+* **Receiver**: Chrome, driven by puppeteer. On Daily it is this page, joined with `?room=&token=`.
+  On LiveKit it is a copy of this page with the Daily calls replaced by `livekit-client` 2.22.4 (the
+  same tap, recorder, `sync.js` tracker, analysis and downloads), kept outside the repository.
+* **No impaired run.** The plan asked for a second run per transport at 3 % loss / 100 ms jitter;
+  Network Link Conditioner is not installed on the recording machine and `pf`/dummynet needs root,
+  so both captures are clean networks only. The impaired thresholds rest on the spike's simulation.
+
+Each run gave 12 turns (2 aborted by barge-in, 0 `STATUS_DEGRADED`, no splice: every turn followed an
+idle longer than 1 s, so `gap_ms` was 0 throughout). The fixtures are trimmed to whole turns, 9 of
+Daily's and 8 of LiveKit's, so that each directory stays under 10 MB: each kept turn keeps the audio
+from 3.5 s before its `turn_start` to 1.5 s after its last tick, cut on a 40 ms grid (a multiple of
+the 5 ms hop and of the 128-sample worklet block), and every tap position is rebased
+(`capture.sync.json` says what was kept under `trimmed`). On the kept turns the replay gives the same
+numbers on the trimmed and on the full recording.
+
+`hack/sync-sim/replay_capture.py DIR` replays the rule on a capture with the oracle (`dsp.align`,
+the page's cadence, prior and widening) and measures it against the whole-turn alignment (the turn's
+reference correlated once with everything received of it). On the full recordings (24 turns; the
+fixtures are subsets):
+
+| | Daily | LiveKit |
+|---|---|---|
+| accepted ticks / false locks (> 20 ms off) | 211 / **0** | 200 / **0** |
+| first lock within 300 ms of speech | **9 / 12 (75 %)** | **10 / 12 (83 %)** |
+| first lock, ms of speech: p50 / p95 / max | 125 / 572 / 685 | 107 / 592 / 718 |
+| error against the whole-turn alignment: p50 / p95 / max | 0.62 / 5.00 / 6.94 ms | 0.25 / 1.24 / 1.99 ms |
+| error against the phrase-by-phrase alignment: p50 / p95 | 0.22 / 1.82 ms | 0.16 / 1.07 ms |
+| received audio moving inside a turn (largest) | 9.8 ms | 5.1 ms |
+| \|onset prior - truth\| before the first lock: p50 / max | 0.9 / 6.7 ms | 0.9 / 5.1 ms |
+| the page's live ticks (causal high-pass): accepted / false / p95 | 213 / 0 / 5.03 ms | 200 / 0 / 1.27 ms |
+
+Against the design's minimum (backend-ng `2026-11-03-pipecat-sync-fingerprint-design.md` §4.1):
+**no false lock on either transport; the first-lock minimum (300 ms on 95 % of turns) fails on both**;
+the p95 error is 5.00 ms on Daily (at the limit; 5.02 with the browser's causal high-pass) and 1.24 ms
+on LiveKit. The late first locks are turns whose first second is mostly the silence before the turn:
+the candidate is right (peak 0.99 or more, within 7 ms of the whole-turn alignment) but its
+sharpness is under 0.03 or its peak ratio under 1.2. Until the lock the frames follow the onset prior, which was within 7 ms of the
+truth on every turn here. The Daily p95 comes from the two greetings at the start of the call, where
+the received audio moved by up to 10 ms inside the turn (the jitter buffer settling); against each
+phrase's own alignment the p95 is 1.8 ms. Lowering the thresholds would meet the first-lock minimum on
+these captures, but every relaxation tried re-opens false locks on the spike's impaired simulation
+(sharpness 0.025: one at 21.5 ms; ratio 1.1: six, up to 130 ms), and these clean captures cannot
+show a false lock at any threshold (no tick of theirs is more than 7 ms off at the fixed first prior,
+so `thrsearch.py` on them finds zero for all 500 combinations). The
+thresholds were not changed.
+
+**Pauses and late onsets (design §8, item 2).** 26 pauses of 0.3 s or more were received. The audio
+after each pause sat where the audio before it did, within -4.8 to +5.1 ms (each phrase aligned on
+its own); no pause moved it by tens of milliseconds, and no lead-in was lost (no reference frame of
+the first 150 ms after a pause 10 dB over the floor while the received track stayed at it). The onset
+rule still missed on LiveKit: +57.8 ms on one onset (after a 260 ms quiet), +12 to +18 ms on three
+more and -11 ms on one, with the phrase not moved (-2.8 to +0.4 ms). The +57.8 ms one is a click at
+the start of the phrase whose decoded peak is 327 where the server's was over 328: the threshold
+missed it by one sample value and found the voiced onset 58 ms later. On these captures, then, a late onset after a
+pause is the onset threshold meeting a soft lead-in, not a delay change and not a lead-in removed by
+DTX.

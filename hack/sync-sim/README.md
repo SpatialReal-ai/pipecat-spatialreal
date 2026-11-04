@@ -15,6 +15,10 @@ curve", "lined up" and "trustworthy" mean. It is the spike's code, kept as the o
   `dsp.align` composes, and `tests/test_fingerprint_oracle.py::test_align_equals_the_simulation_path`
   holds the two compositions together: on one tick `align` and the simulation's
   `tick_curves`/`features` must agree to 1e-9, so `RESULTS.md` keeps describing `align`.
+* `replay_capture.py` replays the rule on a real paired capture (the probe's `capture.wav` +
+  `capture.sync.json` + `capture.jsonl`, e.g. `tests/fixtures/sync/daily-clean`) and measures it
+  against the turn's whole-turn alignment, with the pauses and onsets inside each turn; the numbers
+  of the first captures are in `examples/probe/README.md`, *Paired captures*.
 * `RESULTS.md` is the simulation's output with the frozen thresholds (1 s window): error,
   false locks, time to first lock, re-lock after a gap, and the onset heuristic on the same
   channel for comparison. `thrsearch.out` is the threshold grid's output. Both are regenerated
