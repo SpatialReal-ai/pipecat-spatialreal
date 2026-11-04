@@ -2833,3 +2833,23 @@ def test_an_unchained_turn_starts_with_one_chunk_of_its_quiet_left(fake):
     proc._sound_end, proc._playout_end, proc._loop.now = 10.0, 10.12, 10.08  # 120 ms: too little
     deadlines = []
     assert proc._may_start(turn, deadlines) is False and deadlines == [pytest.approx(10.12)]
+
+
+def test_a_turn_that_waited_for_its_quiet_waits_for_all_of_it_once_the_room_runs_dry(fake):
+    """The fill breaks (a loop held up past it): the quiet is measured on the clock. A turn that
+    found min_silence_ms of quiet already there would start at once, but one that had to wait
+    starts only once min_silence_ms and one chunk have passed since the last sound."""
+    proc = make_proc(fake)
+    proc._loop = _Clock(10.05)
+    proc._stall_ahead_s = CHUNK_MS / 1000
+    turn = _Turn(TTSStartedFrame(), rate=24000, chunk_bytes=CHUNK_BYTES, tracker=None, sends=True)
+    proc._sound_end, proc._playout_end, proc._fed = 10.0, 10.08, True  # 80 ms of fill queued
+    assert proc._may_start(turn, []) is False  # it waits for the fill
+    proc._loop.now = 10.16  # held up: the room ran dry at 10.08, 160 ms after the last sound
+    deadlines = []
+    assert proc._may_start(turn, deadlines) is False and deadlines == [pytest.approx(10.19)]
+    proc._loop.now = 10.19
+    assert proc._may_start(turn, []) is True
+    fresh = _Turn(TTSStartedFrame(), rate=24000, chunk_bytes=CHUNK_BYTES, tracker=None, sends=True)
+    proc._loop.now = 10.16
+    assert proc._may_start(fresh, []) is True  # min_silence_ms already there when it came
