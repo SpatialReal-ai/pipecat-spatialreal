@@ -16,9 +16,11 @@ curve", "lined up" and "trustworthy" mean. It is the spike's code, kept as the o
   holds the two compositions together: on one tick `align` and the simulation's
   `tick_curves`/`features` must agree to 1e-9, so `RESULTS.md` keeps describing `align`.
 * `replay_capture.py` replays the rule on a real paired capture (the probe's `capture.wav` +
-  `capture.sync.json` + `capture.jsonl`, e.g. `tests/fixtures/sync/daily-clean`) and measures it
-  against the turn's whole-turn alignment, with the pauses and onsets inside each turn; the numbers
-  of the first captures are in `examples/probe/README.md`, *Paired captures*.
+  `capture.sync.json` + `capture.jsonl`, e.g. `tests/fixtures/sync/daily-clean`) the way the probe
+  page runs it, and measures it against the window content (400 ms reference windows aligned on
+  their own, so the truth follows the jitter buffer's steps inside a turn), with the splice joins
+  and the pauses and onsets inside each turn; the numbers are in `examples/probe/README.md`,
+  *Paired captures* and *The splice run*.
 * `RESULTS.md` is the simulation's output with the frozen thresholds (1 s window): error,
   false locks, time to first lock, re-lock after a gap, and the onset heuristic on the same
   channel for comparison. `thrsearch.out` is the threshold grid's output. Both are regenerated
@@ -88,7 +90,8 @@ is **causal** (a first-order IIR at 30 Hz). Its effect has been checked and is n
 moves the oracle fixture's offset by 0.04 ms; on the paired Chrome captures (`replay_capture.py`
 with and without `--causal`) the Daily recording's p95 error against the whole-turn truth is
 5.00 ms zero phase and 5.02 ms causal, and the `daily-clean` fixture's against the phrase truth
-2.32 and 2.31 ms. `tests/test_sync_replay.py` replays the captures both ways.
+2.32 and 2.31 ms (against the window-content truth, with the page's cadence: 1.24 and 1.27 ms).
+`tests/test_sync_replay.py` replays the captures both ways.
 
 ## Rerunning
 
