@@ -116,6 +116,48 @@ def _with_stall(pcm, at_s, stall_s):
 L0 = LEAD_S * 1000 / 5  # the true position (frames) before any impairment
 
 
+def _build(pcm, segs):
+    """A received track from pieces after the lead (and a 1 s tail): ``("ref", a_s, b_s)`` the
+    reference's audio between a_s and b_s, ``("z", s)`` that much digital silence. Returns the
+    track and, per received frame, the true position (NaN where no reference content)."""
+    parts, truth, pos = [np.zeros(round(LEAD_S * RATE))], [], round(LEAD_S * RATE)
+    truth.append(np.full(pos, np.nan))
+    for seg in segs:
+        if seg[0] == "ref":
+            a, b = round(seg[1] * RATE), round(seg[2] * RATE)
+            parts.append(pcm[a:b])
+            truth.append(np.full(b - a, (pos - a) / HOP))
+            pos += b - a
+        else:
+            n = round(seg[1] * RATE)
+            parts.append(np.zeros(n))
+            truth.append(np.full(n, np.nan))
+            pos += n
+    parts.append(np.zeros(RATE))
+    truth.append(np.full(RATE, np.nan))
+    rx, tr = np.concatenate(parts), np.concatenate(truth)
+    frames = np.minimum(np.arange(len(rx) // HOP) * HOP + HOP, len(tr) - 1)
+    return rx, tr[frames]
+
+
+def _false_accepts(res, truth):
+    """Accepts (full, half, confirm) more than 20 ms off the truth of the frames they covered (the
+    nearest real position for a window that straddles a gap)."""
+    bad = []
+    for count, l, m, via in rc.accepts_of(res):
+        seg = truth[max(0, count - m) : count]
+        seg = seg[~np.isnan(seg)]
+        if not len(seg):
+            continue
+        if (seg.max() - seg.min()) * 5 <= 10:
+            e = abs(l - seg.mean()) * 5
+        else:
+            e = float(np.min(np.abs(seg - l)) * 5)
+        if e > 20:
+            bad.append((count, via, round(e, 1)))
+    return bad
+
+
 # ---------------------------------------------------------------- freeze
 
 
@@ -239,13 +281,14 @@ def test_a_burst_loss_is_undone_by_the_confirm():
     # 300 ms of content replaced by zeros, timeline unchanged: the freeze is wrong, and the
     # confirm (whose range starts 150 ms below the pointer before the freeze) puts it back. The
     # synthetic pauses are digital silence, so pauses heard under the shifted pointer may freeze
-    # again before the confirm; those freezes keep the first bracket.
+    # again before the confirm; those freezes keep the first bracket. The early no-shift check is
+    # off here, so the confirm proper (and its range) does the work.
     pcm = _speechlike(4.0, seed=8)
     at = _syllable_at(pcm, 1.8)
     rx = np.concatenate([np.zeros(round(LEAD_S * RATE)), pcm, np.zeros(RATE)])
     a = round((LEAD_S + at) * RATE)
     rx[a : a + round(0.3 * RATE)] = 0.0
-    res = _replay(*_turn(pcm, rx), dsp.STALL)
+    res = _replay(*_turn(pcm, rx), replace(dsp.STALL, noshift_tol_ms=0.0))
     fz = res["freezes"]
     assert fz[0]["frames"] >= 50  # the wrong freeze
     assert all(f["l_pre"] == fz[0]["l_pre"] for f in fz)
@@ -280,6 +323,38 @@ def test_the_no_shift_check_accepts_only_near_the_unfrozen_position():
     )
     # the peak is real but 50 ms from the hypothesis: the no-shift test does not take it
     assert dsp.confirm_position(*args, noshift_l=l_true + 10, noshift_only=True) is None
+
+
+def test_the_no_shift_check_refuses_an_ambiguous_peak():
+    # A reference that repeats every 200 ms: the hypothesis matches as well as the true position
+    # one period away, so the no-shift check (which skips the ratio) must refuse it.
+    rng = np.random.default_rng(4)
+    unit = np.round(rng.standard_normal(round(0.2 * RATE)) * np.hanning(round(0.2 * RATE)) * 8000)
+    pcm = np.tile(unit, 10)
+    own = dsp.dequantise(dsp.envelope_bytes(pcm, RATE))
+    l_true = 300
+    env = _envelope(np.concatenate([np.zeros(l_true * HOP), pcm, np.zeros(RATE)]))
+    j_res = l_true + 100
+    args = (env, own, j_res, j_res + 40, l_true - 70, l_true + 50, dsp.STALL)
+    assert dsp.confirm_position(*args, noshift_l=l_true - 40, noshift_only=True) is None
+
+
+@pytest.mark.parametrize("seed", [4, 5, 6])
+@pytest.mark.parametrize("period", [0.1, 0.15, 0.2])
+def test_a_stall_inside_a_periodic_reference_has_no_false_accept(period, seed):
+    # Speech, then a stretch whose envelope repeats every ``period``, then speech; a stall as
+    # long as the period (and one 60 ms longer) inside the periodic stretch.
+    rng = np.random.default_rng(seed)
+    u = round(period * RATE)
+    unit = np.round(rng.standard_normal(u) * np.hanning(u) * 8000)
+    per = np.tile(unit, round(1.6 / period))
+    pcm = np.concatenate([_speechlike(2.0, seed=seed), per, _speechlike(1.0, seed=seed + 9)])
+    at = 2.0 + 3.5 * period
+    end = len(pcm) / RATE
+    for z in (period, period + 0.06):
+        rx, truth = _build(pcm, [("ref", 0, at), ("z", z), ("ref", at, end)])
+        res = _replay(*_turn(pcm, rx), dsp.STALL)
+        assert _false_accepts(res, truth) == [], (period, seed, z)
 
 
 def test_an_unconfirmed_freeze_is_reverted_when_asked():
@@ -535,6 +610,136 @@ def test_the_tick_loop_uses_the_chain_unless_the_onset_is_near_it(onset_off, exp
         t, arrivals, env, n, replace(dsp.STALL, chain_prior=False), chain_prior=lambda pos: chain_l
     )
     assert off["ticks"][0]["prior_l"] == pytest.approx(chain_l + onset_off)
+
+
+def _chain_lock(pcm_a, pcm_b, a_s, z_s, stall):
+    """Turn A, then turn B chained from it (``prev_turn_pcm_ms`` = A's length), with ``z_s`` of
+    stall inserted at ``a_s`` into A; B's onset prior is B's true position. Returns B's first
+    accept as (ms after B's true start, error ms) or None."""
+    n_a, lead = len(pcm_a), round(LEAD_S * RATE)
+    a = round(a_s * RATE)
+    rx = np.concatenate(
+        [np.zeros(lead), pcm_a[:a], np.zeros(round(z_s * RATE)), pcm_a[a:], pcm_b, np.zeros(RATE)]
+    )
+    lb = (lead + n_a + round(z_s * RATE)) / HOP
+    env, n = _envelope(rx), len(rx)
+    s_a = lead - round(0.2 * RATE)
+    ta = {
+        "turn_id": "A",
+        "start_tap": s_a,
+        "end_tap": s_a + RATE // 10,
+        "end_pcm_ms": n_a / RATE * 1000,
+        "abort_tap": None,
+        "ticks": [],
+        "onsets_ms": [],
+        "onset_prior_pos": None,
+    }
+    ref_a = dsp.envelope_bytes(pcm_a, RATE)
+    res_a = rc.replay_turn_tracked(
+        ta, env, HOP, RATE, n, dsp.DEFAULTS, {}, {"A": [(s_a - 1, 0, ref_a)]}, None, stall
+    )
+    s_b, op = s_a + RATE, round(lb * HOP)
+    tb = {
+        "turn_id": "B",
+        "start_tap": s_b,
+        "end_tap": s_b + RATE // 10,
+        "end_pcm_ms": len(pcm_b) / RATE * 1000,
+        "abort_tap": None,
+        "ticks": [{"pos": 0, "prior_pos": op, "prior_kind": "onset", "accepted": False}],
+        "onsets_ms": [],
+        "onset_prior_pos": op,
+        "prev_turn_id": "A",
+        "prev_turn_pcm_ms": n_a / RATE * 1000,
+    }
+    chain = rc.chain_prior_for(tb, {"A": res_a}, RATE, HOP)
+    ref_b = dsp.envelope_bytes(pcm_b, RATE)
+    res_b = rc.replay_turn_tracked(
+        tb, env, HOP, RATE, n, dsp.DEFAULTS, {}, {"B": [(s_b - 1, 0, ref_b)]}, None, stall, chain
+    )
+    acc = [k for k in res_b["ticks"] if k["accepted"]]
+    if not acc:
+        return None
+    return (acc[0]["count"] - lb) * 5, (acc[0]["l"] - lb) * 5
+
+
+@pytest.mark.parametrize("z_s", [0.2, 0.35, 0.5, 0.65, 0.8, 1.2])
+def test_a_chained_turn_locks_after_a_stall_its_predecessor_could_not_see(z_s):
+    # The stall lies in A's trailing silence, so A cannot freeze and the chain puts B early by the
+    # stall. Within 200 ms of the chain the onset prior re-anchors B (R74); beyond it the chain
+    # holds B until it widens, and then the wide search centres on the onset prior (R76).
+    pcm_a = np.concatenate([_speechlike(2.6, seed=21), np.zeros(round(0.4 * RATE))])
+    for seed_b in (22, 23):
+        got = _chain_lock(pcm_a, _speechlike(3.0, seed=seed_b), 2.75, z_s, dsp.STALL)
+        assert got is not None, (z_s, seed_b)
+        assert abs(got[1]) <= 20.0, (z_s, seed_b, got)
+
+
+def test_the_freeze_stops_at_the_cap_and_says_so():
+    # A 2.5 s stall: the pointer holds for 2 s, then advances; unfrozen (not confirmed) fires at
+    # the cap, not at the resume.
+    pcm = _speechlike(5.0, seed=8)
+    at = _syllable_at(pcm, 1.8)
+    rx = _with_stall(pcm, at, 2.5)
+    res = _replay(*_turn(pcm, rx), dsp.STALL)
+    f = res["freezes"][0]
+    n_max = round(dsp.STALL.freeze_max_ms / 5)
+    assert f["frames"] == n_max and f.get("capped")
+    events = [(j, e) for j, e in res["events"] if e["kind"] == "unfrozen"]
+    j_cap, ev = events[0]
+    assert ev == {"kind": "unfrozen", "turnId": "t", "frozenMs": 2000.0, "confirmed": False}
+    assert j_cap < f["resume"]
+    assert len([e for _, e in res["events"] if e["kind"] == "unfrozen"]) == len(res["freezes"])
+    assert res["disp"][f["resume"] - 1] == pytest.approx(res["disp"][j_cap], abs=0.5)
+
+
+def test_a_lock_closes_an_open_freeze():
+    # A pending confirm (made unreachable) is closed by a full-window lock.
+    st = replace(dsp.STALL, noshift_tol_ms=0.0, confirm_from_ms=5000.0, confirm_until_ms=6000.0)
+    tr, env, ref, count = _locked_tracker(st)
+    own = dsp.dequantise(ref)
+    thr = st.ref_speech_db
+    j0 = next(
+        j
+        for j in range(count, count + 300)
+        if (own[j - round(L0) : j - round(L0) + 12] > thr).all()
+    )
+    env = env.copy()
+    env[j0 : j0 + 8] = -100.0  # a 40 ms dropout, no shift: the freeze is wrong
+    end = j0 + 8 + 210  # the 1 s window lies after the dropout
+    for j in range(count, end):
+        tr.frame(env, j)
+    assert tr._episode is not None  # a freeze or its confirm is still open
+    rec = tr.tick(env, end, ref, 0, L0, 300.0, 200.0)
+    assert rec["accepted"] and rec["via"] == "full"
+    assert tr._episode is None and tr._pending is None
+    assert tr.freezes[-1]["how"] == "full"
+    assert tr.events[-1][1] == {
+        "kind": "unfrozen",
+        "turnId": "t",
+        "frozenMs": tr.freezes[-1]["frames"] * 5.0,
+        "confirmed": False,
+    }
+
+
+def test_the_last_match_needs_the_reference_within_4_db():
+    # 60 ms of loud, flat audio (not the reference) before the silence: the last match is the
+    # frame before it, not the last loud frame.
+    tr, env, ref, count = _locked_tracker()
+    own = dsp.dequantise(ref)
+    thr = dsp.STALL.ref_speech_db
+    j0 = next(
+        j
+        for j in range(count + 20, count + 300)
+        if (own[j - round(L0) : j - round(L0) + 12] > thr).all()
+    )
+    env = env.copy()
+    env[j0 - 12 : j0] = -3.0
+    env[j0 : j0 + 30] = -100.0
+    for j in range(count, j0 + 30):
+        tr.frame(env, j)
+    ep = tr._episode
+    assert ep is not None and ep["j_match"] is not None
+    assert ep["j_match"] < j0 - 12
 
 
 # ---------------------------------------------------------------- the committed captures

@@ -453,7 +453,9 @@ class StallParams:
     * ``freeze``: after the turn's first lock, once ``freeze_after_ms`` of consecutive received
       frames are each at or below ``silent_db`` while the turn's own reference at the (advancing)
       pointer is above ``ref_speech_db``, the reference pointer stops (retroactively over the run)
-      and stays stopped while the received stays silent, for at most ``freeze_max_ms``. While a
+      and stays stopped while the received stays silent, for at most ``freeze_max_ms``: at the cap
+      the pointer advances again, ``unfrozen`` fires (not confirmed), no new freeze starts until
+      audio resumes, and the confirm still opens on the resume. While a
       confirm is pending (below) "silent" means digital silence, at or below
       ``confirming_silent_db``: after a wrong freeze (a burst loss, where the timeline did not
       move) the received pauses where the shifted reference speaks, and freezing there would
@@ -470,26 +472,33 @@ class StallParams:
       ``confirm_min_peak``, peak / second-highest peak >= ``confirm_min_ratio`` and sharpness >=
       ``confirm_min_sharpness`` (curve at the interpolated peak +/- ``confirm_sharp_at_ms``), both
       sides clipped at ``confirm_floor_db`` (:func:`confirm_position`). From
-      ``noshift_from_ms`` (and at the confirm's first attempt) "nothing moved" is tested alone: a
-      peak >= ``confirm_min_peak``, interior, within ``noshift_tol_ms`` of the pointer before the
-      freeze is accepted without the ratio and sharpness checks (a burst loss, confirmed early).
+      ``noshift_from_ms`` until ``confirm_from_ms`` (and at the confirm's first attempt) "nothing
+      moved" is tested alone: a peak >= ``confirm_min_peak`` within ``noshift_tol_ms`` of the
+      pointer before the freeze, while the second-highest peak in the range stays below
+      ``confirm_min_peak``, is accepted without the ratio and sharpness checks (a burst loss,
+      confirmed early). The received audio since the resume must pass the 2 dB speech gate.
       ``revert_unconfirmed`` (off: evaluated, not adopted): when the confirm's time runs out
       unaccepted, the pointer goes back to where it would be had it never frozen. It gains nothing
       measurable with a 1200 ms confirm window and undoes real stalls with an 800 ms one. The last
       matching frame: the newest frame within ``match_back_ms`` before the run whose
       ``match_frames`` consecutive frames are each over ``match_min_db`` and within
       ``match_tol_db`` of the reference at the pointer then; without one there is no confirm.
-    * ``newer_half``: a tick after the first lock whose full window is not accepted searches the
-      newer 0.5 s alone within +/- ``half_search_ms`` of the pointer (peak, ratio, sharpness and
-      interior as :func:`align`); it is accepted when the previous tick's newer-half candidate
-      agrees within ``half_agree_ms`` (two consecutive ticks, 200 ms apart after the lock), and
-      refused when the newer half holds a run of ``half_silence_ms`` at or below
-      ``digital_silence_db`` (digital silence: a stall inside it).
+    * ``newer_half``: a tick after the first lock whose full window passes the speech gate but is
+      not accepted searches the newer 0.5 s alone within +/- ``half_search_ms`` of the pointer
+      (peak, ratio, sharpness and interior as :func:`align`); it is accepted when the previous
+      candidate agrees within ``half_agree_ms``, and refused when the newer half holds a run of
+      ``half_silence_ms`` at or below ``digital_silence_db`` (digital silence: a stall inside it).
+      The previous candidate is the one of the last tick with speech: a tick that fails the
+      speech gate keeps it, a speech tick without a candidate (or a refused one) and any accept
+      clear it. So the two agreeing ticks are consecutive *speech* ticks (200 ms apart unless a
+      silent tick lies between them).
     * ``hold_clock``: frozen time does not count toward the ``loss_ms`` loss clock.
-    * ``chain_prior`` (rule 5, R74): a chained turn whose predecessor is locked takes the
+    * ``chain_prior`` (rule 5, R74/R76): a chained turn whose predecessor is locked takes the
       predecessor's position + ``prev_turn_pcm_ms`` as its prior; before its own first lock an
       onset prior re-anchors it only within ``chain_onset_tol_ms`` of that position
-      (:func:`chained_prior`).
+      (:func:`chained_prior`). Once the turn has held 10 ticks with speech and widens its search to
+      +/- 600 ms, the wide search centres on the onset prior when one exists (R76), so a chain put
+      off by a stall the predecessor could not see (in its trailing silence) cannot block the lock.
     """
 
     freeze: bool = True
@@ -607,8 +616,12 @@ def confirm_position(
     peak is not at either end of the range. Returns the interpolated position or None.
 
     ``noshift_l`` (with ``noshift_tol_ms`` > 0): a peak within that distance of the position the
-    pointer would have without the freeze is accepted on peak and interior alone (the no-shift
-    case, i.e. a burst loss, confirmed)."""
+    pointer would have without the freeze is accepted on the peak alone (the no-shift case, i.e. a
+    burst loss, confirmed): peak >= ``confirm_min_peak`` while no other peak in the range (the
+    second-highest, outside the main lobe) reaches it -- the ambiguity guard that stands in for
+    the ratio. (No edge check: the range reaches ``confirm_back_ms`` below ``noshift_l`` and at
+    least the trigger run + ``confirm_fwd_ms`` above it, so a peak within the tolerance is never at
+    an end.)"""
     floor = stall.confirm_floor_db
     w = np.maximum(np.asarray(env[j_res:j_end], dtype=np.float64), floor)
     if len(w) < 2 or w.std() < DEFAULTS.gate_std_db:
@@ -632,8 +645,8 @@ def confirm_position(
     if (
         noshift_l is not None
         and stall.noshift_tol_ms > 0
-        and not edge
         and pk >= stall.confirm_min_peak
+        and sec < stall.confirm_min_peak
         and abs(est - noshift_l) * hop_ms <= stall.noshift_tol_ms
     ):
         return float(est)
@@ -744,6 +757,13 @@ class TurnTracker:
         if ep is None:
             return
         ep.update(how=how, closed=j, **extra)
+        if not ep.get("capped"):  # a capped freeze sent its unfrozen at the cap
+            self._emit_unfrozen(j, ep, how == "confirm")
+        self.freezes.append(ep)
+        self._episode = None
+        self._pending = None
+
+    def _emit_unfrozen(self, j, ep, confirmed):
         self.events.append(
             (
                 j,
@@ -751,13 +771,19 @@ class TurnTracker:
                     "kind": "unfrozen",
                     "turnId": self.turn_id,
                     "frozenMs": ep["frames"] * self.hop,
-                    "confirmed": how == "confirm",
+                    "confirmed": confirmed,
                 },
             )
         )
-        self.freezes.append(ep)
-        self._episode = None
-        self._pending = None
+
+    def _check_cap(self, j):
+        """At the cap the pointer advances again and ``unfrozen`` (not confirmed) fires, so a
+        consumer never shows a freeze longer than ``freeze_max_ms``; the episode stays open for
+        the confirm that opens when audio resumes (its accept then moves the pointer silently)."""
+        ep = self._episode
+        if ep is not None and not ep.get("capped") and ep["frames"] >= self.n_max:
+            ep["capped"] = True
+            self._emit_unfrozen(j, ep, False)
 
     def frame(self, env, j):
         """Received frame ``j`` (``env[j]``, dB) has completed."""
@@ -786,6 +812,7 @@ class TurnTracker:
                     self.l += 1
                     ep["frames"] += 1
                     self._frozen_since_tick += 1
+                    self._check_cap(j)
         else:
             if self._run >= self.n_min and self._episode is not None:
                 self._resume(j)
@@ -878,6 +905,7 @@ class TurnTracker:
         self.events.append(
             (j, {"kind": "frozen", "turnId": self.turn_id, "atMs": self._run_k * self.hop})
         )
+        self._check_cap(j)
 
     def _resume(self, j):
         ep = self._episode
