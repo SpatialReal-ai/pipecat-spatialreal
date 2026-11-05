@@ -25,7 +25,9 @@ next to the page: a port of the normative oracle, `hack/sync-sim/dsp.py` (`envel
 `tests/probe_check.mjs` (`tests/fixtures/sync/oracle.json`, written by `make_oracle_fixture.py`
 next to it). One difference is deliberate: the oracle's 30 Hz high-pass on the received track is
 zero phase over the whole signal, the page's is causal (first order), as a browser must run it; on
-the fixture it moves the offset by 0.04 ms.
+the fixture it moves the offset by 0.04 ms. The stall rule's tick-for-tick equivalence assumes the
+envelope reaches the page ahead of the audio it describes (the processor's normal order): a chained
+turn's prior can feed its predecessor's frames before the predecessor's own next tick does.
 
 ## Run it
 

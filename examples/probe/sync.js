@@ -1088,6 +1088,10 @@ export class SyncTracker {
   /**
    * The turn's received frames up to the last complete one through its TurnTracker (frames from
    * turn_abort on are not fed). Only after the turn's first tick has fed (as the oracle's loop).
+   * A successor's chain prior can feed its predecessor here, ahead of the predecessor's own next
+   * tick. Each frame is fed once either way; it only changes which instant's reference the frame
+   * sees, so this matches the oracle's per-tick feeding as long as the envelope arrives ahead of the
+   * audio (the processor sends it before the room plays the samples).
    */
   feed(turn) {
     if (turn.done || turn.lastFed === null) return
