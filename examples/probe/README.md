@@ -25,7 +25,9 @@ next to the page: a port of the normative oracle, `hack/sync-sim/dsp.py` (`envel
 `tests/probe_check.mjs` (`tests/fixtures/sync/oracle.json`, written by `make_oracle_fixture.py`
 next to it). One difference is deliberate: the oracle's 30 Hz high-pass on the received track is
 zero phase over the whole signal, the page's is causal (first order), as a browser must run it; on
-the fixture it moves the offset by 0.04 ms.
+the fixture it moves the offset by 0.04 ms. The stall rule's tick-for-tick equivalence assumes the
+envelope reaches the page ahead of the audio it describes (the processor's normal order): a chained
+turn's prior can feed its predecessor's frames before the predecessor's own next tick does.
 
 ## Run it
 
@@ -73,6 +75,7 @@ late only changes its own row.
 | `p95 err ms` | The 95th percentile, over the accepted ticks, of the distance between the accepted position and the *onset prior*: where the onset rule puts the turn's first sample (its first onset heard, or placed from the chain, minus `onsets_ms[0]`). `-` without an onset prior. | see below |
 | `held / acc` | Ticks with speech in the window that were held (not accepted) and that were accepted. A `*` marks a reference spliced onto the turn before it. | see below |
 | `peak / ratio / sharp / halves` | The four checks at the last tick with speech: correlation peak (≥ 0.95), peak over the second peak (≥ 1.2), sharpness (≥ 0.03) and the half windows' deviation in ms (≤ 10). A failed check is marked `!`, a peak at the edge of the search `(edge)`. | see below |
+| `freezes` | The stall rule: how many times the turn's reference pointer froze, the time it stood still in all, and how many of those freezes a confirm closed at a new position (`1, 180 ms, 1 confirmed`); `N not` counts the rest (a full-window or newer-half lock closed them, the confirm found nothing in time, no confirm was possible, the 2 s cap, or the turn ended), `N open` a freeze in progress. `-` without one. | see below |
 | `result` | `pass`, `fail` with the reasons, `unverified` (a placed chained turn, see below) or `pending`. | |
 
 Above the table a line counts the turns that pass, fail, are unverified or are pending, the `state`
@@ -91,7 +94,7 @@ message, tapped onset and conversation marker in order.
 
 ### The alignment columns
 
-The five alignment columns do not decide `pass` or `fail`: they are what the paired captures of the
+The six alignment columns do not decide `pass` or `fail`: they are what the paired captures of the
 sync-fingerprint plan's Task 7 (Chrome, Daily and LiveKit) record, and they become measurements
 there, against the design's minimum (no false lock, a first lock within 300 ms of speech on 95 % of
 turns, p95 error within 5 ms). The page reports them without judging them; the measurements are in
@@ -108,16 +111,41 @@ How the page runs the rule, per turn, from its `turn_start` on (design §3.2):
   between; never on `gap_ms` 0 for an unchained turn, and never onto a turn that was aborted.
 * **Cadence.** A tick every 50 ms of received audio until the turn's first lock, then every 200 ms;
   ticks stop once the last 1 s lies past the turn's end, or 1 s after `turn_abort`.
-* **Prior.** Until the first lock: the onset prior when the onset rule has one; else, for an
+* **Prior.** Until the first lock: for a chained turn whose previous turn has locked, that turn's
+  position (freezes and confirms included) plus `prev_turn_pcm_ms`, re-anchored on the onset prior
+  only when that lies within 200 ms of it (rule 5, R74); else the onset prior when the onset rule
+  has one; else, for an
   unchained turn with `gap_ms > 0` whose previous turn had ended (`turn_end`) and was not aborted
   when its `turn_start` arrived, the previous turn's place plus its `turn_end.pcm_ms` plus `gap_ms`,
   as for a chained turn (the processor released exactly that much silence; R72); else the arrival
-  of `turn_start` plus 200 ms. After it, the last accepted position. The search covers ± 300 ms
-  around it. After 10 ticks with speech and no lock the search widens to ± 600 ms, re-centred on the
-  onset prior.
+  of `turn_start` plus 200 ms. After it, the turn's tracked position (the last accepted one, moved
+  by the stall rule below). The search covers ± 300 ms around it. After 10 ticks with speech and no
+  lock the search widens to ± 600 ms, re-centred on the onset prior (a chained turn's too: R76).
 * **A tick** is `align` from `sync.js` on the last 3 s of received envelope: floor, speech gate,
   correlation of the last 1 s and its two halves, the four checks, parabolic refinement. A held
-  tick changes nothing.
+  tick changes nothing, unless the stall rule accepts the newer half (below).
+* **The stall rule** (`hack/sync-sim/README.md`, "The stall rule"; `sync.js` `TurnTracker`, a port
+  of `dsp.TurnTracker`). When the bot's host or the receiver stalls, Chrome plays a concealment fade
+  and then exact zeros, and the rest of the turn arrives late by about the stall. After a turn's
+  first lock, every received frame goes through its tracker before the tick: once 20 ms of frames
+  are each at or below -60 dBFS while the turn's own reference at the pointer is above -50 dBFS,
+  the pointer **freezes** (retroactively over those 20 ms) and stays put while the track stays
+  silent, at most 2 s. Natural pauses and the processor's own silence are in the reference, so they
+  never freeze it. When audio resumes, a small correlation **confirms** the new position (from
+  200 ms of audio "nothing moved", a burst loss; from 300 to 1200 ms the confirm proper), a tick
+  whose full window is not accepted may re-lock on the **newer half** window alone (two agreeing
+  ticks, never on a half holding digital silence), and frozen time stays off the 2 s **loss
+  clock** (sync-lost). Each freeze is a `frozen` event (`atMs`: where in the turn's audio the
+  pointer stopped) and an `unfrozen` event when it ends (`frozenMs`; `confirmed` true only when the
+  confirm closed it): the `freezes` column counts them. The page only records; the web SDK fades
+  the face to idle during a freeze longer than about 300 ms.
+* **The tap is ungained.** The rule's absolute levels (-60 dBFS silent, -50 dBFS reference speech,
+  the confirm's 4 dB match, -95 dBFS digital silence) assume the received track at the level the
+  processor measured: the page taps the decoded WebRTC track itself (a `MediaStreamAudioSourceNode`
+  into the worklet; the keep-alive element's volume 0 and the muting gain after the worklet do not
+  touch what it measures). A port that taps after a volume control or a gain node loses the confirm:
+  its 4 dB last match fails, so no confirm opens and only the newer half re-locks, a turn later (at
+  -6 dB received gain it confirmed 1 of 5 synthetic stalls, at -18 dB none).
 
 ### What `lead` means
 
@@ -232,10 +260,23 @@ one (`splice`: `kind` `chained` or `gap`, the turn it joins, `join_ms`, `own_off
 the turn's own index 0 — and the spliced `values`), the `turn_start` fields the splice depends on,
 `turn_end.pcm_ms`, the tap positions of `turn_start`, `turn_end` and `turn_abort`, the onset prior,
 and every tick the page ran (`pos`, the prior and what it was — `prior_kind`: `arrival`, `onset`,
-`gap` or `locked`; captures saved before the gap prior have no `prior_kind` — and the search range,
-whether it was gated, accepted, the
-position it accepted as `first_sample_pos` and the four checks). Positions are samples of
-`capture.wav`. A turn's received envelope at a tick is the one of `capture.wav` up to `pos`.
+`gap`, `chain` or `locked`; captures saved before the gap prior have no `prior_kind` — the onset
+prior then, `onset_prior_pos`, null without one; and the search range, whether it was gated,
+accepted, the position it accepted as `first_sample_pos` and the four checks). Positions are samples
+of `capture.wav`. A turn's received envelope at a tick is the one of `capture.wav` up to `pos`.
+
+Since the stall rule, each tick also records how it accepted (`via`: `full` or `half`), the newer
+half's candidate (`half_pos`, `half_refused` when it held digital silence), where the tracker has
+the turn after it (`tracked_pos`, freezes and confirms included), whether the pointer is frozen
+(`frozen`), the `frozen` / `unfrozen` events since the previous tick (`events`), and the loss clock
+(`loss_clock_ms`, `lost` once it reached 2 s). Per turn, `events` lists every event with the
+received frame it fired on (`frame`, of 5 ms; `tap`, the sample position at which that frame was
+complete): `{"kind": "frozen", "turnId", "atMs"}` and `{"kind": "unfrozen", "turnId", "frozenMs",
+"confirmed"}`, the web SDK's shapes. `freezes` lists each freeze episode as `dsp.TurnTracker` keeps
+it (`start` frame, `at_ms`, `frames` frozen, `resume`, `how` it closed — `confirm`, `full`, `half`,
+`expired`, `no-match`, `superseded`, `end` — and for a confirm `confirm_l` and
+`confirm_after_ms`; `open: true` for one in progress at the download), and `lost_at_frames` the
+frames where sync-lost fired. The top level adds the rule's constants (`stall`).
 
 ## The live run
 
@@ -419,3 +460,41 @@ the prior was 68 ms off the rest of the turn; the rule's first two ticks found t
 0.998) but held on the peak ratio (1.08, 1.06), and the next 20 held because their 1 s window
 straddled the step, until it lay past it: first lock after 1065 ms of speech. That is the re-lock
 delay design §3.2 accepts after a jitter-buffer jump, here at the start of a turn.
+
+### The stalled run (2026-11-04)
+
+`tests/fixtures/sync/daily-stall/` is 8 whole turns (9-12 and 42-45 of 54) of a Daily run in which
+the bot's host stalled twice, trimmed like the others (42 s kept of 242 s; the replay gives the same
+numbers per turn on the trimmed and the full recording). At 15:52:14.6 fixture turn 0 arrived 240 ms
+late from a point on and its chained follow-up (turn 1) 891 ms late; at 15:54:38-46 turn 5 (chained)
+arrived 1657 ms late after 1.66 s of concealment and zeros, and Chrome then played the rest of it
+and turn 6 faster, in -20 to -45 ms steps. `daily-stall/oracle-ticks.json` holds the oracle's ticks
+on it (`tests/fixtures/sync/make_stall_fixture.py`).
+
+With the browser's causal high-pass, on the dense local truth (`replay_capture.py --gaps`):
+
+| | today's rule | stall rule |
+|---|---|---|
+| re-align after the 240 ms stall (turn 0) | 1125 ms | **280 ms** |
+| re-align after the 891 ms stall (turn 1) | never | **275 ms** |
+| re-align after the 1.66 s stall (turn 5) | never | **290 ms** |
+| face ahead of the sound during the 1.66 s gap | 1655 ms | 90 ms |
+| ms with the face > 20 ms off after the first lock, + 2 s per sync-lost turn, all turns | 9345 | 7690 (no turn worse) |
+| accepts (full, half, confirm) / false outside or across a gap | 64 / 0 | 72 / 0 |
+| freezes (confirmed) / newer-half accepts / sync-lost turns | - / - / 2 | 7 (4) / 5 / 2 |
+
+Against the window-content truth segmented at each re-align: 78 accepted ticks, none false. The two
+sync-lost turns are turns 5 and 6, which Chrome played faster after the 1.66 s stall: neither rule
+follows that. With the zero-phase high-pass turn 1's freeze is not confirmed and that stall is not
+re-aligned either (the others: 280 and 340 ms). `tests/test_sync_replay.py` asserts the re-align
+times (within 50 ms), no turn worse than today's, zero false locks, and today's long hold on the
+same capture.
+
+The page's own tracker (`sync.js`) reproduces the oracle on this capture tick for tick (405 ticks;
+positions, accept/hold and how, the newer half, the loss clock, the tracked position and every
+`frozen` / `unfrozen` event), both on the oracle's received envelope and on its own from
+`capture.wav`, and so it does on the synthetic cases of `tests/fixtures/sync/stall.json` (a stall,
+a burst loss, two periodic references, the 2 s cap, three chained turns; 595 ticks under the stall
+rule and today's), `tests/probe_check.mjs`. The one value not compared is the candidate of a held
+tick whose correlation curve is flat to rounding (peak about 1e-17: the reference all floor in the
+search range), where the order of summation picks the lag.

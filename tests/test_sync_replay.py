@@ -8,7 +8,9 @@ envelope and every message):
   sentence) and follow-ups after 100-400 ms, so most turns are spliced onto the one before
   (design 3.3);
 * ``daily-splice-failures``: one turn of the same run whose first 240 ms reached the browser
-  65 ms ahead of the rest of it (below).
+  65 ms ahead of the rest of it (below);
+* ``daily-stall``: 8 whole turns of a Daily run around two host stalls (240 ms, 891 ms and 1.66 s
+  late), replayed under the stall rule against today's rule (the last section).
 
 ``hack/sync-sim/replay_capture.py`` replays the web SDK's rule over each the way the probe page
 runs it (ticks from the turn's first ``turn_envelope``, the reference as it had arrived, the
@@ -287,6 +289,47 @@ def test_old_captures_without_prior_kind_infer_it_from_the_value(replay):
     assert replay.recorded_kind({"prior_pos": 48000, "prior_kind": "onset"}, default) == "onset"
 
 
+def test_a_capture_from_the_stall_rule_page_replays_the_onset_prior_it_recorded(replay):
+    # Since the stall rule the page's prior can be a chained turn's place ('chain') while an onset
+    # prior exists (R76 widens around the latter), so every tick records the onset prior itself.
+    t = {
+        "start_tap": 0,
+        "onsets_ms": [],
+        "onset_prior_pos": 30000,
+        "ticks": [
+            {
+                "pos": 1000,
+                "prior_pos": 9000,
+                "prior_kind": "arrival",
+                "onset_prior_pos": None,
+                "accepted": False,
+            },
+            {
+                "pos": 2000,
+                "prior_pos": 50000,
+                "prior_kind": "chain",
+                "onset_prior_pos": 30000,
+                "accepted": False,
+            },
+            {
+                "pos": 3000,
+                "prior_pos": 30000,
+                "prior_kind": "onset",
+                "onset_prior_pos": 30000,
+                "accepted": True,
+            },
+        ],
+    }
+    at = replay.page_prior(t, 48000, 240)
+    assert at(1500) is None
+    assert at(2000) == 30000 and at(2999) == 30000  # not the chain place, not None
+    old = {
+        **t,
+        "ticks": [{k: v for k, v in tick.items() if k != "onset_prior_pos"} for tick in t["ticks"]],
+    }
+    assert replay.page_prior(old, 48000, 240)(2000) is None  # the kind alone cannot say it
+
+
 def test_a_capture_from_the_r72_page_replays_its_gap_priors_from_the_previous_turn(
     replay, splice_r72, tmp_path
 ):
@@ -332,3 +375,141 @@ def test_a_capture_from_the_r72_page_replays_its_gap_priors_from_the_previous_tu
     assert {r["turn_id"]: r["first_lock_ms"] for r in results} == {
         r["turn_id"]: r["first_lock_ms"] for r in splice_r72
     }
+
+
+# ---------------------------------------------------------------- a stalled capture, the stall rule
+#
+# ``daily-stall``: whole turns of a Daily run (2026-11-04, Chrome) around two host stalls, trimmed as
+# the other captures (turns 9-12 and 42-45 of 54; tap positions rebased): at 15:52:14.6 the turn
+# then playing (fixture turn 0) arrived 240 ms late from a point on, its chained follow-up (turn 1)
+# 891 ms late, and at 15:54:38-46 turn 5 (chained) 1657 ms late after 1.66 s of concealment and
+# zeros; Chrome then played the rest of that turn and the next (turn 6) faster in -20 to -45 ms steps.
+# The replay runs with the browser's causal high-pass. The truth is the dense local truth of
+# ``replay_capture.py --gaps`` (300 ms reference windows every 25 ms over +/- 2 s, so it follows a
+# stall of seconds) and, for false locks, the window-content truth segmented at each re-align (the
+# design 4.1 criterion). The stall rule must re-align after each real stall in the time the oracle
+# measured (plus a margin), leave no turn worse than today's rule, and lock falsely nowhere; today's
+# rule, on the same capture, holds through them for a second or never re-aligns.
+
+_STALLED = _DIR / "daily-stall"
+REAL_STALL_MS = 200.0  # a gap whose shift is at least this is one of the stalls above
+# The oracle's re-align time after each real stall (from the resume until the face stays within
+# 10 ms of the new truth for 100 ms), causal high-pass: fixture turn -> (shift ms, re-align ms).
+STALL_REALIGN_MS = {0: (240, 280), 1: (891, 275), 5: (1657, 290)}
+REALIGN_MARGIN_MS = 50.0
+# Today's rule after the same stalls: turn 0 holds 1125 ms, turns 1 and 5 never re-align.
+TODAY_HOLD_MIN_MS = 1000.0
+
+
+@pytest.fixture(scope="module")
+def stalled(replay):
+    if not _STALLED.is_dir():
+        pytest.skip("tests/fixtures/sync/daily-stall is not in the sdist")
+    dsp = replay.dsp
+    x, fs, sync, _ = replay.load(str(_STALLED))
+    env, hop = replay.received_envelope(x, fs, True)
+    rules = {"today": dsp.TODAY, "rule": dsp.STALL}
+    report = replay.stall_capture_report(env, hop, fs, len(x), sync, rules)
+    runs = {
+        name: replay.replay_all_tracked(env, hop, fs, len(x), sync, dsp.DEFAULTS, st)
+        for name, st in rules.items()
+    }
+    # per turn: ms after the first lock with the face more than 20 ms off the dense truth, + 2 s
+    # when the turn reached sync-lost (thrsearch_stall.py's cost)
+    cost = {name: {} for name in rules}
+    for n, t in enumerate(sync["turns"]):
+        own_db = dsp.dequantise(replay.b64(t["reference"]))
+        base = runs["today"][t["turn_id"]]
+        acc = [k["l"] for k in base["res"]["ticks"] if k["accepted"]]
+        centre = acc[0] if acc else base["prior_l_at"](t["start_tap"])
+        truth = replay.dense_truth_frames(replay.dense_track(env, own_db, centre), len(env))
+        for name in rules:
+            res = runs[name][t["turn_id"]]["res"]
+            first = next((k["count"] for k in res["ticks"] if k["accepted"]), None)
+            off = 0.0
+            if first is not None:
+                js = np.array(sorted(j for j in res["disp"] if j >= first))
+                face = np.array([res["disp"][j] for j in js])
+                ok = ~np.isnan(truth[js])
+                off = float(
+                    (np.abs(face[ok] - truth[js][ok]) * HOP_MS > FALSE_LOCK_MS).sum() * HOP_MS
+                )
+            cost[name][n] = off + 2000.0 * (len(res["lost_at"]) > 0)
+    return report, cost
+
+
+def _real_stalls(rows):
+    return {
+        (r["turn"], round(g["shift_ms"])): g
+        for r in rows
+        for g in r["gaps"]
+        if g["shift_ms"] >= REAL_STALL_MS
+    }
+
+
+@pytest.mark.parametrize("causal", [True, False], ids=["causal", "zero-phase"])
+def test_the_stalled_capture_has_zero_false_locks_under_the_stall_rule(replay, causal):
+    # The window-content truth, segmented at each re-align (the replay's default rule is the stall
+    # rule): no accepted tick more than 20 ms off. Every turn has accepts to score but one (turn 6,
+    # played faster after the 1.66 s stall, never locks under either rule).
+    if not _STALLED.is_dir():
+        pytest.skip("tests/fixtures/sync/daily-stall is not in the sdist")
+    with contextlib.redirect_stdout(io.StringIO()):
+        results = replay.main([str(_STALLED)] + (["--causal"] if causal else []))
+    errors = [e for r in results for e in r["window_errors_ms"]]
+    assert len(errors) == sum(r["accepted"] for r in results) >= 70
+    assert not [e for e in errors if e > FALSE_LOCK_MS]
+    assert sum(len(r["freezes"]) for r in results) >= 6
+    assert sum(r["half_accepts"] for r in results) >= 4
+
+
+def test_the_stalled_capture_has_no_false_accept_on_the_dense_truth(stalled):
+    # Full-window, newer-half and confirm accepts, outside a gap and across one, for both rules.
+    report, _ = stalled
+    for name, rows in report.items():
+        assert sum(r["scored"] for r in rows) >= 60, name
+        assert not [f for r in rows for f in r["false"]], name
+        assert not [f for r in rows for f in r["false_straddle"]], name
+
+
+def test_the_stall_rule_realigns_after_each_real_stall_as_fast_as_the_oracle_measured(stalled):
+    report, _ = stalled
+    stalls = _real_stalls(report["rule"])
+    assert sorted(stalls) == sorted((turn, shift) for turn, (shift, _) in STALL_REALIGN_MS.items())
+    for (turn, shift), g in stalls.items():
+        measured = STALL_REALIGN_MS[turn][1]
+        assert g["realign_ms"] is not None, (turn, shift)
+        assert g["realign_ms"] <= measured + REALIGN_MARGIN_MS, (turn, shift, g["realign_ms"])
+    # the face runs ahead of the sound during the 1.66 s gap only for detection and concealment
+    assert stalls[(5, 1657)]["max_ahead_ms"] <= 155
+
+
+def test_today_holds_through_the_same_stalls(stalled):
+    # What the rule is for: today's rule coasts at the old offset until its 1 s window clears the
+    # jump, or never re-aligns (beyond its +/- 300 ms search), with the face running ahead of the
+    # sound for the whole 1.66 s gap.
+    report, _ = stalled
+    stalls = _real_stalls(report["today"])
+    assert sorted(stalls) == sorted((turn, shift) for turn, (shift, _) in STALL_REALIGN_MS.items())
+    for key, g in stalls.items():
+        assert g["realign_ms"] is None or g["realign_ms"] >= TODAY_HOLD_MIN_MS, (
+            key,
+            g["realign_ms"],
+        )
+    assert sum(g["realign_ms"] is None for g in stalls.values()) >= 2
+    assert stalls[(5, 1657)]["max_ahead_ms"] >= 1500
+
+
+def test_no_turn_of_the_stalled_capture_is_worse_under_the_stall_rule(stalled):
+    report, cost = stalled
+    worse = {n: (cost["today"][n], c) for n, c in cost["rule"].items() if c > cost["today"][n]}
+    assert not worse, f"turns costlier under the stall rule (today, rule) in ms: {worse}"
+    assert sum(cost["rule"].values()) < sum(cost["today"].values()) - 1000
+    # and no gap re-aligns later than today's rule re-aligned it
+    for today_row, rule_row in zip(report["today"], report["rule"]):
+        for gt, gr in zip(today_row["gaps"], rule_row["gaps"]):
+            if gt["realign_ms"] is not None:
+                assert gr["realign_ms"] is not None and gr["realign_ms"] <= gt["realign_ms"], (
+                    rule_row["turn"],
+                    gt["shift_ms"],
+                )

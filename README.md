@@ -227,10 +227,19 @@ rule, because a session token can open SpatialReal sessions billed to your accou
   with the envelope: in the paired captures (`tests/fixtures/sync`) the median was about 0.15 s and
   the slowest 0.73 s, on turns that start with silence. Until the lock the frames follow the onset
   prior, which was within 7 ms of the truth on every turn there.
-* **A mid-turn jitter-buffer jump costs about a second.** When the browser's jitter buffer deletes
-  or inserts audio inside a turn, the one-second window straddles the jump and is refused, so for
-  about a second the face is off by the length of the jump, and then locks again. A jump in the last
-  second of a turn may never be corrected.
+* **A stall costs about 0.3 s.** When the bot's host or the network stalls, the browser plays a short
+  concealment fade and then silence, and the rest of the turn arrives late. The browser freezes the
+  face's position while the track is silent where the turn has speech, and re-aligns about 0.3 s after
+  the audio resumes (on a real capture: 280-290 ms after stalls of 0.24-1.66 s); at the start of the
+  gap the face runs ahead of the sound for about 90 ms. A jump the browser cannot see that way (a
+  deletion, or a stall inside the turn's own pause) still costs up to a second, until the window
+  clears it. A freeze never lasts more than 2 s.
+* **The bot's host must keep up.** A host that stalls longer than `lead_ms` (200 ms) makes the
+  transport play silence in the room in the middle of a turn. The stall rule above absorbs it in the
+  browser, but the room hears the gap.
+* **A burst of packet loss can freeze the face wrongly.** On a very poor network a loss that does not
+  move the audio's timeline can look like a stall: in simulation, after a 400 ms loss the face was off
+  by about 340 ms until it re-aligned, and 2 of 35 runs did not re-align in that turn.
 * **Message volume.** While the TTS is behind, each chunk of stall silence (`silence_chunk_ms`, 40 ms
   by default) is described by a `turn_envelope` message of its own: up to 25 small messages per
   second.

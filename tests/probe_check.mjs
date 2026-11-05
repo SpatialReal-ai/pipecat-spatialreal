@@ -1081,10 +1081,234 @@ test('tracker: an onset prior far from the arrival prior is the prior from the f
   lockErrors(ticks, first)
 })
 
+// ------------------------------------------------------------------ sync.js: the stall rule against the oracle's ticks
+//
+// tests/fixtures/sync/stall.json (and daily-stall/oracle-ticks.json for the committed stalled
+// capture) hold the oracle's tick loop (hack/sync-sim/replay_capture.py replay_all_tracked with
+// dsp.TurnTracker) on synthetic stalls and on a real one. The page's SyncTracker gets the same
+// received envelope (so this compares the tracker, not the envelope, which is pinned above), the
+// same messages at the same taps and the same onset prior, and must reproduce every tick: its
+// position, accept/hold and how (full window or newer half), the newer half's candidate and
+// refusal, the loss clock and sync-lost, the prior, the tracked position (freezes and confirms
+// included), and every frozen/unfrozen event and closed freeze.
+
+const STALL_FIXTURE = JSON.parse(fs.readFileSync(new URL('./fixtures/sync/stall.json', import.meta.url), 'utf8'))
+const STALL_CAPTURE_DIR = new URL('./fixtures/sync/daily-stall/', import.meta.url)
+const camel = k => k.replace(/_([a-z])/g, (_, ch) => ch.toUpperCase())
+
+/** The onset prior in effect at block `pos`, from change points [[from tap, value], ...]. */
+function stepValue(steps, pos) {
+  let v = null
+  for (const [from, value] of steps) {
+    if (from > pos) break
+    v = value
+  }
+  return v
+}
+
+/**
+ * Drive a SyncTracker as the oracle's replay runs the page: 128-sample blocks; before each block
+ * the analysis' onset prior for every turn; after it the messages that arrived at a tap up to its
+ * end (the first tick that sees a message is the next block's); finish() at the end of the track.
+ * `env` replaces the tracker's envelope (the oracle's), or null to measure `pcm` itself.
+ */
+function driveStall({ rate, hop, n_samples: total, env, onset_steps: steps }, messages, stall, { pcm = null } = {}) {
+  const tracker = new sync.SyncTracker(rate, { stall })
+  if (env) {
+    const frames = Float64Array.from(env)
+    assert.equal(tracker.hop, hop)
+    tracker.env = { hop, samples: 0, alpha: 0, push(block) { this.samples += block.length }, values() { return frames.subarray(0, Math.min(frames.length, sync.framesAt(this.samples, hop))) } }
+  }
+  const due = messages.slice().sort((a, b) => a.tap - b.tap) // stable: arrival order within a tap
+  let next = 0
+  const silence = new Float32Array(128)
+  for (let end = 128; end <= total; end += 128) {
+    for (const [id, s] of Object.entries(steps)) tracker.setOnsetPrior(id, stepValue(s, end))
+    tracker.audio(pcm ? pcm.subarray(end - 128, end) : silence)
+    while (next < due.length && due[next].tap <= end) tracker.message(due[next].data, due[next++].tap)
+  }
+  tracker.finish()
+  return tracker
+}
+
+const FLAT_PEAK = 1e-9
+const close = (a, b, tol = 1e-6) => (a === null || b === null ? a === b : Math.abs(a - b) <= tol)
+
+/** Every difference between the port's turn and the oracle's: [] when they agree tick for tick. */
+function stallDiffs(turn, want, hop) {
+  const out = []
+  const got = turn.ticks
+  if (got.length !== want.ticks.length) out.push(`${want.ticks.length} ticks in the oracle, ${got.length} here`)
+  const frame = pos => (pos === null ? null : pos / hop)
+  for (let i = 0; i < Math.min(got.length, want.ticks.length); i++) {
+    const g = got[i]
+    const w = want.ticks[i]
+    const pairs = [
+      ['pos', g.pos, w.pos, 0],
+      ['speech', g.gate, w.speech],
+      ['accepted', g.accepted, w.accepted],
+      ['via', g.via, w.via],
+      ['l', frame(g.first_sample_pos), w.l, 1e-6],
+      ['peak', g.checks.peak, w.peak, 1e-9],
+      // a curve that is flat to rounding (the reference all floor in the search range: peak ~1e-17)
+      // has its argmax decided by summation order; its candidate is not compared
+      ...(w.peak !== null && Math.abs(w.peak) < FLAT_PEAK ? [] : [['candidate_l', frame(g.candidate_pos), w.candidate_l, 1e-6]]),
+      ['half_l', frame(g.half_pos), w.half_l, 1e-6],
+      ['half_refused', g.half_refused, w.half_refused],
+      ['prior_l', frame(g.prior_pos), w.prior_l, 1e-6],
+      ['loss clock', g.loss_clock_ms, w.unlocked_ms, 1e-6],
+      ['lost', g.lost, w.lost],
+      ['tracked_l', frame(g.tracked_pos), w.tracked_l, 1e-6],
+    ]
+    for (const [name, a, b, tol] of pairs) {
+      const same = tol === undefined ? a === b : close(a, b, tol)
+      if (!same) out.push(`tick ${i} (pos ${w.pos}) ${name}: oracle ${b}, here ${a}`)
+    }
+  }
+  const events = turn.tracker.events.map(e => [e.frame, e.event])
+  if (JSON.stringify(events) !== JSON.stringify(want.events)) out.push(`events: oracle ${JSON.stringify(want.events)}, here ${JSON.stringify(events)}`)
+  const freezes = turn.tracker.freezes
+  if (freezes.length !== want.freezes.length) out.push(`${want.freezes.length} freezes in the oracle, ${freezes.length} here`)
+  for (let i = 0; i < Math.min(freezes.length, want.freezes.length); i++) {
+    for (const [k, v] of Object.entries(want.freezes[i])) {
+      const a = freezes[i][camel(k)]
+      const same = typeof v === 'number' && typeof a === 'number' ? close(a, v) : a === v
+      if (!same) out.push(`freeze ${i} ${k}: oracle ${v}, here ${a}`)
+    }
+  }
+  if (JSON.stringify(turn.tracker.lostAt) !== JSON.stringify(want.lost_at)) out.push(`sync-lost at: oracle ${want.lost_at}, here ${turn.tracker.lostAt}`)
+  return out
+}
+
+/** Run one case under one rule and compare every turn; returns { ticks, diffs }. */
+function stallCompare(c, messages, rule, opts) {
+  const tracker = driveStall(c, messages, rule === 'stall' ? sync.STALL : sync.TODAY, opts)
+  let ticks = 0
+  const diffs = []
+  for (const [id, want] of Object.entries(c.expected[rule])) {
+    const turn = tracker.turns.get(id)
+    if (!turn) {
+      diffs.push(`${id}: no such turn here`)
+      continue
+    }
+    ticks += want.ticks.length
+    for (const d of stallDiffs(turn, want, c.hop)) diffs.push(`${id}: ${d}`)
+  }
+  return { ticks, diffs, tracker }
+}
+
+let stallTicksCompared = 0
+
+test('stall: the rule\'s fixed terms are the oracle\'s (dsp.STALL), and TODAY switches every part off', () => {
+  assert.deepEqual({ ...sync.STALL }, STALL_FIXTURE.stall)
+  for (const part of ['freeze', 'confirm', 'newerHalf', 'holdClock', 'chainPrior']) assert.equal(sync.TODAY[part], false)
+  assert.equal(sync.TODAY.noshiftTolMs, 0)
+})
+
+for (const c of STALL_FIXTURE.cases) {
+  for (const rule of ['stall', 'today']) {
+    test(`stall: ${c.name} (${rule === 'stall' ? 'stall rule' : 'today\'s rule'}): the tracker is the oracle's tick for tick`, () => {
+      const { ticks, diffs } = stallCompare(c, c.messages, rule)
+      assert(ticks > 0)
+      stallTicksCompared += ticks
+      assert.deepEqual(diffs, [])
+    })
+  }
+}
+
+test('stall: the synthetic cases freeze, confirm, re-lock on the newer half, reach the cap and lose sync where they should', () => {
+  const by = Object.fromEntries(STALL_FIXTURE.cases.map(c => [c.name, c.expected]))
+  const kinds = (name, id = 't') => by[name].stall[id].events.map(([, e]) => e.kind + (e.kind === 'unfrozen' ? `:${e.confirmed}` : ''))
+  assert.deepEqual(kinds('stall-300'), ['frozen', 'unfrozen:true'])
+  assert.deepEqual(kinds('burst-loss-300'), ['frozen', 'unfrozen:true']) // the no-shift check
+  assert(by['burst-loss-300'].stall.t.freezes[0].confirm_after_ms < STALL_FIXTURE.stall.confirmFromMs)
+  assert(kinds('stall-cap-2500').includes('unfrozen:false')) // at the cap
+  assert(by['stall-cap-2500'].stall.t.freezes.some(f => f.capped))
+  assert(Object.values(by).some(e => e.stall.t && e.stall.t.ticks.some(k => k.via === 'half')))
+  assert.equal(by['stall-300'].today.t.lost_at.length, 1) // today's rule loses sync across the stall
+  assert.equal(by['stall-300'].stall.t.lost_at.length, 0)
+  // R76: the chain holds B 800 ms early until it widens; the wide search centres on the onset prior
+  const b = by['chain-r76-800'].stall.B.ticks
+  const firstLock = b.find(k => k.accepted)
+  assert(b.some(k => !k.wide && k.speech && Math.abs(k.prior_l - (firstLock.l - 160)) < 2), 'held on the chain place first')
+  assert(firstLock.wide && Math.abs(firstLock.prior_l - firstLock.l) < 2)
+  // a chained turn announced while its predecessor is frozen: the prior moves with the freeze
+  const priors = by['chain-while-frozen-500'].stall.B.ticks.filter(k => !k.wide).map(k => k.prior_l)
+  assert(new Set(priors.map(Math.round)).size > 1, 'the chain place moved while B waited')
+})
+
+test('stall: the tracker records its freezes per tick and per turn in the capture, and the table reads them', () => {
+  const c = STALL_FIXTURE.cases.find(x => x.name === 'stall-300')
+  const tracker = driveStall(c, c.messages, sync.STALL)
+  const t = tracker.export().turns.find(x => x.turn_id === 't')
+  assert.deepEqual(t.events.map(e => e.kind), ['frozen', 'unfrozen'])
+  assert.equal(t.events[0].tap, (t.events[0].frame + 2) * c.hop)
+  assert.deepEqual(Object.keys(t.events[1]).sort(), ['confirmed', 'frame', 'frozenMs', 'kind', 'tap', 'turnId'])
+  assert.equal(t.freezes.length, 1)
+  assert.equal(t.freezes[0].how, 'confirm')
+  // per tick: the frozen state, the events since the previous tick, the tracked position
+  const frozenTicks = t.ticks.filter(k => k.frozen)
+  assert(frozenTicks.length >= 1, 'a tick inside the 290 ms freeze says so')
+  assert.deepEqual(t.ticks.flatMap(k => k.events.map(e => e.kind)), ['frozen', 'unfrozen'])
+  const s = tracker.summary().t
+  assert.deepEqual(s.freezes, [{ atMs: c.expected.stall.t.events[0][1].atMs, frozenMs: t.freezes[0].frames * 5, confirmed: true }])
+  assert.equal(s.syncLost, 0)
+})
+
+const STALL_CAPTURE = fs.existsSync(new URL('oracle-ticks.json', STALL_CAPTURE_DIR))
+  ? JSON.parse(fs.readFileSync(new URL('oracle-ticks.json', STALL_CAPTURE_DIR), 'utf8'))
+  : null
+
+/** The avatar messages of a capture.jsonl as the page handed them to its tracker. */
+function captureMessages(dir) {
+  const out = []
+  for (const line of fs.readFileSync(new URL('capture.jsonl', dir), 'utf8').split('\n')) {
+    if (!line) continue
+    const r = JSON.parse(line)
+    const m = r.message
+    if (m && m.type === 'server-message' && m.data && m.data.tag === 'spatialreal-avatar') out.push({ tap: r.tap, data: m.data })
+  }
+  return out
+}
+
+/** capture.wav's samples as Web Audio floats. */
+function captureFloats(dir) {
+  const wav = fs.readFileSync(new URL('capture.wav', dir))
+  let at = 12
+  while (wav.toString('ascii', at, at + 4) !== 'data') at += 8 + wav.readUInt32LE(at + 4)
+  const n = wav.readUInt32LE(at + 4) / 2
+  const out = new Float32Array(n)
+  for (let i = 0; i < n; i++) out[i] = wav.readInt16LE(at + 8 + 2 * i) / 32768
+  return out
+}
+
+if (STALL_CAPTURE) {
+  const messages = captureMessages(STALL_CAPTURE_DIR)
+  test('stall: the committed stalled capture (daily-stall): the tracker is the oracle\'s tick for tick', () => {
+    const { ticks, diffs, tracker } = stallCompare(STALL_CAPTURE, messages, 'stall')
+    assert(ticks > 300, `${ticks} ticks`)
+    stallTicksCompared += ticks
+    assert.deepEqual(diffs, [])
+    const freezes = [...tracker.turns.values()].reduce((n, t) => n + t.tracker.freezes.length, 0)
+    assert(freezes >= 4, `${freezes} freezes`)
+  })
+  test('stall: daily-stall with the page\'s own envelope from capture.wav: the same ticks', () => {
+    const { diffs } = stallCompare({ ...STALL_CAPTURE, env: null }, messages, 'stall', { pcm: captureFloats(STALL_CAPTURE_DIR) })
+    assert.deepEqual(diffs, [])
+  })
+} else {
+  console.log('skip  stall: tests/fixtures/sync/daily-stall is not here (not in the sdist)')
+}
+
+test('stall: ticks compared', () => {
+  assert(stallTicksCompared > 0)
+  console.log(`      ${stallTicksCompared} ticks compared with the oracle, 0 mismatches`)
+})
+
 test('the table: the header has the alignment columns and every row has one cell per header', () => {
   const head = html.match(/<thead>([\s\S]*?)<\/thead>/)[1]
   const titles = [...head.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/g)].map(m => m[1].replace(/&Delta;/g, 'Δ').trim())
-  for (const name of ['first lock ms', 'offset ms', 'p95 err ms', 'held / acc', 'peak / ratio / sharp / halves']) assert(titles.includes(name), `no "${name}" column: ${titles}`)
+  for (const name of ['first lock ms', 'offset ms', 'p95 err ms', 'held / acc', 'peak / ratio / sharp / halves', 'freezes']) assert(titles.includes(name), `no "${name}" column: ${titles}`)
   const s = goodSession()
   const o = 480000 - samples(180)                  // A's onset prior: its first onset heard, minus onsets_ms[0]
   s.log.find(r => r.data.turn_start && r.data.turn_start.turn_id === A).tap = o - samples(150)
@@ -1094,7 +1318,7 @@ test('the table: the header has the alignment columns and every row has one cell
   // A locks on its onset prior, then 1 ms either side; its speech starts onsets_ms[0] = 180 ms after it.
   const speech = o + samples(180)
   s.sync = {
-    [A]: { referenceLength: 600, splice: null, ticks: [
+    [A]: { referenceLength: 600, splice: null, freezes: [{ atMs: 1200, frozenMs: 180, confirmed: true }, { atMs: 2400, frozenMs: 35, confirmed: false }, { atMs: 3100, frozenMs: 60, confirmed: null }], ticks: [
       { pos: speech - 2400, gate: false, accepted: false, first_sample_pos: null, checks: { speech: false } },
       tick(speech, false, null, bad),
       tick(speech + samples(120), true, o, good),
@@ -1118,10 +1342,12 @@ test('the table: the header has the alignment columns and every row has one cell
   assert.equal(col('p95 err ms'), '1.0')
   assert.equal(col('held / acc'), '1 / 3')
   assert.equal(col('peak / ratio / sharp / halves'), '0.991 / 3.04 / 0.224 / 0.5')
+  assert.equal(col('freezes'), '3, 275 ms, 1 confirmed, 1 not, 1 open')
   const bcells = api.rowCells(b).map(x => x.text)
   assert.equal(bcells[titles.indexOf('held / acc')], '1 / 0 *')
   assert.equal(bcells[titles.indexOf('first lock ms')], 'none')
   assert.equal(bcells[titles.indexOf('peak / ratio / sharp / halves')], '0.900! / inf / 0.224 / 0.5')
+  assert.equal(bcells[titles.indexOf('freezes')], '-')
   const ccells = api.rowCells(c).map(x => x.text)
   assert.equal(ccells.length, titles.length)
   assert.equal(ccells[titles.indexOf('offset ms')], '-')
