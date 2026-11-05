@@ -24,6 +24,7 @@ Settings come from the environment or a ``.env`` file; ``env.example`` lists the
 reads the transport's own (``DAILY_API_KEY``, ``LIVEKIT_URL`` and the like).
 """
 
+import asyncio
 import json
 import os
 import time
@@ -65,6 +66,10 @@ load_dotenv(override=True)
 # The SpatialReal deployment the processor and the token route use, unless
 # SPATIALREAL_CONSOLE_ENDPOINT and SPATIALREAL_INGRESS_ENDPOINT name another one.
 ENVIRONMENT = "us-west"
+
+# How long the bot waits for the browser's RTVI client-ready before it greets anyway: a participant
+# with no RTVI client (the probe page, a scripted caller) never sends it.
+GREETING_FALLBACK_S = 5.0
 
 # A Cartesia voice that Pipecat's own documentation uses; CARTESIA_VOICE_ID replaces it.
 DEFAULT_VOICE_ID = "71a7ad14-091c-4e8e-a314-022ece01c121"
@@ -348,17 +353,46 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
 
     runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
 
-    @transport.event_handler("on_client_connected")
-    async def on_client_connected(transport, client):
-        logger.info("Client connected")
+    greeting: dict = {"done": False, "fallback": None}
+
+    async def greet() -> None:
+        """Start the conversation, once."""
+        if greeting["done"]:
+            return
+        greeting["done"] = True
+        fallback = greeting["fallback"]
+        if fallback is not None and fallback is not asyncio.current_task():
+            fallback.cancel()
         context.add_message(
             {"role": "developer", "content": "Say hello and briefly introduce yourself."}
         )
         await worker.queue_frames([LLMRunFrame()])
 
+    # The greeting waits for the browser's RTVI client to say it is ready rather than for the
+    # participant to join. On Pipecat Cloud a greeting started at the join reached the browser
+    # about 6 s behind its animation messages, too far for the face to line it up (the first two
+    # turns played without animation); started at client-ready it lined up from the first word.
+    @worker.rtvi.event_handler("on_client_ready")
+    async def on_client_ready(rtvi):
+        await greet()
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info("Client connected")
+
+        async def greet_anyway() -> None:
+            await asyncio.sleep(GREETING_FALLBACK_S)
+            await greet()
+
+        if greeting["fallback"] is None and not greeting["done"]:
+            greeting["fallback"] = asyncio.create_task(greet_anyway())
+
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
+        fallback = greeting["fallback"]
+        if fallback is not None:
+            fallback.cancel()
         await runner.cancel()
 
     await runner.add_workers(worker)

@@ -5,6 +5,7 @@ fake ``WorkerRunner`` that keeps the worker instead of running it, so nothing co
 services are the real ones, built with placeholder keys: building them opens no connection.
 """
 
+import asyncio
 import base64
 import json
 import re
@@ -163,6 +164,70 @@ async def test_the_session_ends_when_the_client_leaves(monkeypatch):
 
     # The bot, and its billed SpatialReal connection, end with the client.
     assert wired.runner.cancels == 1
+
+
+def greetings(wired, monkeypatch) -> list:
+    """Every LLMRunFrame the bot queues on its worker from now on."""
+    from pipecat.frames.frames import LLMRunFrame
+
+    queued: list = []
+
+    async def queue_frames(frames):
+        queued.extend(f for f in frames if isinstance(f, LLMRunFrame))
+
+    monkeypatch.setattr(wired.worker, "queue_frames", queue_frames)
+    return queued
+
+
+def client_ready_handlers(wired) -> list:
+    """The example's own on_client_ready handlers (the worker adds one of its own, set_bot_ready)."""
+    handlers = wired.worker.rtvi._event_handlers["on_client_ready"].handlers
+    return [h for h in handlers if "run_bot" in h.__qualname__]
+
+
+async def test_the_bot_greets_when_the_rtvi_client_is_ready_not_when_it_joins(monkeypatch):
+    wired = await wire(monkeypatch)
+    queued = greetings(wired, monkeypatch)
+    (on_client_connected,) = wired.transport.handlers["on_client_connected"]
+
+    await on_client_connected(wired.transport, object())
+    assert queued == []  # joined, not ready: the browser may not receive the bot's track yet
+
+    assert len(client_ready_handlers(wired)) == 1
+    for handler in client_ready_handlers(wired):
+        await handler(wired.worker.rtvi)
+    assert len(queued) == 1
+
+    await asyncio.sleep(0.01)
+    for handler in client_ready_handlers(wired):
+        await handler(wired.worker.rtvi)
+    assert len(queued) == 1  # once per session
+
+
+async def test_a_participant_without_an_rtvi_client_is_greeted_after_the_fallback(monkeypatch):
+    wired = await wire(monkeypatch)
+    monkeypatch.setattr(wired.bot, "GREETING_FALLBACK_S", 0.05)
+    queued = greetings(wired, monkeypatch)
+    (on_client_connected,) = wired.transport.handlers["on_client_connected"]
+
+    await on_client_connected(wired.transport, object())
+    await asyncio.sleep(0.2)
+
+    assert len(queued) == 1
+
+
+async def test_leaving_before_the_fallback_cancels_the_greeting(monkeypatch):
+    wired = await wire(monkeypatch)
+    monkeypatch.setattr(wired.bot, "GREETING_FALLBACK_S", 0.05)
+    queued = greetings(wired, monkeypatch)
+    (on_client_connected,) = wired.transport.handlers["on_client_connected"]
+    (on_client_disconnected,) = wired.transport.handlers["on_client_disconnected"]
+
+    await on_client_connected(wired.transport, object())
+    await on_client_disconnected(wired.transport, object())
+    await asyncio.sleep(0.2)
+
+    assert queued == []
 
 
 async def test_the_runner_runs_the_one_pipeline_worker(monkeypatch):
