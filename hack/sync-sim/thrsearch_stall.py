@@ -17,12 +17,15 @@ accepts: no accept (full window, newer half or confirm) more than 20 ms off the 
 its window covered, outside a gap, and none across a gap that lands on no real position of its
 window (simulation and captures).
 
-The search: today's rule, the spike's constants (with the confirm's ratio check, the carried bracket and the digital-silence guard, added here), the
-ablations, then coordinate descent from the spike's point over each constant's grid (two rounds; a
-change is kept when it lowers ``J`` by at least 1 % and stays feasible). ``worst`` is the largest
-error of any accept outside a gap: the margin left to the 20 ms false-lock line. The burst-loss risk is
-the loss conditions' share of the cost (``loss`` column): there the timeline does not move, so
-every freeze is wrong until the confirm or a lock undoes it.
+The search: today's rule, the spike's constants (with the confirm's ratio check, the carried
+bracket and the digital-silence guard, added here), the ablations, then coordinate descent from the
+spike's point over each constant's grid (up to ``--rounds`` rounds; a change is kept when it lowers
+``J`` by at least 1 % and the value and its grid neighbours are feasible: a value next to one that
+passes a false accept has no margin). The confirm's acceptance thresholds are swept but never
+adopted (``REPORT_ONLY``). ``worst`` is the largest error of any accept outside a gap: the margin
+left to the 20 ms false-lock line. The burst-loss risk is the loss conditions' share of the cost
+(``sim loss`` column): there the timeline does not move, so every freeze is wrong until the
+confirm or a lock undoes it.
 """
 
 import argparse
@@ -333,7 +336,16 @@ def main():
                 print(HEADER)
                 for v, sc in zip(values, res):
                     print(row(f"{name}={v}", sc))
-                ok = [(sc["J"], i) for i, sc in enumerate(res) if sc["feasible"]]
+                # margin: a value is adoptable only when its grid neighbours are feasible too
+                feas = [sc["feasible"] for sc in res]
+                ok = [(sc["J"], i) for i, sc in enumerate(res) if all(feas[max(0, i - 1) : i + 2])]
+                blocked = [
+                    values[i]
+                    for i in range(len(res))
+                    if feas[i] and not all(feas[max(0, i - 1) : i + 2])
+                ]
+                if blocked and name not in REPORT_ONLY:
+                    print(f"\n(feasible but next to an infeasible value, not adoptable: {blocked})")
                 if name in REPORT_ONLY:
                     print("\n(reported only: the confirm keeps align's thresholds)")
                 elif ok:

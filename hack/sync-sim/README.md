@@ -111,7 +111,7 @@ today's ticks exactly). After the turn's first lock:
    retroactively over those 20 ms, and stays stopped while the received stays silent, for at most
    2 s. Natural pauses and the processor's own silence are in the reference, so they never trigger
    it. While a confirm is pending, only digital silence (<= -95 dBFS) counts as silent.
-2. **Confirm.** When audio resumes, every 50 ms from 250 ms to 1200 ms of it, the received audio
+2. **Confirm.** When audio resumes, every 50 ms from 300 ms to 1200 ms of it, the received audio
    since the resume is correlated with the own reference (both clipped at -70 dBFS) at positions
    in [pointer before the freeze - 150 ms, pointer before the freeze + everything received since
    the last frame that matched the reference before the freeze + 20 ms]. The last matching frame:
@@ -140,8 +140,10 @@ than about 300 ms fades the face to idle) is the SDK's, not the oracle's.
 
 The constants are the threshold search's (`thrsearch_stall.out`): from the spike's (40 ms,
 -70 / -40 dB, confirm 300-800 ms) it moved the trigger to 20 ms, the levels to -60 / -50 dB and
-the confirm window to 250-1200 ms; the confirm's acceptance thresholds were swept but kept at
-`align`'s (a ratio of 1.11 already passed a false confirm on the same runs). `replay_capture.py`
+the confirm's end to 1200 ms. A value is adopted only when its grid neighbours pass with zero
+false accepts too, which kept the confirm's start at 300 ms (200 ms passes false confirms). The
+confirm's acceptance thresholds were swept but kept at `align`'s (a ratio of 1.11 already passed a
+false confirm on the same runs). `replay_capture.py`
 replays with the rule by default (`--no-stall-rule` for today's, `--gaps` for re-align times on
 the dense local truth).
 

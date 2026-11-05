@@ -501,7 +501,7 @@ class StallParams:
     match_frames: int = 3
     match_min_db: float = -60.0
     match_tol_db: float = 4.0
-    confirm_from_ms: float = 250.0
+    confirm_from_ms: float = 300.0
     confirm_until_ms: float = 1200.0
     confirm_every_ms: float = 50.0
     confirm_back_ms: float = 150.0
