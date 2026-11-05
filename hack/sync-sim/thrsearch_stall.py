@@ -32,6 +32,7 @@ import argparse
 import os
 import pickle
 import sys
+import tempfile
 import time
 from dataclasses import replace
 from multiprocessing import Pool
@@ -81,6 +82,8 @@ GRID = {
     "half_silence_ms": [20, 40, 80, 100000],
     "match_tol_db": [3.0, 4.0, 6.0],
     "confirming_silent_db": [-1000.0, -95.0, -80.0, 0.0],
+    "noshift_from_ms": [100, 150, 200, 300],
+    "noshift_tol_ms": [0.0, 5.0, 10.0, 20.0],
 }
 ABLATIONS = {
     "no freeze": {"freeze": False},
@@ -96,6 +99,18 @@ ABLATIONS = {
         "carry_bracket": False,
         "confirming_silent_db": 0.0,
     },
+    "no early no-shift check": {"noshift_tol_ms": 0.0},
+}
+# Evaluated at the chosen point (printed after it): the revert of an unconfirmed freeze, and how it
+# depends on the confirm window.
+AT_CHOSEN = {
+    "chosen without the no-shift check": {"noshift_tol_ms": 0.0},
+    "chosen + revert unconfirmed": {"revert_unconfirmed": True},
+    "chosen + revert, confirm until 800 ms": {
+        "revert_unconfirmed": True,
+        "confirm_until_ms": 800.0,
+    },
+    "chosen, confirm until 800 ms": {"confirm_until_ms": 800.0},
 }
 
 
@@ -297,12 +312,14 @@ HEADER = (
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--captures", nargs="*", default=[])
-    ap.add_argument("--cache", default=None, help="data pickle (built when missing)")
+    ap.add_argument(
+        "--cache", default=None, help="data pickle, built when missing (default: the temp dir)"
+    )
     ap.add_argument("--jobs", type=int, default=10)
     ap.add_argument("--rounds", type=int, default=2)
     a = ap.parse_args()
     caps = [os.path.join(FIXTURES, r) for r in FIXTURE_RUNS] + a.captures
-    cache = a.cache or os.path.join(HERE, ".thrsearch_stall.pkl")
+    cache = a.cache or os.path.join(tempfile.gettempdir(), "thrsearch_stall.pkl")
     if not os.path.exists(cache):
         with open(cache, "wb") as fh:
             pickle.dump(build(caps, a.jobs), fh)
@@ -370,6 +387,22 @@ def main():
         }
         print(f"\nchanged from the spike: {diff or 'nothing'}")
         print(f"dsp.STALL (the defaults) is the chosen point: {best == dsp.STALL}")
+        print("\n### Variants at the chosen point\n")
+        print(HEADER)
+        print(row("chosen", best_sc))
+        alt = [replace(best, **v) for v in AT_CHOSEN.values()]
+        notes = [("chosen", best_sc)]
+        for k, r in zip(AT_CHOSEN, evaluate_many(pool, n_caps, alt)):
+            sc = score(*r)
+            print(row(k, sc))
+            notes.append((k, sc))
+        print("\nburst loss, ms > 20 ms off after the loss p50/p90 (never re-aligned):")
+        for k, sc in notes:
+            l2, l4 = sc["summary"]["loss-200"], sc["summary"]["loss-400"]
+            print(
+                f"  {k}: loss-200 {l2['off20_p50']:.0f}/{l2['off20_p90']:.0f} ({l2['never']}), "
+                f"loss-400 {l4['off20_p50']:.0f}/{l4['off20_p90']:.0f} ({l4['never']})"
+            )
         print("\n### Per condition, chosen (simulation)\n")
         sim.print_stall_table(
             {

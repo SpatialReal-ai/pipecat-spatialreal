@@ -255,6 +255,62 @@ def test_a_burst_loss_is_undone_by_the_confirm():
     assert res["disp"][j] == pytest.approx(L0, abs=1.0)
 
 
+def test_a_burst_loss_is_confirmed_early_by_the_no_shift_check():
+    # The same burst loss: "nothing moved" is tested alone from 200 ms after the resume, before the
+    # confirm proper (300 ms).
+    pcm = _speechlike(4.0, seed=8)
+    at = _syllable_at(pcm, 1.8)
+    rx = np.concatenate([np.zeros(round(LEAD_S * RATE)), pcm, np.zeros(RATE)])
+    a = round((LEAD_S + at) * RATE)
+    rx[a : a + round(0.3 * RATE)] = 0.0
+    res = _replay(*_turn(pcm, rx), dsp.STALL)
+    first = res["freezes"][0]
+    assert first["how"] == "confirm" and first["confirm_l"] == pytest.approx(L0, abs=1.0)
+    assert first["confirm_after_ms"] < dsp.STALL.confirm_from_ms
+    late = _replay(*_turn(pcm, rx), replace(dsp.STALL, noshift_tol_ms=0.0))
+    assert all(f.get("confirm_after_ms", 1e9) >= dsp.STALL.confirm_from_ms for f in late["freezes"])
+
+
+def test_the_no_shift_check_accepts_only_near_the_unfrozen_position():
+    env, own, l_true = _confirm_case()
+    j_res = l_true + 100
+    args = (env, own, j_res, j_res + 40, l_true - 30, l_true + 40, dsp.STALL)
+    assert dsp.confirm_position(*args, noshift_l=l_true, noshift_only=True) == pytest.approx(
+        l_true, abs=0.5
+    )
+    # the peak is real but 50 ms from the hypothesis: the no-shift test does not take it
+    assert dsp.confirm_position(*args, noshift_l=l_true + 10, noshift_only=True) is None
+
+
+def test_an_unconfirmed_freeze_is_reverted_when_asked():
+    # Silence over speech freezes the pointer; the audio that follows matches nothing (noise), so
+    # the confirm never accepts: when its time runs out the pointer goes back where it would be
+    # without the freeze.
+    revert = replace(dsp.STALL, revert_unconfirmed=True)  # evaluated, off by default
+    tr, env, ref, count = _locked_tracker(revert)
+    own = dsp.dequantise(ref)
+    j0 = next(
+        j
+        for j in range(count, count + 300)
+        if (own[j - round(L0) : j - round(L0) + 12] > dsp.STALL.ref_speech_db).all()
+    )
+    env = env.copy()
+    rng = np.random.default_rng(3)
+    env[j0 : j0 + 40] = -100.0
+    end = j0 + 40 + tr.n_until + 5
+    env[j0 + 40 : end] = rng.uniform(-50, -20, end - j0 - 40)
+    for j in range(count, end):
+        tr.frame(env, j)
+    assert len(tr.freezes) == 1 and tr.freezes[0]["how"] == "expired"
+    assert tr.freezes[0].get("reverted")
+    assert tr.l == pytest.approx(L0, abs=0.5)
+    assert tr.events[-1][1]["kind"] == "unfrozen" and tr.events[-1][1]["confirmed"] is False
+    kept, _, _, count2 = _locked_tracker(dsp.STALL)
+    for j in range(count2, end):
+        kept.frame(env, j)
+    assert kept.l == pytest.approx(L0 + kept.freezes[0]["frames"], abs=0.5)
+
+
 def test_a_second_stall_before_the_confirm_keeps_the_first_bracket():
     # 200 ms stall, 150 ms of audio, another 200 ms stall: the second freeze starts while the
     # first one's confirm is pending, keeps its bracket, and the confirm finds both stalls.

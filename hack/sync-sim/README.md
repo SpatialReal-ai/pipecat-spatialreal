@@ -118,10 +118,16 @@ today's ticks exactly). After the turn's first lock:
    the newest frame within 400 ms before the run with 3 consecutive frames over -60 dBFS within
    4 dB of the reference at the pointer then (no such frame: no confirm). Accepted at an interior
    peak >= 0.95 with peak / second-highest peak >= 1.2 and sharpness >= 0.03 (curve at the peak
-   +/- 20 ms): `align`'s thresholds. Until it accepts, or if it never does, the normal rule
-   continues. A freeze that starts while a confirm is pending keeps that confirm's bracket (its
-   pointer before the freeze and last match), so the confirm can still choose "nothing moved" (a
-   burst loss) or "everything since moved" (a second stall).
+   +/- 20 ms): `align`'s thresholds. Until it accepts, the normal rule continues. A freeze that
+   starts while a confirm is pending keeps that confirm's bracket (its pointer before the freeze
+   and last match), so the confirm can still choose "nothing moved" (a burst loss) or "everything
+   since moved" (a second stall).
+   - **No-shift check.** From 200 ms of resumed audio (every 50 ms, and at the confirm's first
+     attempt) the same correlation tests "nothing moved" alone: a peak >= 0.95, interior, within
+     10 ms of the pointer before the freeze is accepted without the ratio and sharpness checks.
+   - Evaluated and not adopted (`revert_unconfirmed`, off): when the confirm's time runs out,
+     put the pointer back where it would be had it never frozen. With the 1200 ms window it gains
+     nothing measurable; with an 800 ms window it undoes real stalls (sim sync-lost 2 -> 21).
 3. **Newer-half re-lock.** A tick whose full window is not accepted searches the newer 0.5 s alone
    within +/- 300 ms of the pointer (peak, ratio, sharpness, interior as `align`); it is accepted
    when the previous tick's newer-half candidate agrees within 10 ms (two ticks 200 ms apart), and
@@ -140,12 +146,17 @@ than about 300 ms fades the face to idle) is the SDK's, not the oracle's.
 
 The constants are the threshold search's (`thrsearch_stall.out`): from the spike's (40 ms,
 -70 / -40 dB, confirm 300-800 ms) it moved the trigger to 20 ms, the levels to -60 / -50 dB and
-the confirm's end to 1200 ms. A value is adopted only when its grid neighbours pass with zero
-false accepts too, which kept the confirm's start at 300 ms (200 ms passes false confirms). The
-confirm's acceptance thresholds were swept but kept at `align`'s (a ratio of 1.11 already passed a
-false confirm on the same runs). `replay_capture.py`
-replays with the rule by default (`--no-stall-rule` for today's, `--gaps` for re-align times on
-the dense local truth).
+the confirm's end to 1200 ms, and added the no-shift check from 200 ms (it cuts the burst-loss
+cost and changes nothing on the stall conditions or the captures). A value is adopted
+only when its grid neighbours pass with zero false accepts too. **Several sit exactly one grid
+step from a value that passes a false accept**, so moving any of them is a re-run of the search,
+not a tweak: the confirm's start (300 ms; 200 ms passes false confirms), its upper margin (+20 ms;
++40 ms does), the no-shift check's start (200 ms; 100 ms does, 150 ms is next to it), the freeze
+cap (2 s; 500 ms does, 1 s is next to it) and the newer half's digital-silence refusal (40 ms;
+switching it off does, 80 ms is next to that). The confirm's acceptance thresholds were swept but
+kept at `align`'s (a ratio of 1.11 already passed a false confirm on the same runs).
+`replay_capture.py` replays with the rule by default (`--no-stall-rule` for today's, `--gaps` for
+re-align times on the dense local truth).
 
 ## Rerunning
 

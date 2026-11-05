@@ -469,7 +469,13 @@ class StallParams:
       reference before the freeze + ``confirm_fwd_ms``]; accepted at an interior peak >=
       ``confirm_min_peak``, peak / second-highest peak >= ``confirm_min_ratio`` and sharpness >=
       ``confirm_min_sharpness`` (curve at the interpolated peak +/- ``confirm_sharp_at_ms``), both
-      sides clipped at ``confirm_floor_db`` (:func:`confirm_position`). The last
+      sides clipped at ``confirm_floor_db`` (:func:`confirm_position`). From
+      ``noshift_from_ms`` (and at the confirm's first attempt) "nothing moved" is tested alone: a
+      peak >= ``confirm_min_peak``, interior, within ``noshift_tol_ms`` of the pointer before the
+      freeze is accepted without the ratio and sharpness checks (a burst loss, confirmed early).
+      ``revert_unconfirmed`` (off: evaluated, not adopted): when the confirm's time runs out
+      unaccepted, the pointer goes back to where it would be had it never frozen. It gains nothing
+      measurable with a 1200 ms confirm window and undoes real stalls with an 800 ms one. The last
       matching frame: the newest frame within ``match_back_ms`` before the run whose
       ``match_frames`` consecutive frames are each over ``match_min_db`` and within
       ``match_tol_db`` of the reference at the pointer then; without one there is no confirm.
@@ -493,6 +499,9 @@ class StallParams:
     chain_prior: bool = True
     confirming_silent_db: float = -95.0
     carry_bracket: bool = True
+    revert_unconfirmed: bool = False
+    noshift_tol_ms: float = 10.0
+    noshift_from_ms: float = 200.0
     silent_db: float = -60.0
     ref_speech_db: float = -50.0
     freeze_after_ms: float = 20.0
@@ -521,7 +530,13 @@ class StallParams:
 
 STALL = StallParams()
 TODAY = StallParams(
-    freeze=False, confirm=False, newer_half=False, hold_clock=False, chain_prior=False
+    freeze=False,
+    confirm=False,
+    newer_half=False,
+    hold_clock=False,
+    chain_prior=False,
+    revert_unconfirmed=False,
+    noshift_tol_ms=0.0,
 )
 
 
@@ -579,7 +594,9 @@ def newer_half_candidate(
     return float(est_i) if ok else None
 
 
-def confirm_position(env, own_db, j_res, j_end, lo, hi, stall=STALL, hop_ms=5.0):
+def confirm_position(
+    env, own_db, j_res, j_end, lo, hi, stall=STALL, hop_ms=5.0, noshift_l=None, noshift_only=False
+):
     """The confirm correlation: received frames ``[j_res, j_end)`` against the turn's own reference
     (dB) at every position ``l`` in ``[floor(lo), ceil(hi)]`` (received frame of the reference's
     index 0; frame ``j`` pairs with reference frame ``j - l``), both clipped at
@@ -587,7 +604,11 @@ def confirm_position(env, own_db, j_res, j_end, lo, hi, stall=STALL, hop_ms=5.0)
     parabolic estimate and edge as :func:`peak_features` over that range; accepted when the peak
     is >= ``confirm_min_peak``, peak / second >= ``confirm_min_ratio``, sharpness (interpolated
     peak minus the curve at it +/- ``confirm_sharp_at_ms``) >= ``confirm_min_sharpness`` and the
-    peak is not at either end of the range. Returns the interpolated position or None."""
+    peak is not at either end of the range. Returns the interpolated position or None.
+
+    ``noshift_l`` (with ``noshift_tol_ms`` > 0): a peak within that distance of the position the
+    pointer would have without the freeze is accepted on peak and interior alone (the no-shift
+    case, i.e. a burst loss, confirmed)."""
     floor = stall.confirm_floor_db
     w = np.maximum(np.asarray(env[j_res:j_end], dtype=np.float64), floor)
     if len(w) < 2 or w.std() < DEFAULTS.gate_std_db:
@@ -608,6 +629,16 @@ def confirm_position(env, own_db, j_res, j_end, lo, hi, stall=STALL, hop_ms=5.0)
     c = np.where(den > 0, (vc @ wc) / np.where(den > 0, den, 1.0), 0.0)
     pk, sec, _, est, edge = peak_features(ls.astype(np.float64), c, a, b)
     ratio = pk / sec if sec > 1e-3 else np.inf
+    if (
+        noshift_l is not None
+        and stall.noshift_tol_ms > 0
+        and not edge
+        and pk >= stall.confirm_min_peak
+        and abs(est - noshift_l) * hop_ms <= stall.noshift_tol_ms
+    ):
+        return float(est)
+    if noshift_only:
+        return None
     if edge or pk < stall.confirm_min_peak or ratio < stall.confirm_min_ratio:
         return None
     side = np.interp([est - sa, est + sa], ls, c)
@@ -668,6 +699,7 @@ class TurnTracker:
         self.n_from = round(stall.confirm_from_ms / hop)
         self.n_until = round(stall.confirm_until_ms / hop)
         self.n_every = max(1, round(stall.confirm_every_ms / hop))
+        self.n_noshift = round(stall.noshift_from_ms / hop)
         self.n_half_silence = round(stall.half_silence_ms / hop)
         self.own_db = np.zeros(0)
         self.locked = False
@@ -762,10 +794,47 @@ class TurnTracker:
         if pd is not None:
             n_post = j + 1 - pd["j_res"]
             if n_post > self.n_until:
-                self._close(j, "expired")
-            elif n_post >= self.n_from and (n_post - self.n_from) % self.n_every == 0:
+                if s.revert_unconfirmed:
+                    # unconfirmed: assume the timeline did not move (a burst loss)
+                    self.l = self._episode["l_pre"]
+                    self._close(j, "expired", reverted=True)
+                else:
+                    self._close(j, "expired")
+            elif (
+                s.noshift_tol_ms > 0
+                and self.n_noshift <= n_post < self.n_from
+                and (n_post - self.n_noshift) % self.n_every == 0
+            ):
+                # before the confirm proper: only "nothing moved" (a burst loss) is tested
                 est = confirm_position(
-                    env, self.own_db, pd["j_res"], j + 1, pd["lo"], pd["hi"], s, self.hop
+                    env,
+                    self.own_db,
+                    pd["j_res"],
+                    j + 1,
+                    pd["lo"],
+                    pd["hi"],
+                    s,
+                    self.hop,
+                    self._episode["l_pre"],
+                    noshift_only=True,
+                )
+                if est is not None:
+                    self.l = est
+                    self.unlocked_ms = 0.0
+                    self.lost = False
+                    self._close(j, "confirm", confirm_l=est, confirm_after_ms=n_post * self.hop)
+            elif n_post >= self.n_from and (n_post - self.n_from) % self.n_every == 0:
+                first = n_post == self.n_from
+                est = confirm_position(
+                    env,
+                    self.own_db,
+                    pd["j_res"],
+                    j + 1,
+                    pd["lo"],
+                    pd["hi"],
+                    s,
+                    self.hop,
+                    self._episode["l_pre"] if first else None,
                 )
                 if est is not None:
                     self.l = est
