@@ -5,8 +5,10 @@ bot's audio into its table, in plain JavaScript. ``probe_check.mjs`` runs that c
 messages built by :mod:`pipecat_spatialreal.envelope` and on random audio scanned by the package's
 ``OnsetTracker``, so the page's reading of the contract and its onset rule cannot drift from the
 processor's. It also holds ``examples/probe/sync.js``, the page's port of the envelope alignment
-rule, to the normative oracle's numbers in ``tests/fixtures/sync/oracle.json``; the fixture itself
-is checked against a fresh run of its generator. Without ``node`` the Node test is skipped locally
+rule, to the normative oracle's numbers in ``tests/fixtures/sync/oracle.json``, and its port of the
+stall rule to the oracle's ticks in ``tests/fixtures/sync/stall.json`` (synthetic stalls) and
+``tests/fixtures/sync/daily-stall/oracle-ticks.json`` (a real one); each fixture is checked against
+a fresh run of its generator. Without ``node`` the Node test is skipped locally
 and fails in CI, where the workflow installs Node; the ones that ask the bot's server for the page
 are skipped when the example extra is not installed.
 """
@@ -32,6 +34,7 @@ PAGE = Path(__file__).resolve().parent.parent / "examples" / "probe" / "index.ht
 SYNC = PAGE.with_name("sync.js")
 CHECK = Path(__file__).with_name("probe_check.mjs")
 ORACLE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sync" / "oracle.json"
+STALL_FIXTURE = ORACLE_FIXTURE.with_name("stall.json")
 # What a gate_only case of oracle.json is compared on.
 GATE_ONLY_KEYS = ("speech", "window_ok", "accepted")
 
@@ -136,6 +139,36 @@ def test_the_oracle_fixture_is_what_its_generator_writes():
 
     _assert_same(fresh, committed)
     assert ORACLE_FIXTURE.stat().st_size < 200_000
+
+
+def _stall_generator():
+    pytest.importorskip("numpy")
+    if not (ORACLE_FIXTURE.parents[3] / "hack" / "sync-sim" / "dsp.py").exists():
+        pytest.skip("hack/sync-sim is not in the sdist")
+    spec = importlib.util.spec_from_file_location(
+        "make_stall_fixture", ORACLE_FIXTURE.with_name("make_stall_fixture.py")
+    )
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    return generator
+
+
+def test_the_stall_fixture_is_what_its_generator_writes():
+    # probe_check.mjs holds the page's stall rule to tests/fixtures/sync/stall.json tick for tick:
+    # it must be a current run of make_stall_fixture.py over hack/sync-sim (dsp.py's TurnTracker
+    # and replay_capture.py's tick loop).
+    generator = _stall_generator()
+    committed = json.loads(STALL_FIXTURE.read_text())
+    _assert_same(generator.build(), committed, "stall.json")
+    assert STALL_FIXTURE.stat().st_size < 400_000
+
+
+def test_the_stalled_capture_ticks_are_what_the_generator_writes():
+    generator = _stall_generator()
+    path = STALL_FIXTURE.with_name("daily-stall") / "oracle-ticks.json"
+    if not path.exists():
+        pytest.skip("tests/fixtures/sync/daily-stall is not in the sdist")
+    _assert_same(generator.build_capture(), json.loads(path.read_text()), "oracle-ticks.json")
 
 
 async def test_the_bot_serves_the_probe_at_probe():

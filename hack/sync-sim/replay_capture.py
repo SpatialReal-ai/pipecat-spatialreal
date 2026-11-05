@@ -87,10 +87,13 @@ What it does, per turn:
   delay change.
 
 **The stall rule** (``dsp.TurnTracker``, README "The stall rule") is replayed by default
-(:func:`replay_turn_tracked`, :func:`replay_all_tracked`); ``--no-stall-rule`` replays today's rule
-(``dsp.TODAY``, the page's tick for tick). Per turn the output lists the freezes (where in the
-turn's audio the pointer stopped, when, for how long, how the episode closed and after how much
-audio a confirm accepted), the newer-half accepts, sync-lost and the loss clock at the last tick.
+(:func:`replay_turn_tracked`, :func:`replay_all_tracked`), as the probe page runs it since it
+ported the rule (``examples/probe/sync.js``; ``tests/probe_check.mjs`` holds the page's tracker to
+these ticks); ``--no-stall-rule`` replays today's rule (``dsp.TODAY``: the page's tick for tick
+before the port, which every committed capture was recorded with). Per turn the output lists the
+freezes (where in the turn's audio the pointer stopped, when, for how long, how the episode closed
+and after how much audio a confirm accepted), the newer-half accepts, sync-lost and the loss clock
+at the last tick.
 ``--gaps`` scores the rule and today's on the dense local truth (300 ms reference windows every
 25 ms, +/- 2 s, :func:`dense_track`): per gap the shift, the re-align time, how far ahead the face
 ran during it and the largest error after it, and the accepts more than 20 ms off outside or
@@ -277,15 +280,21 @@ def page_prior(t, fs, hop):
     (``prior_pos``) and what it was (``prior_kind``, :func:`recorded_kind`). The replay follows
     that record tick by tick, taking the recorded value of an onset prior only: an arrival prior
     is ``turn_start`` + 200 ms, and a gap prior (R72) follows the previous turn's replayed place,
-    which the caller computes (None here for both). Past the page's last tick before its first
+    which the caller computes (None here for both). A page with the stall rule records the onset
+    prior on every tick (``onset_prior_pos``, null when none), since its prior can be a chained
+    turn's place (``prior_kind`` ``chain``) while an onset prior exists (rule 5, R76); that value
+    is taken as it is. Past the page's last tick before its first
     lock (the replay locking later than the page did) it uses the turn's final onset prior, from
     100 ms after the onset it rests on was received (no earlier than that last tick).
     """
     default = t["start_tap"] + round(PRIOR_LEAD_MS * fs / 1000)
     steps = []
     for k in t.get("ticks") or []:
-        onset = recorded_kind(k, default) == "onset"
-        steps.append((k["pos"], k["prior_pos"] if onset else None))
+        if "onset_prior_pos" in k:
+            steps.append((k["pos"], k["onset_prior_pos"]))
+        else:
+            onset = recorded_kind(k, default) == "onset"
+            steps.append((k["pos"], k["prior_pos"] if onset else None))
         if k["accepted"]:
             break
     final = t.get("onset_prior_pos")
@@ -1328,7 +1337,7 @@ def main(argv=None):
         default=True,
         help="replay with the stall rule (dsp.STALL: freeze, confirm, newer-half re-lock, frozen "
         "time off the loss clock, rule 5's chained prior); --no-stall-rule replays today's rule "
-        "(dsp.TODAY), which is the probe page's tick for tick",
+        "(dsp.TODAY), the probe page's tick for tick before it ported the stall rule",
     )
     ap.add_argument(
         "--gaps",

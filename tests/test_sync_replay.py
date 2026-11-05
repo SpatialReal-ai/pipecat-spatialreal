@@ -287,6 +287,47 @@ def test_old_captures_without_prior_kind_infer_it_from_the_value(replay):
     assert replay.recorded_kind({"prior_pos": 48000, "prior_kind": "onset"}, default) == "onset"
 
 
+def test_a_capture_from_the_stall_rule_page_replays_the_onset_prior_it_recorded(replay):
+    # Since the stall rule the page's prior can be a chained turn's place ('chain') while an onset
+    # prior exists (R76 widens around the latter), so every tick records the onset prior itself.
+    t = {
+        "start_tap": 0,
+        "onsets_ms": [],
+        "onset_prior_pos": 30000,
+        "ticks": [
+            {
+                "pos": 1000,
+                "prior_pos": 9000,
+                "prior_kind": "arrival",
+                "onset_prior_pos": None,
+                "accepted": False,
+            },
+            {
+                "pos": 2000,
+                "prior_pos": 50000,
+                "prior_kind": "chain",
+                "onset_prior_pos": 30000,
+                "accepted": False,
+            },
+            {
+                "pos": 3000,
+                "prior_pos": 30000,
+                "prior_kind": "onset",
+                "onset_prior_pos": 30000,
+                "accepted": True,
+            },
+        ],
+    }
+    at = replay.page_prior(t, 48000, 240)
+    assert at(1500) is None
+    assert at(2000) == 30000 and at(2999) == 30000  # not the chain place, not None
+    old = {
+        **t,
+        "ticks": [{k: v for k, v in tick.items() if k != "onset_prior_pos"} for tick in t["ticks"]],
+    }
+    assert replay.page_prior(old, 48000, 240)(2000) is None  # the kind alone cannot say it
+
+
 def test_a_capture_from_the_r72_page_replays_its_gap_priors_from_the_previous_turn(
     replay, splice_r72, tmp_path
 ):

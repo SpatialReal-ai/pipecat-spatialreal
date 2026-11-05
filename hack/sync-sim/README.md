@@ -155,6 +155,13 @@ Order per tick, as the replay runs it: every received frame up to the tick's las
 (`count - 1`) goes through `TurnTracker.frame` first (freeze, resume, confirm attempts, cap), then
 the tick (`TurnTracker.tick`: `align`, newer half, loss clock, lock).
 
+The probe page ports the tracker and this tick loop (`examples/probe/sync.js`: `TurnTracker`,
+`SyncTracker`); `tests/probe_check.mjs` holds it to them tick for tick on the oracle's output for
+synthetic stalls and for the committed stalled capture (`tests/fixtures/sync/stall.json`,
+`daily-stall/oracle-ticks.json`, written by `tests/fixtures/sync/make_stall_fixture.py`). A capture
+the page saves since then records the onset prior on every tick (`onset_prior_pos`), which
+`replay_capture.page_prior` takes as it is: the prior's kind alone (`chain`) no longer says it.
+
 Events, in the web SDK's shapes: `frozen` (`turnId`, `atMs`: the turn's own audio position where
 the pointer stopped) when a freeze starts, `unfrozen` (`turnId`, `frozenMs`, `confirmed`) when
 its episode closes (the confirm accepted: true; a full or newer-half lock, the confirm's time ran

@@ -60,6 +60,7 @@
     <th title="envelope alignment: 95th percentile of |accepted position - onset prior| over the accepted ticks; the onset prior is the first onset heard (or placed) minus onsets_ms[0]">p95 err ms</th>
     <th title="envelope alignment: ticks with speech that were held (not accepted) / accepted; a * marks a reference spliced onto the turn before it">held / acc</th>
     <th class="l" title="envelope alignment, the last tick with speech: peak (&ge; 0.95), peak / second peak (&ge; 1.2), sharpness (&ge; 0.03), half-window deviation in ms (&le; 10); a failed check is marked !, a peak at the edge of the search (edge)">peak / ratio / sharp / halves</th>
+    <th class="l" title="stall rule: how often the turn's reference pointer froze (the received track silent where the reference speaks, after the first lock), the time it stood still in all, and how many freezes a confirm closed at a new position (the rest: a lock, the confirm's time ran out, no match, the 2 s cap, or the turn ended; open: frozen now)">freezes</th>
     <th class="l">result</th>
   </tr></thead>
   <tbody></tbody>
@@ -234,8 +235,9 @@ function markerNear(markers, type, t, back, ahead) {
  * markers: [{ t, type }]             RTVI messages about the conversation (user-started-speaking, ...)
  * rate:    the AudioContext's sample rate, which is the rate of `pos`
  * notes:   [{ t, text }]              what the page itself did (tapped a track, replaced it)
- * sync:    { [turn_id]: { ticks, splice, referenceLength, missing } }  the envelope alignment's
- *          ticks per turn (SyncTracker.summary() in sync.js; positions in tap samples)
+ * sync:    { [turn_id]: { ticks, splice, referenceLength, missing, freezes } }  the envelope
+ *          alignment's ticks and the stall rule's freezes per turn (SyncTracker.summary() in
+ *          sync.js; positions in tap samples)
  */
 function analyze({ log, onsets, markers, rate, notes = [], sync = {} }) {
   const problems = []
@@ -579,6 +581,7 @@ function percentileOf(values, q) {
  * p95ErrMs:    95th percentile of |accepted position - onset prior| over the accepted ticks.
  * held / accepted: ticks with speech that were not accepted / that were.
  * last:        the checks of the last tick with speech.
+ * freezes:     the stall rule's freezes, [{ atMs, frozenMs, confirmed }] (confirmed null: open).
  */
 function syncRow(summary, turn, row, toMs, toSamples) {
   if (!summary || !summary.ticks.length) return summary && summary.referenceLength ? { ticks: 0, spliced: !!summary.splice, referenceLength: summary.referenceLength } : null
@@ -592,6 +595,7 @@ function syncRow(summary, turn, row, toMs, toSamples) {
     spliced: !!summary.splice,
     referenceLength: summary.referenceLength,
     last: speech.length ? speech[speech.length - 1].checks : null,
+    freezes: summary.freezes || [],
     firstLockMs: null,
     offsetMs: null,
     p95ErrMs: null,
@@ -630,6 +634,15 @@ function checksText(c) {
   ].join(' / ') + (c.edge ? ' (edge)' : '')
 }
 
+/** The stall rule's freezes of a turn: count, frozen ms in all, how many a confirm closed (and how many are open). */
+function freezesText(freezes) {
+  if (!freezes || !freezes.length) return '-'
+  const total = freezes.reduce((ms, f) => ms + f.frozenMs, 0)
+  const confirmed = freezes.filter(f => f.confirmed === true).length
+  const open = freezes.filter(f => f.confirmed === null).length
+  return `${freezes.length}, ${Math.round(total)} ms, ${confirmed} confirmed` + (freezes.length - confirmed - open ? `, ${freezes.length - confirmed - open} not` : '') + (open ? `, ${open} open` : '')
+}
+
 /** The table cells of one row, in the order of the page's <thead>: [{ text, cls }]. */
 function rowCells(r) {
   const seg = r.seg0
@@ -649,6 +662,7 @@ function rowCells(r) {
     c(s && s.p95ErrMs != null ? s.p95ErrMs.toFixed(1) : '-'),
     c(s ? `${s.held ?? 0} / ${s.accepted ?? 0}${s.spliced ? ' *' : ''}` : '-'),
     c(s ? checksText(s.last) : '-', 'l'),
+    c(s ? freezesText(s.freezes) : '-', 'l'),
     c(r.status === 'fail' ? `fail: ${r.fails.join('; ')}` : r.status + (r.notes.length ? ` (${r.notes.join('; ')})` : ''), r.status === 'pass' ? 'l ok' : r.status === 'fail' ? 'l bad' : r.status === 'unverified' ? 'l muted' : 'l'),
   ]
 }
