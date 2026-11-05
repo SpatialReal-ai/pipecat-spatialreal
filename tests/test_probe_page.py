@@ -102,7 +102,12 @@ def _assert_same(fresh, committed, where="oracle.json"):
     """``fresh`` and ``committed`` hold the same JSON, floats within 1e-9 (relative)."""
     if isinstance(fresh, dict):
         assert isinstance(committed, dict) and fresh.keys() == committed.keys(), where
+        # On a flat correlation curve (|peak| < 1e-9) the candidate is the argmax of rounding noise
+        # and differs between platforms; probe_check.mjs skips it on the same condition.
+        flat = all(isinstance(d.get("peak"), float) and abs(d["peak"]) < 1e-9 for d in (fresh, committed))
         for key in fresh:
+            if flat and key == "candidate_l":
+                continue
             _assert_same(fresh[key], committed[key], f"{where}.{key}")
     elif isinstance(fresh, list):
         assert isinstance(committed, list) and len(fresh) == len(committed), where
