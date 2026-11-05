@@ -100,6 +100,8 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import itertools
+
 import dsp
 
 HOP_MS = dsp.HOP_MS
@@ -419,6 +421,433 @@ def replay_turn(
             held_no_lock += 1
         pos += ms(AFTER_LOCK_MS if locked else BEFORE_LOCK_MS)
     return ticks
+
+
+def replay_turn_tracked(
+    t,
+    env,
+    hop,
+    fs,
+    n_samples,
+    params=dsp.DEFAULTS,
+    by_id=None,
+    arrivals=None,
+    gap_prior=None,
+    stall=dsp.STALL,
+    chain_prior=None,
+):
+    """:func:`replay_turn` with the per-turn state of :class:`dsp.TurnTracker`: the stall rule
+    (freeze, confirm, newer-half re-lock, frozen time off the loss clock) and the 2 s loss clock.
+
+    Same tick positions, reference, splice and priors as :func:`replay_turn`; with ``dsp.TODAY``
+    its ticks are :func:`replay_turn`'s (``tests/test_stall_rule.py`` holds them equal).
+    ``chain_prior`` (``pos -> frames or None``, rule 5) is the predecessor's locked position +
+    ``prev_turn_pcm_ms`` for a chained turn, None while the predecessor has not locked; it is used
+    only with ``stall.chain_prior``, through :func:`dsp.chained_prior` (an onset prior re-anchors
+    within 200 ms of it, else it is ignored).
+
+    Returns None for a turn without an envelope, else a dict: ``ticks`` (as :func:`replay_turn`'s,
+    plus ``via``: ``full`` / ``half``), ``disp`` (received frame -> the position the face uses at
+    that frame), ``history`` (``[(pos, l)]``: where the tracker had the turn once locked, for
+    :func:`tracked_place_at`), ``events``, ``freezes``, ``lost_at`` (frames) and ``tracker``.
+    """
+    by_id = by_id or {}
+    arrivals = arrivals or {}
+    chunks = arrivals.get(t["turn_id"], [])
+    if not chunks:
+        return None
+    ms = lambda v: round(v * fs / 1000)
+    prior_at = page_prior(t, fs, hop)
+    tr = dsp.TurnTracker(t["turn_id"], params, stall)
+    pos = max(t["start_tap"], min(c[0] for c in chunks) + 1)
+    ticks, disp, history = [], {}, []
+    done, last_tick_pos = None, None
+    aborted_by = None if t.get("abort_tap") is None else frames_at(t["abort_tap"], hop)
+    use_chain = chain_prior is not None and stall.chain_prior
+    while pos <= n_samples:
+        pos = -(-pos // BLOCK) * BLOCK
+        own = reassemble(chunks, pos)
+        if not len(own):
+            pos += BLOCK
+            continue
+        onset_prior = prior_at(pos)
+        chain_l = chain_prior(pos) if use_chain else None
+        if chain_l is not None:
+            prior_l, _ = dsp.chained_prior(
+                chain_l, None if onset_prior is None else onset_prior / hop, stall, HOP_MS
+            )
+            wide_at = prior_l
+        elif onset_prior is not None:
+            prior_l = wide_at = onset_prior / hop
+        elif gap_prior is not None:
+            prior_l, wide_at = gap_prior(pos), None
+        else:
+            prior_l, wide_at = (t["start_tap"] + ms(PRIOR_LEAD_MS)) / hop, None
+        place = tr.l if tr.locked else prior_l
+        window_start = pos / hop - params.window_ms / HOP_MS
+        if t.get("abort_tap") is not None and pos > t["abort_tap"] + ms(params.window_ms):
+            break
+        ended = (
+            t.get("end_tap") is not None and t["end_tap"] < pos and t.get("end_pcm_ms") is not None
+        )
+        if ended and window_start > place + t["end_pcm_ms"] / HOP_MS:
+            break
+        count = frames_at(pos, hop)
+        tr.set_reference(own)
+        for j in range(count - 1 if done is None else done + 1, count):
+            if aborted_by is None or j < aborted_by:
+                before = tr.l
+                tr.frame(env, j)
+                if tr.locked and tr.l != before:
+                    history.append(((j + 2) * hop, tr.l))
+            disp[j] = tr.l if tr.locked else place
+        done = count - 1
+        ref, own_off = splice_at(t, own, by_id, arrivals, pos)
+        wide = not tr.locked and tr.held_no_lock >= WIDEN_AFTER
+        centre = wide_at if wide and wide_at is not None else place
+        search = WIDE_SEARCH_MS if wide else params.search_ms
+        since = 0.0 if last_tick_pos is None else (pos - last_tick_pos) / fs * 1000
+        rec = tr.tick(env, count, ref, own_off, centre, search, since)
+        if rec is None:
+            pos += ms(BEFORE_LOCK_MS)
+            continue
+        last_tick_pos = pos
+        rec.update(pos=pos, prior_l=centre, wide=wide, spliced=own_off > 0)
+        ticks.append(rec)
+        if tr.locked:
+            history.append((pos, tr.l))
+        pos += ms(AFTER_LOCK_MS if tr.locked else BEFORE_LOCK_MS)
+    if done is not None:
+        tr.finish(done)
+    return {
+        "ticks": ticks,
+        "disp": disp,
+        "history": history,
+        "events": tr.events,
+        "freezes": tr.freezes,
+        "lost_at": tr.lost_at,
+        "tracker": tr,
+    }
+
+
+def tracked_place_at(res, pos):
+    """Where :func:`replay_turn_tracked`'s result ``res`` had its turn at tap ``pos`` once locked
+    (received frames of its index 0, freezes and confirms included), or None before its first
+    lock."""
+    hist = res["history"] if res else []
+    keys = [k for k, _ in hist]
+    i = int(np.searchsorted(keys, pos, side="right")) - 1
+    return hist[i][1] if i >= 0 else None
+
+
+def chain_prior_for(t, placed_tracked, fs, hop):
+    """Rule 5's ``pos -> frames or None`` for ``t``: its predecessor's tracked position + its
+    ``prev_turn_pcm_ms`` once the predecessor has locked; None for an unchained turn or one whose
+    predecessor was not replayed."""
+    prev = t.get("prev_turn_id")
+    pcm = t.get("prev_turn_pcm_ms") or 0
+    if not prev or pcm <= 0 or prev not in placed_tracked:
+        return None
+    jf = round(pcm * fs / 1000) / hop
+    res = placed_tracked[prev]
+
+    def at(pos):
+        l = tracked_place_at(res, pos)
+        return None if l is None else l + jf
+
+    return at
+
+
+def replay_all_tracked(
+    env, hop, fs, n_samples, sync, params=dsp.DEFAULTS, stall=dsp.STALL, r72_all=False
+):
+    """Every turn of a capture through :func:`replay_turn_tracked`, in order, each turn's priors
+    from the turns before it as the page and the SDK have them: the R72 gap prior (the previous
+    turn's tracked place, recorded gap priors only unless ``r72_all``) and, with
+    ``stall.chain_prior``, rule 5's chained prior.
+
+    Returns ``{turn_id: {"res", "prior_l_at", "r72", "join"}}``: the tracked result (None without an
+    envelope), the pre-lock prior as a function of the tap (``pos -> frames``), the R72 prior
+    function (or None) and the R72 join (or None).
+    """
+    out, placed_res = {}, {}
+    turns = sync["turns"]
+    by_id = {t["turn_id"]: t for t in turns}
+    for n, t in enumerate(turns):
+        prior_at = page_prior(t, fs, hop)
+        default_l = (t["start_tap"] + round(PRIOR_LEAD_MS * fs / 1000)) / hop
+        join = gap_join(t, turns[n - 1] if n else None)
+        r72 = None
+        if join is not None and join[0] in out:
+            jf = round(join[1] * fs / 1000) / hop
+            prev = out[join[0]]
+
+            def r72(pos, prev=prev, jf=jf):
+                l = tracked_place_at(prev["res"], pos)
+                return (l if l is not None else prev["prior_l_at"](pos)) + jf
+
+        use_r72 = r72 if r72_all or recorded_gap_prior(t, fs) else None
+        chain = chain_prior_for(t, placed_res, fs, hop) if stall.chain_prior else None
+
+        def prior_l_at(pos, prior_at=prior_at, default_l=default_l, use_r72=use_r72, chain=chain):
+            o = prior_at(pos)
+            c = chain(pos) if chain is not None else None
+            if c is not None:
+                return dsp.chained_prior(c, None if o is None else o / hop, stall, HOP_MS)[0]
+            if o is not None:
+                return o / hop
+            return use_r72(pos) if use_r72 is not None else default_l
+
+        res = None
+        if len(b64(t["reference"])):
+            res = replay_turn_tracked(
+                t, env, hop, fs, n_samples, params, by_id, sync["arrivals"], use_r72, stall, chain
+            )
+        if res is not None:
+            placed_res[t["turn_id"]] = res
+        out[t["turn_id"]] = {"res": res, "prior_l_at": prior_l_at, "r72": r72, "join": join}
+    return out
+
+
+# ---------------------------------------------------------------- gaps: the dense local truth
+#
+# The stall report's truth (--gaps): a stall moves the rest of a turn by up to seconds, beyond the
+# window-content truth's +/- 150 ms. Every 25 ms, 300 ms of the turn's own reference (at least
+# half of it over -45 dBFS) is aligned over +/- 2 s around the turn's first lock; a window is kept
+# at peak >= 0.9 and peak / second >= 1.1 when a window within two places of it agrees within
+# 10 ms (``strict``: peak >= 0.95, ratio >= 1.15, for scoring accepts). A step between consecutive
+# kept windows of 15 ms or more is a gap.
+
+DENSE_WIN, DENSE_STEP, DENSE_SPAN = 60, 5, 400  # frames: 300 ms, 25 ms, +/- 2 s
+
+
+def _ncc_wide(env, ref_db, a, b, lo, hi, floor):
+    seg = np.maximum(ref_db[a:b], floor)
+    sc = seg - seg.mean()
+    ls = np.arange(int(lo), int(hi) + 1)
+    ls = ls[(ls + a >= 0) & (ls + b <= len(env))]
+    if not len(ls):
+        return None, None
+    idx = (ls + a)[:, None] + np.arange(b - a)[None, :]
+    w = np.maximum(env[idx], floor)
+    wc = w - w.mean(1, keepdims=True)
+    den = np.sqrt((wc**2).sum(1) * (sc**2).sum())
+    with np.errstate(invalid="ignore", divide="ignore"):
+        c = np.where(den > 0, wc @ sc / den, 0)
+    return ls, c
+
+
+def dense_track(env, ref_db, centre, strict=False, floor=-70.0):
+    """``[(a, l, peak)]``: reference window start ``a`` (frames) and the position ``l`` it puts the
+    turn's index 0 at, kept as described above."""
+    min_pk, min_ratio = (0.95, 1.15) if strict else (0.9, 1.1)
+    lo, hi = centre - DENSE_SPAN, centre + DENSE_SPAN
+    tr = []
+    for a in range(0, len(ref_db) - DENSE_WIN + 1, DENSE_STEP):
+        b = a + DENSE_WIN
+        if np.mean(ref_db[a:b] > PAUSE_DB) < 0.5:
+            continue
+        ls, c = _ncc_wide(env, ref_db, a, b, lo, hi, floor)
+        if ls is None:
+            continue
+        pk, sec, _, est, _ = dsp.peak_features(ls.astype(np.float64), c, ls[0], ls[-1])
+        if pk >= min_pk and (sec <= 0 or pk / sec >= min_ratio):
+            tr.append((a, float(est), float(pk)))
+    keep = []
+    for i, (a, e, pk) in enumerate(tr):
+        nb = [tr[k][1] for k in (i - 2, i - 1, i + 1, i + 2) if 0 <= k < len(tr)]
+        if any(abs(e - x) * HOP_MS <= 10 for x in nb):
+            keep.append((a, e, pk))
+    return keep
+
+
+def dense_truth_frames(tr, n_env):
+    """Per received frame: the truth position where the windows covering it agree within 10 ms
+    (their mean), else NaN."""
+    lo = np.full(n_env, np.inf)
+    hi = np.full(n_env, -np.inf)
+    acc = np.zeros(n_env)
+    cnt = np.zeros(n_env)
+    for a, e, _ in tr:
+        j0 = round(e + a)
+        j1 = min(n_env, j0 + DENSE_WIN)
+        if j0 < 0 or j0 >= n_env:
+            continue
+        lo[j0:j1] = np.minimum(lo[j0:j1], e)
+        hi[j0:j1] = np.maximum(hi[j0:j1], e)
+        acc[j0:j1] += e
+        cnt[j0:j1] += 1
+    out = np.full(n_env, np.nan)
+    ok = (cnt > 0) & ((hi - lo) * HOP_MS <= 10)
+    out[ok] = acc[ok] / cnt[ok]
+    return out
+
+
+def _gap_bounds(env, own_db, l_pre, l_post, j_lo, j_hi):
+    """``(j_pre_end, j_res)``: the last frame of 3 matching the pre-gap position, and after it the
+    first of 6 frames matching the post-gap position (3 dB, over -50 dB) that the pre-gap position
+    does not explain."""
+
+    def match(l, j, tol, lvl):
+        k = round(j - l)
+        return 0 <= k < len(own_db) and env[j] >= lvl and abs(env[j] - own_db[k]) <= tol
+
+    j_lo, j_hi = int(j_lo), int(min(j_hi, len(env) - 6))
+    pre = [j for j in range(j_lo, j_hi) if all(match(l_pre, j - d, 4, -60) for d in range(3))]
+    for jr in range(j_lo, j_hi):
+        if not all(match(l_post, jr + d, 3, -50) for d in range(6)):
+            continue
+        if sum(match(l_pre, jr + d, 3, -50) for d in range(6)) >= 3:
+            continue
+        before = [j for j in pre if j < jr]
+        if before:
+            return before[-1], jr
+    return None, None
+
+
+def gap_events(res, tr, env, own_db):
+    """Each gap of the dense truth: where the content stopped and resumed, the shift, the re-align
+    time (from the resume until the face's position stays within 10 ms of the new truth for
+    100 ms), how far ahead the face ran during it (frames shown past the last content before it)
+    and the largest error from the resume to the next gap."""
+    disp = res["disp"]
+    js = np.array(sorted(disp))
+    if not len(js):
+        return []
+    dl = np.array([disp[j] for j in js])
+    steps = [
+        (a0, e0, a1, e1)
+        for (a0, e0, _), (a1, e1, _) in itertools.pairwise(tr)
+        if abs(e1 - e0) * HOP_MS >= 15
+    ]
+    events = []
+    for n, (a0, e0, a1, e1) in enumerate(steps):
+        j_last, j_res = _gap_bounds(env, own_db, e0, e1, e0 + a0, e1 + a1 + DENSE_WIN)
+        if j_res is None:
+            continue
+        zz = np.flatnonzero(env[int(j_last) : int(e1 + a1 + DENSE_WIN)] <= -95)
+        if len(zz):
+            j_res = max(j_res, int(j_last) + int(zz[-1]) + 1)
+        t_re = None
+        post = js >= j_res
+        jj, dd = js[post], dl[post]
+        for i in range(len(jj)):
+            if abs(dd[i] - e1) * HOP_MS <= 10 and all(
+                abs(v - e1) * HOP_MS <= 10 for v in dd[i : i + 20]
+            ):
+                t_re = float((jj[i] - j_res) * HOP_MS)
+                break
+        ins = (js > j_last) & (js < j_res)
+        k_gap = j_last - e0
+        ahead = ((js[ins] - dl[ins]) - k_gap) * HOP_MS if ins.any() else np.array([0.0])
+        j_stop = (
+            (steps[n + 1][1] + steps[n + 1][0] + DENSE_WIN) if n + 1 < len(steps) else js[-1] + 1
+        )
+        win = (js >= j_res) & (js < j_stop)
+        events.append(
+            {
+                "j_pre_end": int(j_last),
+                "j_res": int(j_res),
+                "shift_ms": float((e1 - e0) * HOP_MS),
+                "inserted_ms": float((j_res - j_last) * HOP_MS),
+                "realign_ms": t_re,
+                "max_ahead_ms": float(np.max(ahead)),
+                "max_err_after_ms": float(np.max(np.abs(dl[win] - e1)) * HOP_MS)
+                if win.any()
+                else None,
+                "speech_after_ms": float((min(j_stop, js[-1]) - j_res) * HOP_MS),
+            }
+        )
+    return events
+
+
+def accepts_of(res):
+    """``(count, l, window frames, via)`` of every accept: full and newer-half ticks and confirms."""
+    out = [
+        (k["count"], k["l"], 100 if k["via"] == "half" else 200, k["via"])
+        for k in res["ticks"]
+        if k["accepted"]
+    ]
+    for f in res["freezes"]:
+        if f["how"] == "confirm":
+            out.append((f["closed"] + 1, f["confirm_l"], f["closed"] + 1 - f["resume"], "confirm"))
+    return out
+
+
+def score_accepts(res, truth):
+    """``(false outside a gap, false straddling a gap, scored, worst)`` against per-frame truth:
+    an accept is false when it is more than 20 ms off the truth of the frames its window covered;
+    a window whose truth spans more than 10 ms straddles a gap and must land on one of its real
+    positions. ``worst`` is the largest error of any accept outside a gap (the margin to 20 ms)."""
+    false, straddle, scored, worst = [], [], 0, 0.0
+    for count, l, m, via in accepts_of(res):
+        seg = truth[max(0, count - m) : count]
+        seg = seg[~np.isnan(seg)]
+        if not len(seg):
+            continue
+        scored += 1
+        if (seg.max() - seg.min()) * HOP_MS <= 10:
+            e = abs(l - seg.mean()) * HOP_MS
+            worst = max(worst, e)
+            if e > FALSE_LOCK_MS:
+                false.append((count, via, round(e, 1)))
+        else:
+            e = float(np.min(np.abs(seg - l)) * HOP_MS)
+            if e > FALSE_LOCK_MS:
+                straddle.append((count, via, round(e, 1)))
+    return false, straddle, scored, worst
+
+
+def stall_capture_report(env, hop, fs, n_samples, sync, rules, params=dsp.DEFAULTS):
+    """Each rule in ``rules`` (``{name: StallParams}``) over a capture, scored on the dense truth.
+
+    Returns ``{name: [per-turn dict]}`` with the tracked result's freezes, half accepts, sync-lost,
+    false accepts (outside a gap / straddling one), the gap events and the loss clock at the turn's
+    last tick. The truth's centre is today's first lock, so every rule is scored on the same truth.
+    """
+    runs = {
+        name: replay_all_tracked(env, hop, fs, n_samples, sync, params, st)
+        for name, st in rules.items()
+    }
+    today = (
+        replay_all_tracked(env, hop, fs, n_samples, sync, params, dsp.TODAY)
+        if "today" not in runs
+        else runs["today"]
+    )
+    out = {name: [] for name in rules}
+    for n, t in enumerate(sync["turns"]):
+        own = b64(t["reference"])
+        if not len(own):
+            continue
+        own_db = dsp.dequantise(own)
+        base = today[t["turn_id"]]["res"]
+        acc = [k["l"] for k in (base["ticks"] if base else []) if k["accepted"]]
+        centre = acc[0] if acc else today[t["turn_id"]]["prior_l_at"](t["start_tap"])
+        tr = dense_track(env, own_db, centre)
+        truth = dense_truth_frames(dense_track(env, own_db, centre, strict=True), len(env))
+        for name in rules:
+            res = runs[name][t["turn_id"]]["res"]
+            if res is None:
+                continue
+            false, straddle, scored, _ = score_accepts(res, truth)
+            last = res["ticks"][-1] if res["ticks"] else {}
+            out[name].append(
+                {
+                    "turn": n,
+                    "turn_id": t["turn_id"],
+                    "aborted": t.get("abort_tap") is not None,
+                    "accepted": sum(k["accepted"] for k in res["ticks"]),
+                    "half": sum(k["via"] == "half" for k in res["ticks"]),
+                    "freezes": res["freezes"],
+                    "lost": len(res["lost_at"]),
+                    "loss_clock_ms": last.get("unlocked_ms"),
+                    "false": false,
+                    "false_straddle": straddle,
+                    "scored": scored,
+                    "gaps": gap_events(res, tr, env, own_db),
+                }
+            )
+    return out
 
 
 # ---------------------------------------------------------------- truth and pauses
@@ -768,6 +1197,68 @@ def fmt(v, nd=1):
     return "-" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{v:.{nd}f}"
 
 
+def print_stall_section(results, hop):
+    """Per turn: the freezes (where the pointer stopped in the turn's audio, received frame of the
+    start, length, how the episode closed and, for a confirm, after how much audio), newer-half
+    accepts, sync-lost and the loss clock at the turn's last tick."""
+    print("\n## Stall rule: freezes, newer-half accepts, loss clock\n")
+    print(
+        "| turn | freezes (at ms in the turn: start s, frozen ms, closed by [after ms]) | half accepts | sync-lost | loss clock ms at last tick |"
+    )
+    print("|---|---|---|---|---|")
+    n_f = n_c = n_h = n_l = 0
+    for r in results:
+        fz = r.get("freezes") or []
+        if not (fz or r.get("half_accepts") or r.get("sync_lost")):
+            continue
+        n_f += len(fz)
+        n_c += sum(f["how"] == "confirm" for f in fz)
+        n_h += r["half_accepts"]
+        n_l += r["sync_lost"]
+        cells = "; ".join(
+            f"{f['at_ms']:.0f}: {f['start'] * HOP_MS / 1000:.2f} s, "
+            f"{f['frames'] * HOP_MS:.0f} ms, {f['how']}"
+            + (f" [{f['confirm_after_ms']:.0f}]" if f["how"] == "confirm" else "")
+            for f in fz
+        )
+        print(
+            f"| {r['label']} | {cells or '-'} | {r['half_accepts']} | {r['sync_lost']} "
+            f"| {fmt(r['loss_clock_ms'], 0)} |"
+        )
+    print(f"\n{n_f} freezes ({n_c} confirmed), {n_h} newer-half accepts, {n_l} sync-lost")
+
+
+def print_gaps_section(env, hop, fs, n_samples, sync, params, stall):
+    """The rule and today's on the dense local truth: per gap the shift, re-align time, the face's
+    lead during it and the largest error after it; false accepts outside / across gaps."""
+    rules = {"rule": stall} if stall == dsp.TODAY else {"today": dsp.TODAY, "rule": stall}
+    rep = stall_capture_report(env, hop, fs, n_samples, sync, rules, params)
+    print("\n## Gaps on the dense local truth (300 ms windows every 25 ms, +/- 2 s)\n")
+    print(
+        "| turn | shift ms | inserted ms | rule | re-align ms | face ahead in gap ms | max err after ms |"
+    )
+    print("|---|---|---|---|---|---|---|")
+    for i, row in enumerate(rep["rule"]):
+        for name in rules:
+            r = rep[name][i]
+            for g in r["gaps"]:
+                print(
+                    f"| {r['turn']} | {g['shift_ms']:+.0f} | {g['inserted_ms']:.0f} | {name} "
+                    f"| {fmt(g['realign_ms'], 0) if g['realign_ms'] is not None else 'never'} "
+                    f"| {g['max_ahead_ms']:.0f} | {fmt(g['max_err_after_ms'], 0)} |"
+                )
+    for name in rules:
+        rows = rep[name]
+        re_ = [g["realign_ms"] for r in rows for g in r["gaps"] if g["realign_ms"] is not None]
+        never = sum(g["realign_ms"] is None for r in rows for g in r["gaps"])
+        print(
+            f"\n{name}: gaps {sum(len(r['gaps']) for r in rows)}, re-align p50 {fmt(pct(re_, 50), 0)} ms, "
+            f"p90 {fmt(pct(re_, 90), 0)} ms, never {never}; sync-lost {sum(r['lost'] for r in rows)}; "
+            f"accepts scored {sum(r['scored'] for r in rows)}, false outside a gap "
+            f"{sum(len(r['false']) for r in rows)}, across a gap {sum(len(r['false_straddle']) for r in rows)}"
+        )
+
+
 def main(argv=None):
     """Replay one capture directory, print the tables, and return the per-turn numbers."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -782,7 +1273,22 @@ def main(argv=None):
     ap.add_argument("--thr", help="replay with these thresholds: peak,ratio,sharpness,half_tol_ms")
     ap.add_argument("--features", help="write sim.py stage-A features for thrsearch.py")
     ap.add_argument("--json", help="write the per-turn numbers as JSON")
+    ap.add_argument(
+        "--stall-rule",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replay with the stall rule (dsp.STALL: freeze, confirm, newer-half re-lock, frozen "
+        "time off the loss clock, rule 5's chained prior); --no-stall-rule replays today's rule "
+        "(dsp.TODAY), which is the probe page's tick for tick",
+    )
+    ap.add_argument(
+        "--gaps",
+        action="store_true",
+        help="score the rule on the dense local truth: every gap's re-align time, the face's lead "
+        "during it, false accepts outside / across gaps (today's rule beside it)",
+    )
     args = ap.parse_args(argv)
+    stall = dsp.STALL if args.stall_rule else dsp.TODAY
 
     params = dsp.DEFAULTS
     if args.thr:
@@ -796,8 +1302,10 @@ def main(argv=None):
         f"{len(x) / fs:.1f} s at {fs} Hz, {len(sync['turns'])} turns; received high-pass "
         f"{'causal first-order (browser)' if args.causal else 'zero-phase (oracle)'}; thresholds "
         f"{params.min_peak}/{params.min_ratio}/{params.min_sharpness}/{params.half_tol_ms} ms"
-        f"{'' if params == dsp.DEFAULTS else ' (NOT the design defaults)'}\n"
+        f"{'' if params == dsp.DEFAULTS else ' (NOT the design defaults)'}; "
+        f"{'stall rule' if args.stall_rule else 'today' + chr(39) + 's rule (no stall rule)'}\n"
     )
+    tracked = replay_all_tracked(env, hop, fs, len(x), sync, params, stall, args.r72_prior)
     hdr = (
         "| turn | kind | ref ms | rx ms | truth peak | drift ms | held/acc | first lock ms | offset ms "
         "| prior err ms (window / whole) | err window p95 | err window max | false (window) | fallback "
@@ -806,33 +1314,17 @@ def main(argv=None):
     print(hdr)
     print("|" + "|".join(["---"] * (hdr.count("|") - 1)) + "|")
     results, all_err, all_local, all_page_err, feats = [], [], [], [], []
-    by_id = {t["turn_id"]: t for t in sync["turns"]}
-    placed = {}  # turn id -> (replayed ticks, pre-lock prior pos -> frames), for R72
     for n_turn, t in enumerate(sync["turns"]):
         own = b64(t["reference"])
         tid = f"{n_turn:2d} {t['turn_id'][8:14]}"  # index and the id's hhmmss
         prior_at = page_prior(t, fs, hop)
-        default_l = (t["start_tap"] + round(PRIOR_LEAD_MS * fs / 1000)) / hop
-        join = gap_join(t, sync["turns"][n_turn - 1] if n_turn else None)
-        r72 = None
-        if join is not None and join[0] in placed:
-            join_frames = round(join[1] * fs / 1000) / hop
-            r72 = lambda pos, j=join, jf=join_frames: place_at(placed, j[0], pos) + jf
-        # the page's own gap prior (recorded) is replayed as one, and --r72-prior adds it elsewhere
-        use_r72 = r72 if args.r72_prior or recorded_gap_prior(t, fs) else None
-
-        def prior_l_at(pos, prior_at=prior_at, default_l=default_l, use_r72=use_r72):
-            o = prior_at(pos)
-            if o is not None:
-                return o / hop
-            return use_r72(pos) if use_r72 is not None else default_l
-
+        tk = tracked[t["turn_id"]]
+        join, r72, prior_l_at = tk["join"], tk["r72"], tk["prior_l_at"]
         if not len(own):
-            placed[t["turn_id"]] = ([], prior_l_at)
             print(f"| {tid} | no reference |" + " |" * (hdr.count("|") - 3))
             continue
-        ticks = replay_turn(t, env, hop, fs, len(x), params, by_id, sync["arrivals"], use_r72)
-        placed[t["turn_id"]] = (ticks, prior_l_at)
+        res_t = tk["res"]
+        ticks = res_t["ticks"] if res_t else []
         acc = [k for k in ticks if k["accepted"]]
         held = [k for k in ticks if k["speech"] and not k["accepted"]]
         # truth: start from the last accepted position, else the onset prior, else turn_start + 200 ms
@@ -990,6 +1482,10 @@ def main(argv=None):
             "page_false": sum(e > FALSE_LOCK_MS for e in page_err),
             "held_reasons": {},
             "pauses": pauses,
+            "half_accepts": sum(k.get("via") == "half" for k in ticks),
+            "freezes": [] if res_t is None else res_t["freezes"],
+            "sync_lost": 0 if res_t is None else len(res_t["lost_at"]),
+            "loss_clock_ms": ticks[-1]["unlocked_ms"] if ticks else None,
         }
         for k in held:
             for f in k["fails"]:
@@ -1073,6 +1569,10 @@ def main(argv=None):
                 f"| {r['label']} | {o['onset_ms']:.0f} | {fmt(o['quiet_before_ms'], 0)} | {fmt(o['phrase_shift_ms'], 2)} "
                 f"| {fmt(o['delta_ms'], 1)} | {fmt(o['delta_local_ms'], 1)} |"
             )
+
+    print_stall_section(results, hop)
+    if args.gaps:
+        print_gaps_section(env, hop, fs, len(x), sync, params, stall)
 
     m = minimum(results)
     print("\n## Design 4.1 minimum (restated, R62/R63; error truth: window content)\n")

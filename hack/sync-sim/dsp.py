@@ -430,3 +430,486 @@ def align(received_env, reference_env, prior_index, params=DEFAULTS):
         interior_ok=ok[4],
     )
     return AlignResult(float(f.est_interp_ms) if checks.accepted else None, checks)
+
+
+# ---------------------------------------------------------------- the stall rule
+#
+# The per-turn state on top of :func:`align`. The page and the SDK run the rule as a tick loop
+# (cadence, priors, splice: ``replay_capture.replay_turn_tracked``); what happens between ticks and
+# what a tick may accept besides the full window is defined here, so the replay, the simulation and
+# the SDK's port share one definition. See the module docstring of this section's fixed terms in
+# ``README.md`` ("The stall rule").
+
+
+@dataclass(frozen=True)
+class StallParams:
+    """The stall rule's fixed terms (lengths in ms). ``TODAY`` switches every part off: the tracker
+    is then today's rule plus the SDK's 2 s loss clock.
+
+    * ``freeze``: after the turn's first lock, a received frame at or below ``silent_db`` while the
+      turn's own reference at the current pointer is above ``ref_speech_db`` starts a run; once
+      the run is ``freeze_after_ms`` long the reference pointer stops (retroactively over the run)
+      and stays stopped while the received stays silent, for at most ``freeze_max_ms``. While a
+      confirm is pending (below) "silent" means digital silence, at or below
+      ``confirming_silent_db``: after a wrong freeze (a burst loss, where the timeline did not
+      move) the received pauses where the shifted reference speaks, and freezing there would
+      push the pointer further and discard the confirm that undoes it; a second real stall still
+      ends in exact zeros (the jitter buffer's concealment fades to digital silence) and freezes.
+      Such a freeze keeps the earlier freeze's bracket (``carry_bracket``): the confirm's range
+      still starts at the pointer before the earlier freeze and spans everything received since
+      the last frame that matched before it.
+    * ``confirm``: when received audio resumes, a correlation of the received audio since the
+      resume against the own reference, every ``confirm_every_ms`` from ``confirm_from_ms`` to
+      ``confirm_until_ms`` of it, at positions in [pointer before the freeze - ``confirm_back_ms``,
+      pointer before the freeze + everything received since the last frame that matched the
+      reference before the freeze + ``confirm_fwd_ms``]; accepted at an interior peak >=
+      ``confirm_min_peak``, peak / second-highest peak >= ``confirm_min_ratio`` and sharpness >=
+      ``confirm_min_sharpness`` (curve at the interpolated peak +/- ``confirm_sharp_at_ms``), both
+      sides clipped at ``confirm_floor_db`` (:func:`confirm_position`). The last
+      matching frame: the newest frame within ``match_back_ms`` before the run whose
+      ``match_frames`` consecutive frames are each over ``match_min_db`` and within
+      ``match_tol_db`` of the reference at the pointer then; without one there is no confirm.
+    * ``newer_half``: a tick after the first lock whose full window is not accepted searches the
+      newer 0.5 s alone within +/- ``half_search_ms`` of the pointer (peak, ratio, sharpness and
+      interior as :func:`align`); it is accepted when the previous tick's newer-half candidate
+      agrees within ``half_agree_ms`` (two consecutive ticks, 200 ms apart after the lock), and
+      refused when the newer half holds a run of ``half_silence_ms`` at or below
+      ``digital_silence_db`` (digital silence: a stall inside it).
+    * ``hold_clock``: frozen time does not count toward the ``loss_ms`` loss clock.
+    * ``chain_prior`` (rule 5, R74): a chained turn whose predecessor is locked takes the
+      predecessor's position + ``prev_turn_pcm_ms`` as its prior; before its own first lock an
+      onset prior re-anchors it only within ``chain_onset_tol_ms`` of that position
+      (:func:`chained_prior`).
+    """
+
+    freeze: bool = True
+    confirm: bool = True
+    newer_half: bool = True
+    hold_clock: bool = True
+    chain_prior: bool = True
+    confirming_silent_db: float = -95.0
+    carry_bracket: bool = True
+    silent_db: float = -70.0
+    ref_speech_db: float = -40.0
+    freeze_after_ms: float = 40.0
+    freeze_max_ms: float = 2000.0
+    match_back_ms: float = 400.0
+    match_frames: int = 3
+    match_min_db: float = -60.0
+    match_tol_db: float = 4.0
+    confirm_from_ms: float = 300.0
+    confirm_until_ms: float = 800.0
+    confirm_every_ms: float = 50.0
+    confirm_back_ms: float = 150.0
+    confirm_fwd_ms: float = 20.0
+    confirm_floor_db: float = -70.0
+    confirm_min_peak: float = 0.95
+    confirm_min_ratio: float = 1.2
+    confirm_min_sharpness: float = 0.03
+    confirm_sharp_at_ms: float = 20.0
+    half_search_ms: float = 300.0
+    half_agree_ms: float = 10.0
+    half_silence_ms: float = 40.0
+    digital_silence_db: float = -95.0
+    loss_ms: float = 2000.0
+    chain_onset_tol_ms: float = 200.0
+
+
+STALL = StallParams()
+TODAY = StallParams(
+    freeze=False, confirm=False, newer_half=False, hold_clock=False, chain_prior=False
+)
+
+
+def longest_run(mask):
+    """Length of the longest run of True in ``mask``."""
+    m = np.asarray(mask, dtype=np.int8)
+    if not len(m):
+        return 0
+    d = np.diff(np.concatenate([[0], m, [0]]))
+    starts, ends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+    return int((ends - starts).max()) if len(starts) else 0
+
+
+def newer_half_candidate(
+    received_env, reference_env, prior_index, params=DEFAULTS, search_ms=300.0
+):
+    """The newer 0.5 s of the window alone, searched within +/- ``search_ms`` of the prior.
+
+    Same arguments and lag axis as :func:`align`. Returns the interpolated peak (ms on the received
+    axis, as ``align``'s ``offset_ms``) when peak, ratio, sharpness and interior all hold, else
+    None. The half-window check of ``align`` does not apply (this *is* a half).
+    """
+    hop = params.hop_ms
+    rec = np.asarray(received_env, dtype=np.float64)
+    jt = len(rec)
+    m_half = round(params.window_ms / hop) // 2
+    if jt < m_half:
+        return None
+    ref_db = dequantise(reference_env)
+    floor = floor_db(rec[max(0, jt - int(params.floor_history_ms / hop)) : jt], params)
+    prior_ms = prior_index * hop
+    lo_ms, hi_ms = prior_ms - search_ms, prior_ms + search_ms
+    margin = 2 * hop + params.sharp_at_ms
+    lag_min = int(np.floor((lo_ms - margin) / hop))
+    lag_max = int(np.ceil((hi_ms + margin) / hop))
+    lags = np.arange(lag_min, lag_max + 1)
+    pad = max(lag_max - (jt - m_half), (jt - lag_min) - len(ref_db), 0) + 1
+    ref_padded = pad_reference(ref_db, pad)
+    c = ncc_curve(
+        rec[jt - m_half : jt], ref_padded, pad + jt - m_half, lags, floor, params.gate_std_db
+    )
+    if c is None:
+        return None
+    lags_ms = lags * hop
+    pk, sec, _, est_i, edge = peak_features(lags_ms, c, lo_ms, hi_ms, params.interpolate)
+    ratio = pk / sec if sec > 1e-3 else np.inf
+    side = np.interp([est_i - params.sharp_at_ms, est_i + params.sharp_at_ms], lags_ms, c)
+    sharp = pk - side.max()
+    ok = (
+        pk >= params.min_peak
+        and ratio >= params.min_ratio
+        and sharp >= params.min_sharpness
+        and not edge
+    )
+    return float(est_i) if ok else None
+
+
+def confirm_position(env, own_db, j_res, j_end, lo, hi, stall=STALL, hop_ms=5.0):
+    """The confirm correlation: received frames ``[j_res, j_end)`` against the turn's own reference
+    (dB) at every position ``l`` in ``[floor(lo), ceil(hi)]`` (received frame of the reference's
+    index 0; frame ``j`` pairs with reference frame ``j - l``), both clipped at
+    ``confirm_floor_db``, mean-removed Pearson as :func:`ncc_curve`. Peak, second-highest peak,
+    parabolic estimate and edge as :func:`peak_features` over that range; accepted when the peak
+    is >= ``confirm_min_peak``, peak / second >= ``confirm_min_ratio``, sharpness (interpolated
+    peak minus the curve at it +/- ``confirm_sharp_at_ms``) >= ``confirm_min_sharpness`` and the
+    peak is not at either end of the range. Returns the interpolated position or None."""
+    floor = stall.confirm_floor_db
+    w = np.maximum(np.asarray(env[j_res:j_end], dtype=np.float64), floor)
+    if len(w) < 2 or w.std() < DEFAULTS.gate_std_db:
+        return None
+    sa = stall.confirm_sharp_at_ms / hop_ms
+    ext = int(np.ceil(sa)) + 1
+    a, b = int(np.floor(lo)), int(np.ceil(hi))
+    if b - a < 2:
+        return None
+    ls = np.arange(a - ext, b + ext + 1)
+    k = np.arange(j_res, j_end)[None, :] - ls[:, None]
+    inside = (k >= 0) & (k < len(own_db))
+    v = np.where(inside, own_db[np.clip(k, 0, max(0, len(own_db) - 1))], DB_MIN)
+    v = np.maximum(v, floor)
+    wc = w - w.mean()
+    vc = v - v.mean(1, keepdims=True)
+    den = np.sqrt((vc**2).sum(1) * (wc**2).sum())
+    c = np.where(den > 0, (vc @ wc) / np.where(den > 0, den, 1.0), 0.0)
+    pk, sec, _, est, edge = peak_features(ls.astype(np.float64), c, a, b)
+    ratio = pk / sec if sec > 1e-3 else np.inf
+    if edge or pk < stall.confirm_min_peak or ratio < stall.confirm_min_ratio:
+        return None
+    side = np.interp([est - sa, est + sa], ls, c)
+    if pk - side.max() < stall.confirm_min_sharpness:
+        return None
+    return float(est)
+
+
+def chained_prior(chain_l, onset_l, stall=STALL, hop_ms=5.0):
+    """Rule 5 (R74): the prior of a chained turn whose predecessor is locked, before its own first
+    lock. ``chain_l``: the predecessor's position + ``prev_turn_pcm_ms`` (frames); ``onset_l``: the
+    onset prior (frames) or None. Returns ``(frames, kind)``: the onset prior (``'onset'``) when it
+    lies within ``chain_onset_tol_ms`` of the chain position, else the chain position
+    (``'chain'``)."""
+    if onset_l is not None and abs(onset_l - chain_l) * hop_ms <= stall.chain_onset_tol_ms:
+        return onset_l, "onset"
+    return chain_l, "chain"
+
+
+def ref_speech(ref_u8, own_off, l, count, floor, params=DEFAULTS):
+    """The SDK's ``refSpeech``: whether the reference, where it is believed to sit (``l``: received
+    frame of the turn's own index 0; ``ref_u8`` spliced with the turn's own index 0 at
+    ``own_off``), has speech in the received window ``[count - 1 s, count)``."""
+    m = round(params.window_ms / params.hop_ms)
+    ref_db = dequantise(ref_u8)
+    k = np.arange(count - m, count) - round(l) + own_off
+    inside = (k >= 0) & (k < len(ref_db))
+    v = np.where(inside, ref_db[np.clip(k, 0, max(0, len(ref_db) - 1))], DB_MIN)
+    return bool(np.maximum(v, floor).std() >= params.gate_std_db)
+
+
+class TurnTracker:
+    """One turn's alignment state: today's rule (:func:`align` per tick, hold, the 2 s loss clock)
+    plus the stall rule (:class:`StallParams`).
+
+    The caller feeds every received frame once, in order (:meth:`frame`, the envelope value at
+    index ``j`` must exist), and runs :meth:`tick` at its cadence with the reference as arrived.
+    Positions (``l``) are received frames of the turn's own reference index 0, as in the replay.
+
+    ``events`` lists ``(frame, event)`` with the SDK's sync event shapes for the freeze:
+    ``{'kind': 'frozen', 'turnId', 'atMs'}`` when a freeze starts (``atMs``: the turn's own audio
+    position, ms, where the pointer stopped) and ``{'kind': 'unfrozen', 'turnId', 'frozenMs',
+    'confirmed'}`` when its episode closes: the confirm accepted (``confirmed`` true), or a full or
+    newer-half lock, the confirm's time ran out, no confirm was possible, a new freeze started, or
+    the turn ended (false). ``lost_at`` lists the frames where the loss clock reached ``loss_ms``
+    (the SDK's ``sync-lost``). ``freezes`` keeps each closed episode for reports.
+    """
+
+    def __init__(self, turn_id, params=DEFAULTS, stall=STALL):
+        self.turn_id = turn_id
+        self.p = params
+        self.s = stall
+        hop = params.hop_ms
+        self.hop = hop
+        self.n_min = max(1, round(stall.freeze_after_ms / hop))
+        self.n_max = round(stall.freeze_max_ms / hop)
+        self.n_back = round(stall.match_back_ms / hop)
+        self.n_from = round(stall.confirm_from_ms / hop)
+        self.n_until = round(stall.confirm_until_ms / hop)
+        self.n_every = max(1, round(stall.confirm_every_ms / hop))
+        self.n_half_silence = round(stall.half_silence_ms / hop)
+        self.own_db = np.zeros(0)
+        self.locked = False
+        self.l = None
+        self.held_no_lock = 0
+        self.unlocked_ms = 0.0
+        self.lost = False
+        self.lost_at = []
+        self.events = []
+        self.freezes = []
+        self._run = 0
+        self._run_k = None
+        self._episode = None
+        self._pending = None
+        self._prev_half = None
+        self._frozen_since_tick = 0
+
+    # ------------------------------------------------------------ inputs
+
+    def set_reference(self, own_u8):
+        """The turn's own reference envelope as arrived so far (``uint8``)."""
+        if len(own_u8) != len(self.own_db):
+            self.own_db = dequantise(own_u8)
+
+    @property
+    def frozen(self):
+        """Whether the pointer is held now."""
+        ep = self._episode
+        return ep is not None and ep["resume"] is None and ep["frames"] < self.n_max
+
+    def _matches(self, env, l, j):
+        k = round(j - l)
+        return (
+            0 <= k < len(self.own_db)
+            and j >= 0
+            and env[j] >= self.s.match_min_db
+            and abs(env[j] - self.own_db[k]) <= self.s.match_tol_db
+        )
+
+    def _close(self, j, how, **extra):
+        ep = self._episode
+        if ep is None:
+            return
+        ep.update(how=how, closed=j, **extra)
+        self.events.append(
+            (
+                j,
+                {
+                    "kind": "unfrozen",
+                    "turnId": self.turn_id,
+                    "frozenMs": ep["frames"] * self.hop,
+                    "confirmed": how == "confirm",
+                },
+            )
+        )
+        self.freezes.append(ep)
+        self._episode = None
+        self._pending = None
+
+    def frame(self, env, j):
+        """Received frame ``j`` (``env[j]``, dB) has completed."""
+        if not (self.locked and self.s.freeze):
+            return
+        s = self.s
+        level = s.silent_db if self._pending is None else min(s.silent_db, s.confirming_silent_db)
+        silent = env[j] <= level
+        if silent:
+            started = True
+            if self._run == 0:
+                k = round(j - self.l)
+                started = 0 <= k < len(self.own_db) and self.own_db[k] > s.ref_speech_db
+                self._run_k = k
+            if started:
+                self._run += 1
+                if self._run == self.n_min:
+                    self._start(env, j)
+                elif self._run > self.n_min and self._episode is not None:
+                    ep = self._episode
+                    if ep["resume"] is None and ep["frames"] < self.n_max:
+                        self.l += 1
+                        ep["frames"] += 1
+                        self._frozen_since_tick += 1
+        else:
+            if self._run >= self.n_min and self._episode is not None:
+                self._resume(j)
+            self._run = 0
+        pd = self._pending
+        if pd is not None:
+            n_post = j + 1 - pd["j_res"]
+            if n_post > self.n_until:
+                self._close(j, "expired")
+            elif n_post >= self.n_from and (n_post - self.n_from) % self.n_every == 0:
+                est = confirm_position(
+                    env, self.own_db, pd["j_res"], j + 1, pd["lo"], pd["hi"], s, self.hop
+                )
+                if est is not None:
+                    self.l = est
+                    self.unlocked_ms = 0.0
+                    self.lost = False
+                    self._close(j, "confirm", confirm_l=est, confirm_after_ms=n_post * self.hop)
+
+    def _start(self, env, j):
+        j0 = j - self.n_min + 1
+        carried = None
+        if self._episode is not None:
+            ep = self._episode
+            if self._pending is not None and self.s.carry_bracket:
+                carried = (ep["l_pre"], ep["j_match"])
+            self._close(j, "superseded")
+        if carried is not None:
+            # unconfirmed: the bracket still starts at the last frame that matched before the
+            # earlier freeze, so the confirm can still choose "nothing moved" (a burst loss) or
+            # "everything since moved" (a second stall)
+            l_pre, j_match = carried
+        else:
+            l_pre = self.l
+            j_match = None
+            lowest = max(j0 - self.n_back, self.s.match_frames - 1)
+            for jm in range(j0 - 1, lowest - 1, -1):
+                if all(self._matches(env, l_pre, jm - d) for d in range(self.s.match_frames)):
+                    j_match = jm
+                    break
+        n = min(self.n_min, self.n_max)
+        self.l += n
+        self._frozen_since_tick += n
+        self._episode = {
+            "start": j0,
+            "at_ms": self._run_k * self.hop,
+            "l_pre": l_pre,
+            "j_match": j_match,
+            "frames": n,
+            "resume": None,
+            "carried": carried is not None,
+        }
+        self.events.append(
+            (j, {"kind": "frozen", "turnId": self.turn_id, "atMs": self._run_k * self.hop})
+        )
+
+    def _resume(self, j):
+        ep = self._episode
+        ep["resume"] = j
+        if not self.s.confirm:
+            self._close(j, "no-confirm")
+        elif ep["j_match"] is None:
+            self._close(j, "no-match")
+        else:
+            self._pending = {
+                "j_res": j,
+                "lo": ep["l_pre"] - self.s.confirm_back_ms / self.hop,
+                "hi": ep["l_pre"] + (j - ep["j_match"] - 1) + self.s.confirm_fwd_ms / self.hop,
+            }
+
+    def finish(self, j):
+        """The turn's ticks are over: close an open freeze."""
+        self._close(j, "end")
+
+    # ------------------------------------------------------------ the tick
+
+    def tick(self, env, count, ref, own_off, centre, search_ms, since_ms):
+        """One alignment tick on received frames ``[0, count)``.
+
+        ``ref``: the reference as correlated (spliced: the turn's own index 0 at ``own_off``);
+        ``centre``/``search_ms``: the prior and its search before the first lock (after it the
+        tracker uses its own position and ``params.search_ms``); ``since_ms``: received time since
+        the previous tick that returned a record. Returns None when the window is not complete yet
+        (not a tick), else the tick's record.
+        """
+        p, s, hop = self.p, self.s, self.hop
+        if self.locked:
+            centre, search_ms = self.l, p.search_ms
+        hist = round(p.floor_history_ms / hop)
+        base = max(0, count - hist)
+        rec = np.asarray(env[base:count], dtype=np.float64)
+        pp = AlignParams(**{**p.__dict__, "search_ms": search_ms})
+        r = align(rec, ref, centre - own_off - base, pp)
+        if not r.checks.window_ok:
+            return None
+        since = since_ms
+        if s.hold_clock:
+            since = max(0.0, since - self._frozen_since_tick * hop)
+        self._frozen_since_tick = 0
+        c = r.checks
+        accepted = r.offset_ms is not None
+        l_acc = r.offset_ms / hop + own_off + base if accepted else None
+        via = "full" if accepted else None
+        half_l, half_refused = None, False
+        if not accepted and s.newer_half and self.locked and c.speech:
+            hc = newer_half_candidate(rec, ref, centre - own_off - base, pp, s.half_search_ms)
+            if hc is not None:
+                m_half = round(p.window_ms / hop) // 2
+                if longest_run(rec[-m_half:] <= s.digital_silence_db) >= self.n_half_silence:
+                    hc, half_refused = None, True
+            if hc is not None:
+                half_l = hc / hop + own_off + base
+                if (
+                    self._prev_half is not None
+                    and abs(half_l - self._prev_half) * hop <= s.half_agree_ms
+                ):
+                    accepted, l_acc, via = True, half_l, "half"
+                self._prev_half = half_l
+            else:
+                self._prev_half = None
+        elif accepted:
+            self._prev_half = None
+        if accepted:
+            self.unlocked_ms = 0.0
+            self.lost = False
+        elif not c.speech:
+            l_now = self.l if self.locked else centre
+            if ref_speech(ref, own_off, l_now, count, floor_db(rec, p), p):
+                self.unlocked_ms += since
+        else:
+            self.unlocked_ms += since
+        if self.unlocked_ms >= s.loss_ms and not self.lost:
+            self.lost = True
+            self.lost_at.append(count)
+        if accepted:
+            if self._episode is not None:
+                self._close(count - 1, via)
+            self._run = 0
+            self.locked, self.l = True, l_acc
+            self.held_no_lock = 0
+        elif c.speech and not self.locked:
+            self.held_no_lock += 1
+        return {
+            "count": count,
+            "speech": c.speech,
+            "accepted": accepted,
+            "via": via,
+            "l": l_acc,
+            "candidate_l": None
+            if c.candidate_ms is None
+            else c.candidate_ms / hop + own_off + base,
+            "half_l": half_l,
+            "half_refused": half_refused,
+            "checks": (c.peak, c.ratio, c.sharpness, c.half_deviation_ms, c.edge),
+            "fails": [
+                n
+                for n, ok in zip(
+                    ("peak", "ratio", "sharpness", "halves", "edge"),
+                    (c.peak_ok, c.ratio_ok, c.sharpness_ok, c.halves_ok, c.interior_ok),
+                )
+                if not ok
+            ]
+            if c.speech
+            else [],
+            "unlocked_ms": self.unlocked_ms,
+            "lost": self.lost,
+        }

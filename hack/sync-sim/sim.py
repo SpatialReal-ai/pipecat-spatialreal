@@ -3,6 +3,7 @@ browser receives); align X to R with an envelope fingerprint and compare with th
 
 usage: python3 sim.py OUT.pkl [--quick] [--captures DIR [--runs A,B,...]] [--jobs N]
                       [--thr C,R,S,TOL ...]
+       python3 sim.py --stall OUT.json [--jobs N] [--seeds K]   (the stall rule, see below)
 
 * Sources: ``clean/*.wav`` (24 kHz mono, from ``make_speech.sh``), plus, with ``--captures``, real
   bot turns cut out of capture directories (each ``RUN/capture.wav`` + ``RUN/capture.jsonl``, the
@@ -478,7 +479,385 @@ def run_one(args):
     return out
 
 
+# ---------------------------------------------------------------- stall conditions (the stall rule)
+#
+# ``sim.py --stall OUT.json``: the page's tick loop (``replay_capture.replay_turn_tracked``) on one
+# synthetic turn per run, with exact truth, today's rule against the stall rule. Sources: the real
+# bot turns of the committed fixtures (``STALL_RUNS``), so a run needs no capture outside the repo.
+
+STALL_FIXTURES = os.path.join(HERE, "..", "..", "tests", "fixtures", "sync")
+STALL_RUNS = ["daily-clean", "livekit-clean", "daily-splice"]
+STALL_CONDS = (
+    ["clean"]
+    + [f"stall-{s}" for s in (80, 150, 250, 500, 1200)]
+    + [f"zeros-{s}" for s in (150, 250, 500)]
+    + [f"loss-{d}" for d in (200, 400)]
+    + ["ins", "del"]
+)
+STALL_HOP = FSX * dsp.HOP_MS // 1000  # received frame, samples at 48 kHz
+STALL_SEEDS = 3
+
+
+def build_stall_x(r, cond, rng):
+    """One synthetic received track for a stall condition.
+
+    Channel: Opus 32 kbps 20 ms (``codec.py``) and
+
+    * ``clean``;
+    * ``stall-S``: receiver-side stall of S ms (packets late): the jitter buffer inserts S ms
+      (rounded to 20 ms), the decoder's concealment for the first P ms (P ~ U(60, 130), as seen in
+      the stalled Chrome captures) then exact zeros, and L ~ U(0, 60) ms of content lost just
+      before it (concealed in place, timeline kept); the timeline shifts by S;
+    * ``zeros-S``: sender-side: S ms of digital zeros inserted into the source before encoding;
+      shift S;
+    * ``loss-D``: D ms of packets lost (burst loss), concealment P ms then zeros, timeline kept;
+    * ``ins``: 40-120 ms of decoder concealment inserted (a jitter-buffer expand); shift > 0;
+    * ``del``: 40-120 ms deleted; shift < 0.
+
+    The impairment sits 35-65 % into the turn's speech span; then an unknown 0-400 ms delay, 1 s of
+    pre-roll and 1 s of trailing silence. Returns ``(x, rt, ev)``: the 48 kHz track, per sample the
+    source sample it carries (-1: none, -2: concealment in place of lost content) and the event.
+    """
+    import codec  # libopus, loaded only for the simulation
+
+    loud = np.flatnonzero(np.abs(r) > 328)
+    span = (loud[0] / FSR, loud[-1] / FSR)
+    gpos = span[0] + rng.uniform(0.35, 0.65) * (span[1] - span[0])  # R seconds
+    kind, _, arg = cond.partition("-")
+    x48 = dsp.fft_resample(r, 2 * len(r))
+    ev = {"cond": cond, "shift_ms": 0}
+    if kind == "zeros":
+        n_z = int(int(arg) / 1000 * FSX)
+        a = int(gpos * FSX)
+        x48 = np.concatenate([x48[:a], np.zeros(n_z), x48[a:]])
+        src = np.concatenate([np.arange(a), np.full(n_z, -1), np.arange(a, len(x48) - n_z)])
+        packets, pre = codec.encode(np.round(x48).clip(-32768, 32767).astype(np.int16), 32)
+        pcm, rt = codec.decode(packets, pre, len(x48))
+        pcm = pcm.astype(np.float64)
+        rt = np.where(rt >= 0, src[np.clip(rt, 0, len(src) - 1)], -1)
+        ev["shift_ms"] = int(arg)
+    else:
+        packets, pre = codec.encode(np.round(x48).clip(-32768, 32767).astype(np.int16), 32)
+        i0 = int((gpos * FSX + pre) // codec.FRAME)
+        drop, ins, zero_after = (), None, None
+        if kind == "stall":
+            plc = rng.uniform(60, 130)
+            nl = round(rng.uniform(0, 60) / 20)
+            drop = range(i0 - nl, i0)
+            ins = (i0, max(1, round(int(arg) / 20)))
+            zero_after = plc
+            ev.update(shift_ms=ins[1] * 20, lost_ms=nl * 20, plc_ms=plc)
+        elif kind == "loss":
+            drop = range(i0, i0 + round(int(arg) / 20))
+            zero_after = rng.uniform(60, 130)
+            ev["plc_ms"] = zero_after
+        elif kind == "ins":
+            n = max(2, round(rng.uniform(0.04, 0.12) / 0.02))
+            ins = (i0, n)
+            ev["shift_ms"] = n * 20
+        pcm, rt = codec.decode(packets, pre, len(x48), plc_drop=drop, plc_insert=ins)
+        pcm = pcm.astype(np.float64)
+        if zero_after is not None:
+            # NetEq-like: the concealment fades for zero_after ms, then digital silence
+            if kind == "stall":
+                bad = np.flatnonzero(rt < 0)
+            else:
+                lo_s = drop[0] * codec.FRAME - pre
+                hi_s = drop[-1] * codec.FRAME + codec.FRAME - pre
+                bad = np.flatnonzero((rt >= lo_s) & (rt < hi_s))
+                rt = np.where((rt >= lo_s) & (rt < hi_s), -2, rt)
+            if len(bad):
+                start = bad[0]
+                if kind == "stall" and ev.get("lost_ms"):
+                    start = max(0, bad[0] - int(ev["lost_ms"] / 1000 * FSX))
+                z0 = start + int(zero_after / 1000 * FSX)
+                if z0 <= bad[-1]:
+                    pcm[z0 : bad[-1] + 1] = 0.0
+        if kind == "stall" and ev.get("lost_ms"):
+            lo_s = (i0 - round(ev["lost_ms"] / 20)) * codec.FRAME - pre
+            hi_s = i0 * codec.FRAME - pre
+            rt = np.where((rt >= lo_s) & (rt < hi_s), -2, rt)
+        if kind == "del":
+            glen = rng.uniform(0.040, 0.120)
+            a = int(gpos * FSX)
+            b = a + int(glen * FSX)
+            pcm = np.concatenate([pcm[:a], pcm[b:]])
+            rt = np.concatenate([rt[:a], rt[b:]])
+            ev["shift_ms"] = -glen * 1000
+    pre_n = FSX + int(rng.uniform(0, 0.4) * FSX)
+    x = np.concatenate([np.zeros(pre_n), pcm, np.zeros(FSX)])
+    rt = np.concatenate([np.full(pre_n, -1), rt, np.full(FSX, -1)])
+    return x, rt.astype(np.float64), ev
+
+
+def stall_truth_frames(rt, n_env):
+    """Per received frame ``j``: the received frame of the reference's index 0 its content puts
+    there (NaN where the frame's centre carries no source content)."""
+    idx = np.clip(np.arange(n_env) * STALL_HOP + STALL_HOP, 0, len(rt) - 1)
+    src = rt[idx]
+    ok = src >= 0
+    out = np.full(n_env, np.nan)
+    out[ok] = np.arange(n_env)[ok] - (src[ok] - STALL_HOP) / STALL_HOP
+    return out
+
+
+def build_stall_case(name, r, cond, seed):
+    """Everything a stall run needs, from its seed: track envelope (causal high-pass, as the
+    browser), truth per frame, the fake turn (prior: the truth +/- U(0, 100) ms) and the event's
+    frames (``jump``: last frame before / first frame after the impairment)."""
+    import replay_capture as rc
+
+    rng = np.random.default_rng(seed)
+    x, rt, ev = build_stall_x(r, cond, rng)
+    env = dsp._window_db(rc.causal_high_pass(x, FSX), STALL_HOP, 2 * STALL_HOP)
+    tl = stall_truth_frames(rt, len(env))
+    ref = dsp.envelope_bytes(np.round(r).clip(-32768, 32767), FSR)
+    valid = np.flatnonzero(~np.isnan(tl))
+    prior_l = tl[valid[0]] + rng.uniform(-100, 100) / dsp.HOP_MS
+    start_tap = round(prior_l * STALL_HOP) - int(0.2 * FSX)
+    t = {
+        "turn_id": f"sim-{name}-{cond}-{seed}",
+        "start_tap": start_tap,
+        "end_tap": start_tap + int(0.1 * FSX),
+        "end_pcm_ms": len(r) / FSR * 1000,
+        "abort_tap": None,
+        "ticks": [],
+        "onsets_ms": [],
+    }
+    arrivals = {t["turn_id"]: [(start_tap - 1, 0, ref)]}
+    jump = None
+    if cond.startswith("loss"):
+        gaps = np.flatnonzero(np.diff(valid) > 1)
+        if len(gaps):
+            jump = (int(valid[gaps[0]]), int(valid[gaps[0] + 1]))
+    elif ev["shift_ms"]:
+        big = np.flatnonzero(np.abs(np.diff(tl[valid])) > 2)
+        if len(big):
+            jump = (int(valid[big[0]]), int(valid[big[0] + 1]))
+    return {
+        "name": name,
+        "cond": cond,
+        "seed": seed,
+        "ev": ev,
+        "env": env.astype(np.float32),
+        "tl": tl,
+        "n_samples": len(x),
+        "turn": t,
+        "arrivals": arrivals,
+        "jump": jump,
+    }
+
+
+def window_false(l, truth, tol_ms=20.0):
+    """Whether an accept at ``l`` is false against the truth of the frames its window covered:
+    ``(error_ms, straddles)``. A window whose truth spans more than 10 ms straddles a gap; its
+    accept must land on one of the real positions inside it (the nearest counts)."""
+    seg = truth[~np.isnan(truth)]
+    if not len(seg):
+        return None, False
+    if (seg.max() - seg.min()) * dsp.HOP_MS <= 10:
+        return abs(l - seg.mean()) * dsp.HOP_MS, False
+    return float(np.min(np.abs(seg - l)) * dsp.HOP_MS), True
+
+
+def evaluate_stall_case(case, stall, params=dsp.DEFAULTS):
+    """Replay one case with ``stall`` and score it against the exact truth."""
+    import replay_capture as rc
+
+    env = case["env"].astype(np.float64)
+    tl = case["tl"]
+    hop = STALL_HOP
+    res = rc.replay_turn_tracked(
+        case["turn"], env, hop, FSX, case["n_samples"], params, {}, case["arrivals"], None, stall
+    )
+    disp = res["disp"]
+    js = np.array(sorted(disp))
+    dl = np.array([disp[j] for j in js])
+    acc = [k for k in res["ticks"] if k["accepted"]]
+    false, false_straddle, scored, worst = [], [], 0, 0.0
+    accepts = [(k["count"], k["l"], 100 if k["via"] == "half" else 200, k["via"]) for k in acc]
+    for f in res["freezes"]:
+        if f["how"] == "confirm":
+            accepts.append(
+                (f["closed"] + 1, f["confirm_l"], f["closed"] + 1 - f["resume"], "confirm")
+            )
+    for count, l, m, via in accepts:
+        e, straddles = window_false(l, tl[max(0, count - m) : count])
+        if e is None:
+            continue
+        scored += 1
+        if not straddles:
+            worst = max(worst, e)
+        if e > 20:
+            (false_straddle if straddles else false).append((via, round(e, 1)))
+    first = next((k["count"] for k in acc), None)
+    off20_post = 0.0
+    if first is not None:
+        post = (js >= first) & ~np.isnan(tl[js])
+        off20_post = float((np.abs(dl[post] - tl[js[post]]) * dsp.HOP_MS > 20).sum() * dsp.HOP_MS)
+    out = {
+        "off20_post_ms": off20_post,
+        "n_acc": len(acc),
+        "n_half": sum(k["via"] == "half" for k in acc),
+        "scored": scored,
+        "false": false,
+        "false_straddle": false_straddle,
+        "worst_ms": worst,
+        "lost": len(res["lost_at"]),
+        "freezes": [(f["frames"] * dsp.HOP_MS, f["how"]) for f in res["freezes"]],
+        "first_lock": first,
+    }
+    jump = case["jump"]
+    if jump is not None and first is not None and first < jump[0]:
+        jp, jr = jump
+        post = js >= jr
+        jj, dd, tt = js[post], dl[post], tl[js[post]]
+        t_re = None
+        for i in range(len(jj)):
+            if np.isnan(tt[i]):
+                continue
+            win = slice(i, i + 20)
+            ok = [
+                abs(a - b) * dsp.HOP_MS <= 10 for a, b in zip(dd[win], tt[win]) if not np.isnan(b)
+            ]
+            if ok and all(ok):
+                t_re = int((jj[i] - jr) * dsp.HOP_MS)
+                break
+        ins = (js > jp) & (js < jr)
+        k_gap = jp - tl[jp]
+        ahead = float(np.max((js[ins] - dl[ins]) - k_gap) * dsp.HOP_MS) if ins.any() else 0.0
+        err = np.abs((dd - tt) * dsp.HOP_MS)
+        err = err[~np.isnan(err)]
+        valid = np.flatnonzero(~np.isnan(tl))
+        out["event"] = {
+            "realign_ms": t_re,
+            "ahead_ms": ahead,
+            "max_after_ms": float(err.max()) if len(err) else None,
+            "off20_after_ms": float((err > 20).sum() * dsp.HOP_MS) if len(err) else 0.0,
+            "speech_after_ms": int((valid[-1] - jr) * dsp.HOP_MS),
+        }
+    return out
+
+
+def stall_sources():
+    """The real bot turns of the committed fixtures (``STALL_RUNS``)."""
+    return [s for s in load_sources(captures=STALL_FIXTURES, runs=STALL_RUNS) if s[0] == "real"]
+
+
+def stall_tasks(seeds=STALL_SEEDS, conds=STALL_CONDS):
+    """``(name, r, cond, seed)`` for every source x condition x seed; the seed depends only on
+    the source's and the condition's positions, so a run is reproducible."""
+    tasks = []
+    for si, (_, name, r) in enumerate(stall_sources()):
+        for cond in conds:
+            ci = STALL_CONDS.index(cond)
+            for k in range(seeds):
+                tasks.append((name, r, cond, 1000 * si + 10 * ci + k))
+    return tasks
+
+
+def _stall_build(task):
+    return build_stall_case(*task)
+
+
+def build_stall_cases(jobs=10, seeds=STALL_SEEDS):
+    """Every stall case, built in parallel."""
+    with Pool(jobs) as pool:
+        return pool.map(_stall_build, stall_tasks(seeds), chunksize=4)
+
+
+def summarise_stall(rows):
+    """Per condition: runs, runs with sync-lost, re-align p50/p90 and never (events with >= 1.2 s
+    of speech after the impairment), the face ahead during the gap p50/p90, the error after it
+    p50/max and ms off by > 20 ms p50/p90, false locks (outside a gap / straddling it with no real
+    position), freezes, confirmed freezes, newer-half accepts."""
+    out = {}
+    for cond in STALL_CONDS:
+        rs = [r for r in rows if r["cond"] == cond]
+        if not rs:
+            continue
+        ev = [r["event"] for r in rs if r.get("event") and r["event"]["speech_after_ms"] >= 1200]
+        re_ = [e["realign_ms"] for e in ev if e["realign_ms"] is not None]
+        q = lambda v, p: float(np.percentile(v, p)) if len(v) else None
+        out[cond] = {
+            "runs": len(rs),
+            "lost": sum(r["lost"] > 0 for r in rs),
+            "events": len(ev),
+            "realign_p50": q(re_, 50),
+            "realign_p90": q(re_, 90),
+            "never": sum(e["realign_ms"] is None for e in ev),
+            "ahead_p50": q([e["ahead_ms"] for e in ev], 50),
+            "ahead_p90": q([e["ahead_ms"] for e in ev], 90),
+            "max_after_p50": q(
+                [e["max_after_ms"] for e in ev if e["max_after_ms"] is not None], 50
+            ),
+            "max_after_max": q(
+                [e["max_after_ms"] for e in ev if e["max_after_ms"] is not None], 100
+            ),
+            "off20_p50": q([e["off20_after_ms"] for e in ev], 50),
+            "off20_p90": q([e["off20_after_ms"] for e in ev], 90),
+            "false": sum(len(r["false"]) for r in rs),
+            "false_straddle": sum(len(r["false_straddle"]) for r in rs),
+            "freezes": sum(len(r["freezes"]) for r in rs),
+            "confirmed": sum(h == "confirm" for r in rs for _, h in r["freezes"]),
+            "half": sum(r["n_half"] for r in rs),
+            "accepted": sum(r["n_acc"] for r in rs),
+        }
+    return out
+
+
+def _stall_eval(args):
+    case, stall = args
+    out = evaluate_stall_case(case, stall)
+    out.update(name=case["name"], cond=case["cond"], seed=case["seed"], ev=case["ev"])
+    return out
+
+
+def stall_main(argv):
+    """``sim.py --stall OUT.json [--jobs N] [--seeds K]``: today's rule and the stall rule on every
+    stall condition; prints the per-condition table and writes the per-run numbers."""
+    outp = argv[argv.index("--stall") + 1]
+    jobs = int(argv[argv.index("--jobs") + 1]) if "--jobs" in argv else 10
+    seeds = int(argv[argv.index("--seeds") + 1]) if "--seeds" in argv else STALL_SEEDS
+    t0 = time.time()
+    cases = build_stall_cases(jobs, seeds)
+    print(f"{len(cases)} cases built in {time.time() - t0:.0f}s", flush=True)
+    result = {}
+    with Pool(jobs) as pool:
+        for mode, stall in (("today", dsp.TODAY), ("stall", dsp.STALL)):
+            rows = pool.map(_stall_eval, [(c, stall) for c in cases], chunksize=4)
+            result[mode] = {"rows": rows, "summary": summarise_stall(rows)}
+    print_stall_table(result)
+    with open(outp, "w") as fh:
+        json.dump(result, fh, default=float)
+
+
+def print_stall_table(result):
+    """Markdown table of ``{mode: {"summary": summarise_stall(...)}}``."""
+    fmt = lambda v: "-" if v is None else f"{v:.0f}"
+    print(
+        "| condition | rule | runs | sync-lost | re-align p50/p90 ms (never/events) | ahead in gap "
+        "p50/p90 ms | max err after p50/max ms | >20 ms after p50/p90 ms | false (outside gap / "
+        "straddling) | freezes (confirmed) | half accepts |"
+    )
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for cond in STALL_CONDS:
+        for mode, res in result.items():
+            s = res["summary"].get(cond)
+            if not s:
+                continue
+            print(
+                f"| {cond} | {mode} | {s['runs']} | {s['lost']} | {fmt(s['realign_p50'])}/"
+                f"{fmt(s['realign_p90'])} ({s['never']}/{s['events']}) | {fmt(s['ahead_p50'])}/"
+                f"{fmt(s['ahead_p90'])} | {fmt(s['max_after_p50'])}/{fmt(s['max_after_max'])} | "
+                f"{fmt(s['off20_p50'])}/{fmt(s['off20_p90'])} | {s['false']} / {s['false_straddle']} | "
+                f"{s['freezes']} ({s['confirmed']}) | {s['half']} |"
+            )
+
+
 def main():
+    if "--stall" in sys.argv:
+        return stall_main(sys.argv[1:])
     outp = sys.argv[1]
     argv = sys.argv[1:]
     quick = "--quick" in argv
