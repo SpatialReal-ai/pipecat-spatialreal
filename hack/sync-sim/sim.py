@@ -17,6 +17,14 @@ usage: python3 sim.py OUT.pkl [--quick] [--captures DIR [--runs A,B,...]] [--job
   sharpness, half-window tolerance in seconds) to replay; the per-tick features of every run are
   stored for ``thrsearch.py``.
 * ``SYNC_SIM_WIN`` (seconds, default 1.0) sets the correlation window.
+* ``--stall OUT.json``: the stall rule (``dsp.TurnTracker``) against today's rule in the page's tick
+  loop (``replay_capture.replay_turn_tracked``), one synthetic turn per run, on the real bot turns
+  of the committed fixtures under clean, stall-80/150/250/500/1200 (receiver-side packet stall:
+  concealment fade then zeros, the timeline shifts), zeros-150/250/500 (sender-side zeros),
+  loss-200/400 (burst loss, timeline unchanged), ins and del (``build_stall_x``); 3 seeds each,
+  every draw seeded by the source's and the condition's positions. Exact truth per received
+  frame; prints the per-condition table (``print_stall_table``). ``thrsearch_stall.py`` searches
+  the rule's constants on the same runs.
 
 The lag convention here is relative to the turn message's arrival (lag 0 = the reference starts
 when the message arrives, i.e. ``PRE`` into the track); ``dsp.align`` uses the received

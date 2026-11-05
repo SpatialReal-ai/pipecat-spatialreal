@@ -1,6 +1,6 @@
 """The normative definition of the envelope fingerprint and of the alignment rule.
 
-Everything an implementation must agree on is in this file; the web SDK ports it verbatim. Two
+Everything an implementation must agree on is in this file; the web SDK ports it verbatim. The
 public entry points:
 
 * :func:`envelope_bytes` -- the 8-bit log-RMS envelope of the audio the plugin releases. The
@@ -8,6 +8,10 @@ public entry points:
   ``tests/test_fingerprint_oracle.py`` asserts it.
 * :func:`align` -- one alignment tick: where in the received envelope does the turn's reference
   envelope sit, and may we trust it?
+* :class:`TurnTracker` -- the stall rule (freeze, confirm, newer-half re-lock, the loss clock) as
+  one turn's state on top of :func:`align`, and :func:`chained_prior` (rule 5). Its fixed terms
+  are :class:`StallParams` (the defaults, ``STALL``, are ``thrsearch_stall.py``'s choice);
+  ``README.md`` ("The stall rule") states them.
 
 The building blocks the simulation (``sim.py``) shares with :func:`align` are public too, so the
 simulation and the rule cannot drift apart.
@@ -437,8 +441,8 @@ def align(received_env, reference_env, prior_index, params=DEFAULTS):
 # The per-turn state on top of :func:`align`. The page and the SDK run the rule as a tick loop
 # (cadence, priors, splice: ``replay_capture.replay_turn_tracked``); what happens between ticks and
 # what a tick may accept besides the full window is defined here, so the replay, the simulation and
-# the SDK's port share one definition. See the module docstring of this section's fixed terms in
-# ``README.md`` ("The stall rule").
+# the SDK's port share one definition. The fixed terms: :class:`StallParams` and ``README.md``
+# ("The stall rule").
 
 
 @dataclass(frozen=True)
@@ -446,9 +450,9 @@ class StallParams:
     """The stall rule's fixed terms (lengths in ms). ``TODAY`` switches every part off: the tracker
     is then today's rule plus the SDK's 2 s loss clock.
 
-    * ``freeze``: after the turn's first lock, a received frame at or below ``silent_db`` while the
-      turn's own reference at the current pointer is above ``ref_speech_db`` starts a run; once
-      the run is ``freeze_after_ms`` long the reference pointer stops (retroactively over the run)
+    * ``freeze``: after the turn's first lock, once ``freeze_after_ms`` of consecutive received
+      frames are each at or below ``silent_db`` while the turn's own reference at the (advancing)
+      pointer is above ``ref_speech_db``, the reference pointer stops (retroactively over the run)
       and stays stopped while the received stays silent, for at most ``freeze_max_ms``. While a
       confirm is pending (below) "silent" means digital silence, at or below
       ``confirming_silent_db``: after a wrong freeze (a burst loss, where the timeline did not
@@ -489,16 +493,16 @@ class StallParams:
     chain_prior: bool = True
     confirming_silent_db: float = -95.0
     carry_bracket: bool = True
-    silent_db: float = -70.0
-    ref_speech_db: float = -40.0
-    freeze_after_ms: float = 40.0
+    silent_db: float = -60.0
+    ref_speech_db: float = -50.0
+    freeze_after_ms: float = 20.0
     freeze_max_ms: float = 2000.0
     match_back_ms: float = 400.0
     match_frames: int = 3
     match_min_db: float = -60.0
     match_tol_db: float = 4.0
-    confirm_from_ms: float = 300.0
-    confirm_until_ms: float = 800.0
+    confirm_from_ms: float = 250.0
+    confirm_until_ms: float = 1200.0
     confirm_every_ms: float = 50.0
     confirm_back_ms: float = 150.0
     confirm_fwd_ms: float = 20.0
@@ -731,21 +735,25 @@ class TurnTracker:
         level = s.silent_db if self._pending is None else min(s.silent_db, s.confirming_silent_db)
         silent = env[j] <= level
         if silent:
-            started = True
-            if self._run == 0:
+            if self._run < self.n_min:
+                # the run that triggers a freeze: every frame silent where the reference at the
+                # pointer (still advancing) has speech
                 k = round(j - self.l)
-                started = 0 <= k < len(self.own_db) and self.own_db[k] > s.ref_speech_db
-                self._run_k = k
-            if started:
+                if 0 <= k < len(self.own_db) and self.own_db[k] > s.ref_speech_db:
+                    if self._run == 0:
+                        self._run_k = k
+                    self._run += 1
+                    if self._run == self.n_min:
+                        self._start(env, j)
+                else:
+                    self._run = 0
+            else:
                 self._run += 1
-                if self._run == self.n_min:
-                    self._start(env, j)
-                elif self._run > self.n_min and self._episode is not None:
-                    ep = self._episode
-                    if ep["resume"] is None and ep["frames"] < self.n_max:
-                        self.l += 1
-                        ep["frames"] += 1
-                        self._frozen_since_tick += 1
+                ep = self._episode
+                if ep is not None and ep["resume"] is None and ep["frames"] < self.n_max:
+                    self.l += 1
+                    ep["frames"] += 1
+                    self._frozen_since_tick += 1
         else:
             if self._run >= self.n_min and self._episode is not None:
                 self._resume(j)

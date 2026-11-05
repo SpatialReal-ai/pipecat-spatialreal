@@ -1,0 +1,387 @@
+captures: ../../tests/fixtures/sync/daily-clean, ../../tests/fixtures/sync/livekit-clean, ../../tests/fixtures/sync/daily-splice, ../../tests/fixtures/sync/daily-splice-failures, <scratchpad>/verify/run1/chrome, <scratchpad>/verify/run2/chrome, <scratchpad>/verify/run3/chrome, <scratchpad>/verify/run3b/chrome
+cost per run / turn: ms > 20 ms off after the first lock + 2000 ms if sync-lost
+
+## Reference points and ablations
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| today | 1538 | 1777 | 90 | 0 | 158 | 235 | 3 | 1069 | 835/1071 (14) | 0/0 | 19.9 | yes |
+| spike constants | 700 | 675 | 510 | 0 | 103 | 7 | 2 | 660 | 635/879 (12) | 0/0 | 19.9 | yes |
+| no freeze | 1401 | 1620 | 51 | 0 | 147 | 221 | 3 | 832 | 635/884 (14) | 1/0 | 793.1 | NO |
+| no confirm | 879 | 822 | 920 | 0 | 106 | 12 | 2 | 821 | 705/879 (12) | 0/0 | 19.9 | yes |
+| no newer half | 802 | 785 | 567 | 0 | 111 | 12 | 2 | 699 | 788/998 (13) | 0/0 | 19.9 | yes |
+| loss clock counts frozen time | 794 | 754 | 626 | 0 | 117 | 47 | 3 | 660 | 635/879 (12) | 0/0 | 19.9 | yes |
+| no chained prior | 700 | 675 | 510 | 0 | 103 | 7 | 2 | 660 | 635/879 (12) | 0/0 | 19.9 | yes |
+| no ratio in confirm | 690 | 666 | 490 | 0 | 103 | 7 | 2 | 643 | 635/879 (12) | 3/0 | 796.6 | NO |
+| freeze during a confirm drops its bracket | 709 | 677 | 558 | 0 | 103 | 8 | 2 | 666 | 635/879 (12) | 0/0 | 19.9 | yes |
+| freeze during a confirm on any silence | 700 | 674 | 515 | 0 | 103 | 7 | 2 | 660 | 635/879 (12) | 0/0 | 19.9 | yes |
+| no freeze during a confirm | 742 | 679 | 486 | 0 | 145 | 8 | 3 | 660 | 600/848 (13) | 0/0 | 19.9 | yes |
+| as the spike (no carry, freeze any time) | 712 | 676 | 583 | 0 | 103 | 8 | 2 | 671 | 635/879 (12) | 0/0 | 19.9 | yes |
+
+## Coordinate descent, round 1 (others at the current best)
+
+
+### freeze_after_ms (current 40.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| freeze_after_ms=20 | 689 | 655 | 535 | 0 | 102 | 6 | 2 | 647 | 635/879 (12) | 0/0 | 19.9 | yes |
+| freeze_after_ms=30 | 696 | 668 | 518 | 0 | 102 | 7 | 2 | 652 | 635/879 (12) | 0/0 | 19.9 | yes |
+| freeze_after_ms=40 | 700 | 675 | 510 | 0 | 103 | 7 | 2 | 660 | 635/879 (12) | 0/0 | 19.9 | yes |
+| freeze_after_ms=60 | 715 | 697 | 495 | 0 | 103 | 10 | 2 | 682 | 635/879 (12) | 0/0 | 19.9 | yes |
+| freeze_after_ms=80 | 734 | 731 | 447 | 0 | 103 | 15 | 2 | 699 | 635/879 (12) | 0/0 | 19.9 | yes |
+| freeze_after_ms=120 | 764 | 789 | 330 | 0 | 106 | 26 | 2 | 732 | 705/879 (12) | 0/0 | 19.9 | yes |
+
+-> freeze_after_ms = 20.0 (J 689)
+
+### silent_db (current -70.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| silent_db=-60.0 | 615 | 571 | 526 | 0 | 94 | 4 | 2 | 590 | 540/718 (10) | 0/0 | 19.9 | yes |
+| silent_db=-65.0 | 663 | 627 | 529 | 0 | 100 | 5 | 2 | 628 | 565/879 (12) | 0/0 | 19.9 | yes |
+| silent_db=-70.0 | 689 | 655 | 535 | 0 | 102 | 6 | 2 | 647 | 635/879 (12) | 0/0 | 19.9 | yes |
+| silent_db=-80.0 | 725 | 700 | 523 | 0 | 106 | 7 | 2 | 698 | 705/879 (12) | 0/0 | 19.9 | yes |
+| silent_db=-90.0 | 743 | 720 | 538 | 0 | 106 | 7 | 2 | 710 | 705/879 (12) | 0/0 | 19.9 | yes |
+
+-> silent_db = -60.0 (J 615)
+
+### ref_speech_db (current -40.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ref_speech_db=-30.0 | 645 | 614 | 510 | 0 | 94 | 5 | 2 | 639 | 540/718 (10) | 0/0 | 19.9 | yes |
+| ref_speech_db=-35.0 | 631 | 592 | 529 | 0 | 94 | 5 | 2 | 607 | 540/718 (10) | 0/0 | 19.9 | yes |
+| ref_speech_db=-40.0 | 615 | 571 | 526 | 0 | 94 | 4 | 2 | 590 | 540/718 (10) | 0/0 | 19.9 | yes |
+| ref_speech_db=-45.0 | 604 | 556 | 529 | 0 | 94 | 3 | 2 | 572 | 540/718 (10) | 0/0 | 19.9 | yes |
+| ref_speech_db=-50.0 | 592 | 542 | 540 | 0 | 92 | 3 | 2 | 569 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+-> ref_speech_db = -50.0 (J 592)
+
+### freeze_max_ms (current 2000.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| freeze_max_ms=500 | 699 | 679 | 553 | 0 | 92 | 38 | 2 | 532 | 540/718 (10) | 1/0 | 813.3 | NO |
+| freeze_max_ms=1000 | 600 | 553 | 540 | 0 | 92 | 4 | 2 | 572 | 540/718 (10) | 0/0 | 19.9 | yes |
+| freeze_max_ms=2000 | 592 | 542 | 540 | 0 | 92 | 3 | 2 | 569 | 540/718 (10) | 0/0 | 19.9 | yes |
+| freeze_max_ms=3000 | 592 | 542 | 540 | 0 | 92 | 3 | 2 | 569 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+### confirm_from_ms (current 300.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_from_ms=150 | 572 | 531 | 491 | 0 | 89 | 4 | 2 | 548 | 540/718 (10) | 4/0 | 983.9 | NO |
+| confirm_from_ms=200 | 577 | 534 | 498 | 0 | 90 | 4 | 2 | 554 | 540/718 (10) | 2/0 | 983.7 | NO |
+| confirm_from_ms=250 | 582 | 534 | 521 | 0 | 91 | 3 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_from_ms=300 | 592 | 542 | 540 | 0 | 92 | 3 | 2 | 569 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_from_ms=400 | 617 | 562 | 587 | 0 | 94 | 3 | 2 | 594 | 565/786 (12) | 0/0 | 19.9 | yes |
+| confirm_from_ms=500 | 644 | 584 | 637 | 0 | 96 | 3 | 2 | 602 | 565/786 (12) | 0/0 | 19.9 | yes |
+
+-> confirm_from_ms = 250.0 (J 582)
+
+### confirm_until_ms (current 800.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_until_ms=600 | 599 | 540 | 593 | 0 | 92 | 4 | 2 | 571 | 540/842 (10) | 0/0 | 19.9 | yes |
+| confirm_until_ms=800 | 582 | 534 | 521 | 0 | 91 | 3 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_until_ms=1000 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_until_ms=1200 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+-> confirm_until_ms = 1200.0 (J 573)
+
+### confirm_back_ms (current 150.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_back_ms=50 | 582 | 542 | 484 | 0 | 91 | 4 | 2 | 556 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_back_ms=100 | 578 | 536 | 484 | 0 | 91 | 3 | 2 | 556 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_back_ms=150 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_back_ms=200 | 574 | 531 | 484 | 0 | 91 | 2 | 2 | 569 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_back_ms=300 | 579 | 537 | 485 | 0 | 91 | 2 | 2 | 591 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+### confirm_fwd_ms (current 20.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_fwd_ms=10 | 596 | 560 | 484 | 0 | 91 | 2 | 2 | 604 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_fwd_ms=20 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_fwd_ms=40 | 564 | 519 | 484 | 0 | 91 | 2 | 2 | 537 | 540/718 (10) | 2/0 | 28.0 | NO |
+| confirm_fwd_ms=60 | 563 | 517 | 484 | 0 | 91 | 2 | 2 | 535 | 540/718 (10) | 2/0 | 28.0 | NO |
+| confirm_fwd_ms=100 | 563 | 516 | 492 | 0 | 91 | 2 | 2 | 538 | 540/718 (10) | 2/0 | 28.0 | NO |
+
+### confirm_min_peak (current 0.95)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_min_peak=0.9 | 520 | 479 | 412 | 0 | 89 | 2 | 2 | 435 | 350/706 (10) | 5/0 | 836.6 | NO |
+| confirm_min_peak=0.93 | 547 | 505 | 445 | 0 | 90 | 2 | 2 | 506 | 500/706 (10) | 1/0 | 836.6 | NO |
+| confirm_min_peak=0.95 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_peak=0.97 | 614 | 566 | 566 | 0 | 92 | 3 | 2 | 618 | 540/842 (10) | 0/0 | 19.9 | yes |
+
+(reported only: the confirm keeps align's thresholds)
+
+### confirm_min_ratio (current 1.2)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_min_ratio=1.0 | 553 | 513 | 446 | 0 | 90 | 2 | 2 | 500 | 540/718 (10) | 2/0 | 796.6 | NO |
+| confirm_min_ratio=1.1 | 563 | 523 | 466 | 0 | 90 | 2 | 2 | 525 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_ratio=1.2 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_ratio=1.3 | 581 | 537 | 491 | 0 | 92 | 2 | 2 | 571 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_ratio=1.5 | 594 | 548 | 512 | 0 | 94 | 2 | 2 | 597 | 565/750 (10) | 0/0 | 19.9 | yes |
+
+(reported only: the confirm keeps align's thresholds)
+
+### confirm_min_sharpness (current 0.03)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_min_sharpness=0.01 | 559 | 515 | 472 | 0 | 91 | 2 | 2 | 527 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_sharpness=0.03 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_sharpness=0.05 | 582 | 540 | 489 | 0 | 91 | 2 | 2 | 585 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+(reported only: the confirm keeps align's thresholds)
+
+### half_search_ms (current 300.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| half_search_ms=150 | 569 | 523 | 493 | 0 | 91 | 0 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_search_ms=300 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+### half_agree_ms (current 10.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| half_agree_ms=5 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_agree_ms=10 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_agree_ms=15 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_agree_ms=20 | 571 | 530 | 484 | 0 | 89 | 2 | 2 | 563 | 340/718 (10) | 0/0 | 19.9 | yes |
+
+### half_silence_ms (current 40.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| half_silence_ms=20 | 573 | 531 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_silence_ms=40 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_silence_ms=80 | 572 | 528 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_silence_ms=100000 | 568 | 527 | 481 | 0 | 89 | 2 | 2 | 560 | 365/638 (10) | 3/1 | 122.5 | NO |
+
+### match_tol_db (current 4.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| match_tol_db=3.0 | 570 | 526 | 484 | 0 | 91 | 2 | 2 | 550 | 540/718 (10) | 0/0 | 19.9 | yes |
+| match_tol_db=4.0 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| match_tol_db=6.0 | 582 | 542 | 484 | 0 | 91 | 3 | 2 | 572 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+### confirming_silent_db (current -95.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirming_silent_db=-1000.0 | 584 | 543 | 486 | 0 | 91 | 6 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirming_silent_db=-95.0 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirming_silent_db=-80.0 | 574 | 529 | 491 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirming_silent_db=0.0 | 573 | 520 | 535 | 0 | 91 | 2 | 2 | 544 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+## Coordinate descent, round 2 (others at the current best)
+
+
+### freeze_after_ms (current 20.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| freeze_after_ms=20 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| freeze_after_ms=30 | 583 | 540 | 481 | 0 | 94 | 2 | 2 | 571 | 540/718 (10) | 0/0 | 19.9 | yes |
+| freeze_after_ms=40 | 588 | 544 | 470 | 0 | 97 | 2 | 2 | 582 | 540/718 (10) | 0/0 | 19.9 | yes |
+| freeze_after_ms=60 | 599 | 560 | 453 | 0 | 99 | 2 | 2 | 606 | 540/718 (10) | 0/0 | 19.9 | yes |
+| freeze_after_ms=80 | 623 | 595 | 435 | 0 | 99 | 3 | 2 | 620 | 565/786 (12) | 0/0 | 19.9 | yes |
+| freeze_after_ms=120 | 640 | 636 | 338 | 0 | 99 | 9 | 2 | 665 | 565/786 (12) | 0/0 | 19.9 | yes |
+
+### silent_db (current -60.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| silent_db=-60.0 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| silent_db=-65.0 | 630 | 591 | 489 | 0 | 100 | 3 | 2 | 600 | 565/879 (12) | 0/0 | 19.9 | yes |
+| silent_db=-70.0 | 657 | 621 | 496 | 0 | 102 | 3 | 2 | 635 | 635/879 (12) | 0/0 | 19.9 | yes |
+| silent_db=-80.0 | 693 | 666 | 483 | 0 | 106 | 4 | 2 | 682 | 705/879 (12) | 0/0 | 19.9 | yes |
+| silent_db=-90.0 | 716 | 692 | 502 | 0 | 106 | 5 | 2 | 701 | 705/879 (12) | 0/0 | 19.9 | yes |
+
+### ref_speech_db (current -50.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ref_speech_db=-30.0 | 624 | 599 | 454 | 0 | 93 | 4 | 2 | 637 | 540/718 (10) | 0/0 | 19.9 | yes |
+| ref_speech_db=-35.0 | 613 | 578 | 486 | 0 | 93 | 5 | 2 | 606 | 540/718 (10) | 0/0 | 19.9 | yes |
+| ref_speech_db=-40.0 | 595 | 558 | 470 | 0 | 93 | 3 | 2 | 582 | 540/718 (10) | 0/0 | 19.9 | yes |
+| ref_speech_db=-45.0 | 584 | 544 | 473 | 0 | 93 | 2 | 2 | 565 | 540/718 (10) | 0/0 | 19.9 | yes |
+| ref_speech_db=-50.0 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+### freeze_max_ms (current 2000.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| freeze_max_ms=500 | 634 | 607 | 497 | 0 | 91 | 22 | 2 | 538 | 540/718 (10) | 1/0 | 813.3 | NO |
+| freeze_max_ms=1000 | 579 | 538 | 484 | 0 | 91 | 2 | 2 | 566 | 540/718 (10) | 0/0 | 19.9 | yes |
+| freeze_max_ms=2000 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| freeze_max_ms=3000 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+### confirm_from_ms (current 250.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_from_ms=150 | 563 | 526 | 454 | 0 | 89 | 3 | 2 | 548 | 540/718 (10) | 4/0 | 983.9 | NO |
+| confirm_from_ms=200 | 567 | 529 | 461 | 0 | 90 | 3 | 2 | 554 | 540/718 (10) | 2/0 | 983.7 | NO |
+| confirm_from_ms=250 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_from_ms=300 | 583 | 538 | 504 | 0 | 92 | 2 | 2 | 569 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_from_ms=400 | 608 | 557 | 551 | 0 | 94 | 2 | 2 | 594 | 565/786 (12) | 0/0 | 19.9 | yes |
+| confirm_from_ms=500 | 635 | 580 | 602 | 0 | 96 | 2 | 2 | 602 | 565/786 (12) | 0/0 | 19.9 | yes |
+
+### confirm_until_ms (current 1200.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_until_ms=600 | 599 | 540 | 593 | 0 | 92 | 4 | 2 | 571 | 540/842 (10) | 0/0 | 19.9 | yes |
+| confirm_until_ms=800 | 582 | 534 | 521 | 0 | 91 | 3 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_until_ms=1000 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_until_ms=1200 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+### confirm_back_ms (current 150.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_back_ms=50 | 582 | 542 | 484 | 0 | 91 | 4 | 2 | 556 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_back_ms=100 | 578 | 536 | 484 | 0 | 91 | 3 | 2 | 556 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_back_ms=150 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_back_ms=200 | 574 | 531 | 484 | 0 | 91 | 2 | 2 | 569 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_back_ms=300 | 579 | 537 | 485 | 0 | 91 | 2 | 2 | 591 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+### confirm_fwd_ms (current 20.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_fwd_ms=10 | 596 | 560 | 484 | 0 | 91 | 2 | 2 | 604 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_fwd_ms=20 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_fwd_ms=40 | 564 | 519 | 484 | 0 | 91 | 2 | 2 | 537 | 540/718 (10) | 2/0 | 28.0 | NO |
+| confirm_fwd_ms=60 | 563 | 517 | 484 | 0 | 91 | 2 | 2 | 535 | 540/718 (10) | 2/0 | 28.0 | NO |
+| confirm_fwd_ms=100 | 563 | 516 | 492 | 0 | 91 | 2 | 2 | 538 | 540/718 (10) | 2/0 | 28.0 | NO |
+
+### confirm_min_peak (current 0.95)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_min_peak=0.9 | 520 | 479 | 412 | 0 | 89 | 2 | 2 | 435 | 350/706 (10) | 5/0 | 836.6 | NO |
+| confirm_min_peak=0.93 | 547 | 505 | 445 | 0 | 90 | 2 | 2 | 506 | 500/706 (10) | 1/0 | 836.6 | NO |
+| confirm_min_peak=0.95 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_peak=0.97 | 614 | 566 | 566 | 0 | 92 | 3 | 2 | 618 | 540/842 (10) | 0/0 | 19.9 | yes |
+
+(reported only: the confirm keeps align's thresholds)
+
+### confirm_min_ratio (current 1.2)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_min_ratio=1.0 | 553 | 513 | 446 | 0 | 90 | 2 | 2 | 500 | 540/718 (10) | 2/0 | 796.6 | NO |
+| confirm_min_ratio=1.1 | 563 | 523 | 466 | 0 | 90 | 2 | 2 | 525 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_ratio=1.2 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_ratio=1.3 | 581 | 537 | 491 | 0 | 92 | 2 | 2 | 571 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_ratio=1.5 | 594 | 548 | 512 | 0 | 94 | 2 | 2 | 597 | 565/750 (10) | 0/0 | 19.9 | yes |
+
+(reported only: the confirm keeps align's thresholds)
+
+### confirm_min_sharpness (current 0.03)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirm_min_sharpness=0.01 | 559 | 515 | 472 | 0 | 91 | 2 | 2 | 527 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_sharpness=0.03 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirm_min_sharpness=0.05 | 582 | 540 | 489 | 0 | 91 | 2 | 2 | 585 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+(reported only: the confirm keeps align's thresholds)
+
+### half_search_ms (current 300.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| half_search_ms=150 | 569 | 523 | 493 | 0 | 91 | 0 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_search_ms=300 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+### half_agree_ms (current 10.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| half_agree_ms=5 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_agree_ms=10 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_agree_ms=15 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_agree_ms=20 | 571 | 530 | 484 | 0 | 89 | 2 | 2 | 563 | 340/718 (10) | 0/0 | 19.9 | yes |
+
+### half_silence_ms (current 40.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| half_silence_ms=20 | 573 | 531 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_silence_ms=40 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_silence_ms=80 | 572 | 528 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| half_silence_ms=100000 | 568 | 527 | 481 | 0 | 89 | 2 | 2 | 560 | 365/638 (10) | 3/1 | 122.5 | NO |
+
+### match_tol_db (current 4.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| match_tol_db=3.0 | 570 | 526 | 484 | 0 | 91 | 2 | 2 | 550 | 540/718 (10) | 0/0 | 19.9 | yes |
+| match_tol_db=4.0 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| match_tol_db=6.0 | 582 | 542 | 484 | 0 | 91 | 3 | 2 | 572 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+### confirming_silent_db (current -95.0)
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| confirming_silent_db=-1000.0 | 584 | 543 | 486 | 0 | 91 | 6 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirming_silent_db=-95.0 | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirming_silent_db=-80.0 | 574 | 529 | 491 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+| confirming_silent_db=0.0 | 573 | 520 | 535 | 0 | 91 | 2 | 2 | 544 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+## Chosen
+
+| candidate | J ms | sim shift ms | sim loss ms | sim clean ms | real ms | sim runs lost | real turns lost | stall/zeros re-align p50 ms | real gaps re-align p50/p90 ms (never) | false outside/across gaps | worst accept error outside gaps ms | feasible |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| today | 1538 | 1777 | 90 | 0 | 158 | 235 | 3 | 1069 | 835/1071 (14) | 0/0 | 19.9 | yes |
+| spike constants | 700 | 675 | 510 | 0 | 103 | 7 | 2 | 660 | 635/879 (12) | 0/0 | 19.9 | yes |
+| chosen | 573 | 530 | 484 | 0 | 91 | 2 | 2 | 563 | 540/718 (10) | 0/0 | 19.9 | yes |
+
+changed from the spike: {'freeze_after_ms': (40.0, 20.0), 'silent_db': (-70.0, -60.0), 'ref_speech_db': (-40.0, -50.0), 'confirm_from_ms': (300.0, 250.0), 'confirm_until_ms': (800.0, 1200.0)}
+dsp.STALL (the defaults) is the chosen point: True
+
+### Per condition, chosen (simulation)
+
+| condition | rule | runs | sync-lost | re-align p50/p90 ms (never/events) | ahead in gap p50/p90 ms | max err after p50/max ms | >20 ms after p50/p90 ms | false (outside gap / straddling) | freezes (confirmed) | half accepts |
+|---|---|---|---|---|---|---|---|---|---|---|
+| clean | chosen | 78 | 0 | -/- (0/0) | -/- | -/- | -/- | 0 / 0 | 0 (0) | 3 |
+| clean | today | 78 | 0 | -/- (0/0) | -/- | -/- | -/- | 0 / 0 | 0 (0) | 0 |
+| stall-80 | chosen | 78 | 1 | 528/875 (0/64) | 95/119 | 54/83 | 460/874 | 0 / 0 | 64 (46) | 68 |
+| stall-80 | today | 78 | 3 | 1045/1134 (2/64) | 119/140 | 80/83 | 1048/1152 | 0 / 0 | 0 (0) | 0 |
+| stall-150 | chosen | 78 | 0 | 545/904 (0/63) | 105/173 | 65/160 | 495/904 | 0 / 0 | 81 (54) | 73 |
+| stall-150 | today | 78 | 4 | 1095/1180 (2/63) | 199/220 | 160/161 | 1095/1184 | 0 / 0 | 0 (0) | 0 |
+| stall-250 | chosen | 78 | 0 | 640/855 (0/61) | 99/125 | 50/241 | 595/845 | 0 / 0 | 82 (55) | 72 |
+| stall-250 | today | 78 | 2 | 1070/1182 (1/61) | 280/300 | 240/241 | 1070/1195 | 0 / 0 | 0 (0) | 0 |
+| stall-500 | chosen | 78 | 0 | 542/950 (0/60) | 105/176 | 72/435 | 532/950 | 0 / 0 | 86 (63) | 70 |
+| stall-500 | today | 78 | 70 | -/- (60/60) | 520/560 | 500/501 | 1745/2893 | 0 / 0 | 0 (0) | 0 |
+| stall-1200 | chosen | 78 | 0 | 715/931 (0/63) | 105/205 | 70/476 | 690/892 | 0 / 0 | 85 (45) | 73 |
+| stall-1200 | today | 78 | 72 | -/- (63/63) | 1223/1260 | 1200/1203 | 1270/2759 | 0 / 0 | 0 (0) | 0 |
+| zeros-150 | chosen | 78 | 0 | 492/808 (0/60) | 40/126 | 35/151 | 462/808 | 0 / 0 | 83 (66) | 78 |
+| zeros-150 | today | 78 | 1 | 1055/1161 (0/60) | 150/151 | 150/152 | 1055/1161 | 0 / 0 | 0 (0) | 0 |
+| zeros-250 | chosen | 78 | 0 | 505/799 (0/59) | 40/55 | 35/251 | 490/799 | 0 / 0 | 80 (68) | 71 |
+| zeros-250 | today | 78 | 3 | 1080/1182 (2/59) | 250/250 | 250/253 | 1080/1235 | 0 / 0 | 0 (0) | 0 |
+| zeros-500 | chosen | 78 | 0 | 535/860 (0/61) | 40/109 | 35/421 | 500/835 | 0 / 0 | 82 (68) | 71 |
+| zeros-500 | today | 78 | 72 | -/- (61/61) | 500/500 | 500/502 | 1635/2950 | 0 / 0 | 0 (0) | 0 |
+| loss-200 | chosen | 78 | 0 | 440/813 (3/50) | 95/184 | 120/590 | 468/868 | 0 / 0 | 81 (56) | 60 |
+| loss-200 | today | 78 | 2 | 0/0 (0/50) | 200/200 | 1/10 | 0/0 | 0 / 0 | 0 (0) | 0 |
+| loss-400 | chosen | 78 | 0 | 538/740 (3/35) | 105/245 | 320/686 | 545/1118 | 0 / 0 | 94 (67) | 39 |
+| loss-400 | today | 78 | 5 | 0/0 (0/35) | 400/400 | 1/3 | 0/0 | 0 / 0 | 0 (0) | 0 |
+| ins | chosen | 78 | 1 | 738/914 (1/65) | 80/100 | 80/121 | 710/903 | 0 / 0 | 53 (29) | 67 |
+| ins | today | 78 | 1 | 1038/1148 (1/65) | 80/102 | 80/121 | 1040/1156 | 0 / 0 | 0 (0) | 0 |
+| del | chosen | 78 | 0 | 792/1048 (0/50) | 0/0 | 85/410 | 792/1048 | 0 / 0 | 26 (9) | 62 |
+| del | today | 78 | 0 | 985/1130 (0/50) | 0/0 | 78/119 | 985/1130 | 0 / 0 | 0 (0) | 0 |

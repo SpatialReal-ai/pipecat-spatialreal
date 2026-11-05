@@ -1,6 +1,7 @@
 """Replay the alignment rule on a paired capture and measure it against the received content.
 
 usage: python replay_capture.py CAPTURE_DIR [--causal] [--r72-prior] [--thr C,R,S,TOL_MS] [--features OUT.pkl] [--json OUT.json]
+                                [--no-stall-rule] [--gaps]
 
 A paired capture is what the probe page saves (``examples/probe/README.md``, "The capture"):
 ``capture.wav`` (the bot's track as the browser decoded it), ``capture.sync.json`` (per turn the
@@ -82,6 +83,16 @@ What it does, per turn:
   pause before it, with the shift of its phrase (150 ms split) against the phrase before. An onset
   that is late while its phrase did not move is the onset rule's error on the waveform, not a
   delay change.
+
+**The stall rule** (``dsp.TurnTracker``, README "The stall rule") is replayed by default
+(:func:`replay_turn_tracked`, :func:`replay_all_tracked`); ``--no-stall-rule`` replays today's rule
+(``dsp.TODAY``, the page's tick for tick). Per turn the output lists the freezes (where in the
+turn's audio the pointer stopped, when, for how long, how the episode closed and after how much
+audio a confirm accepted), the newer-half accepts, sync-lost and the loss clock at the last tick.
+``--gaps`` scores the rule and today's on the dense local truth (300 ms reference windows every
+25 ms, +/- 2 s, :func:`dense_track`): per gap the shift, the re-align time, how far ahead the face
+ran during it and the largest error after it, and the accepts more than 20 ms off outside or
+across a gap.
 
 ``--thr`` replays the rule with other thresholds (peak, ratio, sharpness, half-window tolerance in
 ms) for a proposal; the design's values stay the default and ``dsp.py`` is not changed. The output
