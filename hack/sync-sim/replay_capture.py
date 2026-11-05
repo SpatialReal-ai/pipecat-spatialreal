@@ -40,7 +40,9 @@ What it does, per turn:
   mostly speech (half its frames over -45 dBFS) is aligned on its own against the received envelope
   at every 5 ms lag over +/- 150 ms around the whole-turn alignment, parabolic peak, kept at peak
   >= 0.9. A tick's truth is the overlap-weighted position of the windows whose received span
-  overlaps its 1 s window. A tick that no window overlaps (only seen on a turn's last syllable after
+  overlaps its 1 s window. A turn whose accepted positions jump by more than 100 ms (a re-align after
+  a stall) has its windows aligned around each segment's position as well
+  (:func:`segmented_content_windows`), so the windows on both sides of the stall are found. A tick that no window overlaps (only seen on a turn's last syllable after
   a step, where the 400 ms windows straddle the step) is scored against its own 1 s window aligned
   on the whole reference over +/- 600 ms (:func:`own_window_truth`), and counted (``fallback``). A
   false lock is an accepted tick more than 20 ms off this truth. The prior's truth is the turn's
@@ -135,6 +137,8 @@ SPEECH_TURN_MS = 300  # a turn counts for the first-lock criteria when this much
 # the whole-turn alignment at every 5 ms lag with a parabolic peak, kept at peak >= 0.9.
 CONTENT_WIN_MS, CONTENT_STEP_MS, CONTENT_SEARCH_MS = 400, 50, 150
 CONTENT_SPEECH_SHARE, CONTENT_MIN_PEAK = 0.5, 0.9
+# A jump of the accepted position by more than this splits a turn for the content windows.
+REALIGN_MS = 100.0
 
 
 # ---------------------------------------------------------------- inputs
@@ -487,7 +491,9 @@ def replay_turn_tracked(
             prior_l, _ = dsp.chained_prior(
                 chain_l, None if onset_prior is None else onset_prior / hop, stall, HOP_MS
             )
-            wide_at = prior_l
+            # R76: once the turn widens (10 held ticks), the +/- 600 ms search centres on the
+            # onset prior when there is one, wherever the chain put the turn
+            wide_at = onset_prior / hop if onset_prior is not None else prior_l
         elif onset_prior is not None:
             prior_l = wide_at = onset_prior / hop
         elif gap_prior is not None:
@@ -944,6 +950,38 @@ def content_windows(t, env, hop, l_truth, end):
     return out, own_off
 
 
+def realign_anchors(acc, jump_ms=REALIGN_MS):
+    """The positions of a turn's accepted ticks split where consecutive accepts jump by more than
+    ``jump_ms`` (a re-align after a stall): the last position of each segment."""
+    anchors, prev = [], None
+    for k in acc:
+        if prev is not None and abs(k["l"] - prev) * HOP_MS > jump_ms:
+            anchors.append(prev)
+        prev = k["l"]
+    if prev is not None:
+        anchors.append(prev)
+    return anchors
+
+
+def segmented_content_windows(t, env, hop, l_truth, end, acc):
+    """:func:`content_windows` around the whole-turn alignment and, when the turn re-aligned
+    (accepted positions jumping by more than ``REALIGN_MS``, e.g. after a stall), also around each
+    segment's position; a window found more than once keeps its best peak. Each window is aligned
+    only +/- 150 ms around its anchor, so without this a turn whose audio moved by a stall has no
+    windows (or the wrong ones) on one side of it, and the ticks there are scored against the
+    other side's position."""
+    windows, own_off = content_windows(t, env, hop, l_truth, end)
+    anchors = realign_anchors(acc)
+    if len(anchors) < 2:
+        return windows, own_off
+    best = {s: (s, l, pk) for s, l, pk in windows}
+    for a in anchors:
+        for s, l, pk in content_windows(t, env, hop, a, end)[0]:
+            if s not in best or pk > best[s][2]:
+                best[s] = (s, l, pk)
+    return [best[s] for s in sorted(best)], own_off
+
+
 def content_truth(windows, own_off, count, window):
     """A tick's window-content truth: the overlap-weighted position (received frame of the turn's own
     index 0) of the content windows whose received span overlaps the tick's received window
@@ -1361,8 +1399,8 @@ def main(argv=None):
         window, fallback, prior_err_w, content, join_d = [], [], None, [], None
         prelock_err, r72_err = None, None
         if l_truth is not None:
-            content, own_off = content_windows(
-                t, env, hop, l_truth, received_end_frame(t, hop, len(env))
+            content, own_off = segmented_content_windows(
+                t, env, hop, l_truth, received_end_frame(t, hop, len(env)), acc
             )
             m_win = round(dsp.DEFAULTS.window_ms / HOP_MS)
             for k in acc:
