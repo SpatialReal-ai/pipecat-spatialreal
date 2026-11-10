@@ -150,21 +150,27 @@ async def test_a_request_during_a_turn_starts_with_the_next_quiet_turn(fake):
         proc,
         [
             TTSStartedFrame(),
-            tone_frame(300),
+            tone_frame(600),
             audio_at_driveningress(fake),
             audio_request(),  # the room is busy with this turn: it stays on the track only
             TTSStoppedFrame(),
-            message_pushed(pushed, "turn_end"),
+            # The next turn starts while the first still plays: the client could not leave the
+            # track without cutting the first one off, so this one stays on the track too.
             TTSStartedFrame(),
             tone_frame(300),
             TTSStoppedFrame(),
             message_pushed(pushed, "turn_end", count=2),
+            # Only a turn that starts in quiet begins audio mode.
+            TTSStartedFrame(),
+            tone_frame(300),
+            TTSStoppedFrame(),
+            message_pushed(pushed, "turn_end", count=3),
         ],
     )
-    first, second = turn_ids(down)
-    assert audio_of(down, first) == []
-    assert audio_of(down, second)
-    assert [m["first_turn_id"] for m in messages(down, "audio_mode")] == [second]
+    first, second, third = turn_ids(down)
+    assert audio_of(down, first) == [] and audio_of(down, second) == []
+    assert audio_of(down, third)
+    assert [m["first_turn_id"] for m in messages(down, "audio_mode")] == [third]
 
 
 async def test_every_request_gets_its_own_answer(fake):
