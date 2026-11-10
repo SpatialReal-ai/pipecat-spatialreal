@@ -19,15 +19,14 @@ const FAKES = {
   'https://esm.sh/@pipecat-ai/client-js@': 'client-js.mjs',
   'https://esm.sh/@pipecat-ai/daily-transport@': 'daily-transport.mjs',
   'https://esm.sh/@pipecat-ai/livekit-transport@': 'livekit-transport.mjs',
+  'https://cdn.jsdelivr.net/npm/@spatialreal/web-sdk@': 'spatialreal-web-sdk.mjs',
 }
 const source = script[1].replace(/(\bfrom\s*|\bimport\s*\()'([^']+)'/g, (all, head, specifier) => {
-  if (specifier === './vendor/spatialreal-web-sdk.js') return all // a fake is written at that path
   const fake = Object.entries(FAKES).find(([prefix]) => specifier.startsWith(prefix))
   assert(fake, `the page imports ${specifier}, which has no fake here`)
   return `${head}'./fakes/${fake[1]}'`
 })
 fs.mkdirSync(path.join(DIR, 'fakes'), { recursive: true })
-fs.mkdirSync(path.join(DIR, 'vendor'), { recursive: true })
 fs.writeFileSync(path.join(DIR, 'package.json'), '{"type": "module"}\n')
 fs.writeFileSync(path.join(DIR, 'page.mjs'), source)
 // The fakes record into globalThis.world, the scenario that is running.
@@ -44,7 +43,7 @@ export class PipecatClient {
 `)
 fs.writeFileSync(path.join(DIR, 'fakes', 'daily-transport.mjs'), `export class DailyTransport { constructor() { this.kind = 'daily' } }\n`)
 fs.writeFileSync(path.join(DIR, 'fakes', 'livekit-transport.mjs'), `export class LiveKitTransport { constructor() { this.kind = 'livekit' } }\n`)
-fs.writeFileSync(path.join(DIR, 'vendor', 'spatialreal-web-sdk.js'), `
+fs.writeFileSync(path.join(DIR, 'fakes', 'spatialreal-web-sdk.mjs'), `
 export function createUnlockedAudioContext() { return globalThis.world.audioContext() }
 export class SpatialReal {
   constructor(config) { globalThis.world.configs.push(config) }

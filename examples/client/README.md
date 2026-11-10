@@ -45,21 +45,15 @@ sync. The page creates its audio context inside the click, before any request, b
 browsers unlock audio only there, and closes it when the run ends: the SDK plays through a context
 it is handed but never closes it, and browsers cap how many stay open.
 
-## Get the web SDK's Pipecat session
+## The web SDK
 
-The session kind is on the `feat/pipecat-session` branch of `SpatialReal-ai/web-sdk` and not on npm
-yet. The page imports it from `vendor/spatialreal-web-sdk.js`, which git ignores. With that branch
-checked out in `$WEB_SDK`, from the root of this repository:
+The page imports the SpatialReal web SDK, `@spatialreal/web-sdk` 1.0.0-beta.6 (the first release
+with the Pipecat session), from the jsDelivr CDN, so it needs no build step. In an app, install it
+and import it through your bundler:
 
 ```bash
-mkdir -p examples/client/vendor
-cp -R "$WEB_SDK"/dist/. examples/client/vendor/
-echo "export * from './index.js'" > examples/client/vendor/spatialreal-web-sdk.js
+npm install @spatialreal/web-sdk@^1.0.0-beta.6
 ```
-
-(The SDK's build puts its entry in `index.js`; the last line gives it the name the page imports.)
-Once the SDK is published, install it from npm instead and import `@spatialreal/web-sdk` through
-your bundler.
 
 ## Run it
 
