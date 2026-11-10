@@ -8,7 +8,7 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class AvatarMessage(_message.Message):
-    __slots__ = ("tag", "turn_start", "turn_onsets", "frames", "turn_end", "turn_abort", "state", "turn_envelope")
+    __slots__ = ("tag", "turn_start", "turn_onsets", "frames", "turn_end", "turn_abort", "state", "turn_envelope", "audio", "audio_mode", "turn_audio_only")
     TAG_FIELD_NUMBER: _ClassVar[int]
     TURN_START_FIELD_NUMBER: _ClassVar[int]
     TURN_ONSETS_FIELD_NUMBER: _ClassVar[int]
@@ -17,6 +17,9 @@ class AvatarMessage(_message.Message):
     TURN_ABORT_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
     TURN_ENVELOPE_FIELD_NUMBER: _ClassVar[int]
+    AUDIO_FIELD_NUMBER: _ClassVar[int]
+    AUDIO_MODE_FIELD_NUMBER: _ClassVar[int]
+    TURN_AUDIO_ONLY_FIELD_NUMBER: _ClassVar[int]
     tag: str
     turn_start: TurnStart
     turn_onsets: TurnOnsets
@@ -25,7 +28,10 @@ class AvatarMessage(_message.Message):
     turn_abort: TurnAbort
     state: State
     turn_envelope: TurnEnvelope
-    def __init__(self, tag: _Optional[str] = ..., turn_start: _Optional[_Union[TurnStart, _Mapping]] = ..., turn_onsets: _Optional[_Union[TurnOnsets, _Mapping]] = ..., frames: _Optional[_Union[Frames, _Mapping]] = ..., turn_end: _Optional[_Union[TurnEnd, _Mapping]] = ..., turn_abort: _Optional[_Union[TurnAbort, _Mapping]] = ..., state: _Optional[_Union[State, _Mapping]] = ..., turn_envelope: _Optional[_Union[TurnEnvelope, _Mapping]] = ...) -> None: ...
+    audio: Audio
+    audio_mode: AudioMode
+    turn_audio_only: TurnAudioOnly
+    def __init__(self, tag: _Optional[str] = ..., turn_start: _Optional[_Union[TurnStart, _Mapping]] = ..., turn_onsets: _Optional[_Union[TurnOnsets, _Mapping]] = ..., frames: _Optional[_Union[Frames, _Mapping]] = ..., turn_end: _Optional[_Union[TurnEnd, _Mapping]] = ..., turn_abort: _Optional[_Union[TurnAbort, _Mapping]] = ..., state: _Optional[_Union[State, _Mapping]] = ..., turn_envelope: _Optional[_Union[TurnEnvelope, _Mapping]] = ..., audio: _Optional[_Union[Audio, _Mapping]] = ..., audio_mode: _Optional[_Union[AudioMode, _Mapping]] = ..., turn_audio_only: _Optional[_Union[TurnAudioOnly, _Mapping]] = ...) -> None: ...
 
 class TurnStart(_message.Message):
     __slots__ = ("turn_id", "sample_rate", "fps", "onsets_ms", "prev_turn_id", "prev_turn_pcm_ms", "degraded", "gap_ms")
@@ -116,3 +122,43 @@ class State(_message.Message):
     status: State.Status
     reason: str
     def __init__(self, status: _Optional[_Union[State.Status, str]] = ..., reason: _Optional[str] = ...) -> None: ...
+
+class Audio(_message.Message):
+    __slots__ = ("turn_id", "seq", "data", "end")
+    TURN_ID_FIELD_NUMBER: _ClassVar[int]
+    SEQ_FIELD_NUMBER: _ClassVar[int]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    END_FIELD_NUMBER: _ClassVar[int]
+    turn_id: str
+    seq: int
+    data: bytes
+    end: bool
+    def __init__(self, turn_id: _Optional[str] = ..., seq: _Optional[int] = ..., data: _Optional[bytes] = ..., end: bool = ...) -> None: ...
+
+class AudioMode(_message.Message):
+    __slots__ = ("active", "first_turn_id", "sample_rate")
+    ACTIVE_FIELD_NUMBER: _ClassVar[int]
+    FIRST_TURN_ID_FIELD_NUMBER: _ClassVar[int]
+    SAMPLE_RATE_FIELD_NUMBER: _ClassVar[int]
+    active: bool
+    first_turn_id: str
+    sample_rate: int
+    def __init__(self, active: bool = ..., first_turn_id: _Optional[str] = ..., sample_rate: _Optional[int] = ...) -> None: ...
+
+class TurnAudioOnly(_message.Message):
+    __slots__ = ("turn_id",)
+    TURN_ID_FIELD_NUMBER: _ClassVar[int]
+    turn_id: str
+    def __init__(self, turn_id: _Optional[str] = ...) -> None: ...
+
+class AvatarClientMessage(_message.Message):
+    __slots__ = ("tag", "audio_request")
+    TAG_FIELD_NUMBER: _ClassVar[int]
+    AUDIO_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    tag: str
+    audio_request: AudioRequest
+    def __init__(self, tag: _Optional[str] = ..., audio_request: _Optional[_Union[AudioRequest, _Mapping]] = ...) -> None: ...
+
+class AudioRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...

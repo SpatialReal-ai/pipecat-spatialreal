@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17pipecat/v1/avatar.proto\x12\npipecat.v1\"\xd6\x02\n\rAvatarMessage\x12\x0b\n\x03tag\x18\x01 \x01(\t\x12+\n\nturn_start\x18\x02 \x01(\x0b\x32\x15.pipecat.v1.TurnStartH\x00\x12-\n\x0bturn_onsets\x18\x03 \x01(\x0b\x32\x16.pipecat.v1.TurnOnsetsH\x00\x12$\n\x06\x66rames\x18\x04 \x01(\x0b\x32\x12.pipecat.v1.FramesH\x00\x12\'\n\x08turn_end\x18\x05 \x01(\x0b\x32\x13.pipecat.v1.TurnEndH\x00\x12+\n\nturn_abort\x18\x06 \x01(\x0b\x32\x15.pipecat.v1.TurnAbortH\x00\x12\"\n\x05state\x18\x07 \x01(\x0b\x32\x11.pipecat.v1.StateH\x00\x12\x31\n\rturn_envelope\x18\x08 \x01(\x0b\x32\x18.pipecat.v1.TurnEnvelopeH\x00\x42\t\n\x07payload\"\xa3\x01\n\tTurnStart\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\x12\x13\n\x0bsample_rate\x18\x02 \x01(\x05\x12\x0b\n\x03\x66ps\x18\x03 \x01(\x05\x12\x11\n\tonsets_ms\x18\x04 \x03(\x01\x12\x14\n\x0cprev_turn_id\x18\x05 \x01(\t\x12\x18\n\x10prev_turn_pcm_ms\x18\x06 \x01(\x01\x12\x10\n\x08\x64\x65graded\x18\x07 \x01(\x08\x12\x0e\n\x06gap_ms\x18\x08 \x01(\x01\"0\n\nTurnOnsets\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\x12\x11\n\tonsets_ms\x18\x02 \x03(\x01\"s\n\x06\x46rames\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\x12\x13\n\x0bsegment_seq\x18\x02 \x01(\x05\x12\x13\n\x0b\x63hunk_index\x18\x03 \x01(\x05\x12\x13\n\x0b\x63hunk_count\x18\x04 \x01(\x05\x12\x0c\n\x04\x64\x61ta\x18\x05 \x01(\x0c\x12\x0b\n\x03\x65nd\x18\x06 \x01(\x08\"A\n\x07TurnEnd\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\x12\x0e\n\x06pcm_ms\x18\x02 \x01(\x01\x12\x15\n\rsegment_count\x18\x03 \x01(\x05\"g\n\x0cTurnEnvelope\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\x12\x13\n\x0b\x66irst_index\x18\x02 \x01(\x05\x12\x0e\n\x06hop_ms\x18\x03 \x01(\x05\x12\x11\n\twindow_ms\x18\x04 \x01(\x05\x12\x0e\n\x06values\x18\x05 \x01(\x0c\"\x1c\n\tTurnAbort\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\"\x87\x01\n\x05State\x12(\n\x06status\x18\x01 \x01(\x0e\x32\x18.pipecat.v1.State.Status\x12\x0e\n\x06reason\x18\x02 \x01(\t\"D\n\x06Status\x12\x16\n\x12STATUS_UNSPECIFIED\x10\x00\x12\r\n\tSTATUS_OK\x10\x01\x12\x13\n\x0fSTATUS_DEGRADED\x10\x02\x42?Z=github.com/SpatialReal-ai/backend-ng/api/generated/pipecat/v1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17pipecat/v1/avatar.proto\x12\npipecat.v1\"\xdd\x03\n\rAvatarMessage\x12\x0b\n\x03tag\x18\x01 \x01(\t\x12+\n\nturn_start\x18\x02 \x01(\x0b\x32\x15.pipecat.v1.TurnStartH\x00\x12-\n\x0bturn_onsets\x18\x03 \x01(\x0b\x32\x16.pipecat.v1.TurnOnsetsH\x00\x12$\n\x06\x66rames\x18\x04 \x01(\x0b\x32\x12.pipecat.v1.FramesH\x00\x12\'\n\x08turn_end\x18\x05 \x01(\x0b\x32\x13.pipecat.v1.TurnEndH\x00\x12+\n\nturn_abort\x18\x06 \x01(\x0b\x32\x15.pipecat.v1.TurnAbortH\x00\x12\"\n\x05state\x18\x07 \x01(\x0b\x32\x11.pipecat.v1.StateH\x00\x12\x31\n\rturn_envelope\x18\x08 \x01(\x0b\x32\x18.pipecat.v1.TurnEnvelopeH\x00\x12\"\n\x05\x61udio\x18\t \x01(\x0b\x32\x11.pipecat.v1.AudioH\x00\x12+\n\naudio_mode\x18\n \x01(\x0b\x32\x15.pipecat.v1.AudioModeH\x00\x12\x34\n\x0fturn_audio_only\x18\x0b \x01(\x0b\x32\x19.pipecat.v1.TurnAudioOnlyH\x00\x42\t\n\x07payload\"\xa3\x01\n\tTurnStart\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\x12\x13\n\x0bsample_rate\x18\x02 \x01(\x05\x12\x0b\n\x03\x66ps\x18\x03 \x01(\x05\x12\x11\n\tonsets_ms\x18\x04 \x03(\x01\x12\x14\n\x0cprev_turn_id\x18\x05 \x01(\t\x12\x18\n\x10prev_turn_pcm_ms\x18\x06 \x01(\x01\x12\x10\n\x08\x64\x65graded\x18\x07 \x01(\x08\x12\x0e\n\x06gap_ms\x18\x08 \x01(\x01\"0\n\nTurnOnsets\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\x12\x11\n\tonsets_ms\x18\x02 \x03(\x01\"s\n\x06\x46rames\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\x12\x13\n\x0bsegment_seq\x18\x02 \x01(\x05\x12\x13\n\x0b\x63hunk_index\x18\x03 \x01(\x05\x12\x13\n\x0b\x63hunk_count\x18\x04 \x01(\x05\x12\x0c\n\x04\x64\x61ta\x18\x05 \x01(\x0c\x12\x0b\n\x03\x65nd\x18\x06 \x01(\x08\"A\n\x07TurnEnd\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\x12\x0e\n\x06pcm_ms\x18\x02 \x01(\x01\x12\x15\n\rsegment_count\x18\x03 \x01(\x05\"g\n\x0cTurnEnvelope\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\x12\x13\n\x0b\x66irst_index\x18\x02 \x01(\x05\x12\x0e\n\x06hop_ms\x18\x03 \x01(\x05\x12\x11\n\twindow_ms\x18\x04 \x01(\x05\x12\x0e\n\x06values\x18\x05 \x01(\x0c\"\x1c\n\tTurnAbort\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\"\x87\x01\n\x05State\x12(\n\x06status\x18\x01 \x01(\x0e\x32\x18.pipecat.v1.State.Status\x12\x0e\n\x06reason\x18\x02 \x01(\t\"D\n\x06Status\x12\x16\n\x12STATUS_UNSPECIFIED\x10\x00\x12\r\n\tSTATUS_OK\x10\x01\x12\x13\n\x0fSTATUS_DEGRADED\x10\x02\"@\n\x05\x41udio\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\x12\x0b\n\x03seq\x18\x02 \x01(\x05\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\x12\x0b\n\x03\x65nd\x18\x04 \x01(\x08\"G\n\tAudioMode\x12\x0e\n\x06\x61\x63tive\x18\x01 \x01(\x08\x12\x15\n\rfirst_turn_id\x18\x02 \x01(\t\x12\x13\n\x0bsample_rate\x18\x03 \x01(\x05\" \n\rTurnAudioOnly\x12\x0f\n\x07turn_id\x18\x01 \x01(\t\"`\n\x13\x41vatarClientMessage\x12\x0b\n\x03tag\x18\x01 \x01(\t\x12\x31\n\raudio_request\x18\x02 \x01(\x0b\x32\x18.pipecat.v1.AudioRequestH\x00\x42\t\n\x07payload\"\x0e\n\x0c\x41udioRequestB?Z=github.com/SpatialReal-ai/backend-ng/api/generated/pipecat/v1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,21 +33,31 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z=github.com/SpatialReal-ai/backend-ng/api/generated/pipecat/v1'
   _globals['_AVATARMESSAGE']._serialized_start=40
-  _globals['_AVATARMESSAGE']._serialized_end=382
-  _globals['_TURNSTART']._serialized_start=385
-  _globals['_TURNSTART']._serialized_end=548
-  _globals['_TURNONSETS']._serialized_start=550
-  _globals['_TURNONSETS']._serialized_end=598
-  _globals['_FRAMES']._serialized_start=600
-  _globals['_FRAMES']._serialized_end=715
-  _globals['_TURNEND']._serialized_start=717
-  _globals['_TURNEND']._serialized_end=782
-  _globals['_TURNENVELOPE']._serialized_start=784
-  _globals['_TURNENVELOPE']._serialized_end=887
-  _globals['_TURNABORT']._serialized_start=889
-  _globals['_TURNABORT']._serialized_end=917
-  _globals['_STATE']._serialized_start=920
-  _globals['_STATE']._serialized_end=1055
-  _globals['_STATE_STATUS']._serialized_start=987
-  _globals['_STATE_STATUS']._serialized_end=1055
+  _globals['_AVATARMESSAGE']._serialized_end=517
+  _globals['_TURNSTART']._serialized_start=520
+  _globals['_TURNSTART']._serialized_end=683
+  _globals['_TURNONSETS']._serialized_start=685
+  _globals['_TURNONSETS']._serialized_end=733
+  _globals['_FRAMES']._serialized_start=735
+  _globals['_FRAMES']._serialized_end=850
+  _globals['_TURNEND']._serialized_start=852
+  _globals['_TURNEND']._serialized_end=917
+  _globals['_TURNENVELOPE']._serialized_start=919
+  _globals['_TURNENVELOPE']._serialized_end=1022
+  _globals['_TURNABORT']._serialized_start=1024
+  _globals['_TURNABORT']._serialized_end=1052
+  _globals['_STATE']._serialized_start=1055
+  _globals['_STATE']._serialized_end=1190
+  _globals['_STATE_STATUS']._serialized_start=1122
+  _globals['_STATE_STATUS']._serialized_end=1190
+  _globals['_AUDIO']._serialized_start=1192
+  _globals['_AUDIO']._serialized_end=1256
+  _globals['_AUDIOMODE']._serialized_start=1258
+  _globals['_AUDIOMODE']._serialized_end=1329
+  _globals['_TURNAUDIOONLY']._serialized_start=1331
+  _globals['_TURNAUDIOONLY']._serialized_end=1363
+  _globals['_AVATARCLIENTMESSAGE']._serialized_start=1365
+  _globals['_AVATARCLIENTMESSAGE']._serialized_end=1461
+  _globals['_AUDIOREQUEST']._serialized_start=1463
+  _globals['_AUDIOREQUEST']._serialized_end=1477
 # @@protoc_insertion_point(module_scope)
