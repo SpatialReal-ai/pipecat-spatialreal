@@ -8,6 +8,10 @@ Built and maintained by [SpatialReal](https://www.spatialreal.ai/).
 
 [Demo video](https://youtube.com/shorts/4gmsrmBwV-s): a conversation with an interruption.
 
+Guide: [Pipecat on docs.spatialreal.ai](https://docs.spatialreal.ai/avatar-integration/pipecat/overview).
+Complete example (bot and web client):
+[spatialreal-examples](https://github.com/SpatialReal-ai/spatialreal-examples/tree/main/avatar-integration/pipecat).
+
 Tested with Pipecat v1.15.0, the SpatialReal Python SDK 0.3.0 and web SDK 1.0.0-beta.6, on Daily and
 LiveKit.
 
@@ -133,7 +137,8 @@ const client = new PipecatClient({
 plays it, and a second player doubles the voice and breaks the lip sync. Hand it only the bot's
 track, not another participant's.
 
-[`examples/client`](https://github.com/SpatialReal-ai/pipecat-spatialreal/tree/main/examples/client) is a complete page.
+[`examples/client`](https://github.com/SpatialReal-ai/pipecat-spatialreal/tree/main/examples/client) is a complete page, and the
+[web client guide](https://docs.spatialreal.ai/avatar-integration/pipecat/web-client) builds one step by step.
 
 ## Run the example
 
