@@ -9,8 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Audio mode, for clients that cannot tap the bot's audio track (the upcoming SpatialReal iOS and
-  Android SDKs). When the client asks for it, each turn's audio is also sent to it as RTVI server
+- Audio mode, for clients that cannot tap the bot's audio track, such as mobile apps. When the
+  client asks for it, each turn's audio is also sent to it as RTVI server
   messages, Ogg Opus at TTS speed, alongside the animation. Nothing changes for browser clients.
 - A `turn_audio_only` message when a turn loses its animation after it started. Clients that do
   not know it ignore it.

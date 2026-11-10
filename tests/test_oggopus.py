@@ -140,3 +140,25 @@ def test_feeding_after_close_is_an_error():
     stream.close()
     with pytest.raises(RuntimeError):
         stream.feed(tone(0.1, 24000))
+
+
+def test_a_page_never_has_more_than_255_segment_entries():
+    rate = 24000
+    stream = OggOpusStream(rate)
+    # 254 packets of digital silence encode to tiny one-entry packets; the speech after them to
+    # packets of 255 bytes or more, which take two entries: one feed that would put 256 entries on
+    # a page if the limit counted packets.
+    silence_s = 254 * 0.04
+    pcm = bytes(2 * round(rate * silence_s)) + tone(1.0, rate)
+    pages = stream.feed(pcm) + stream.close()
+    assert all(p[26] <= 255 for p in pages)
+    assert split_pages(b"".join(pages)) == pages
+    assert len(decode(pages)) == round((silence_s + 1.0) * 48000)
+
+
+def test_speech_is_encoded_at_a_voice_bitrate():
+    rate = 24000
+    stream = OggOpusStream(rate)
+    pages = stream.feed(tone(4.0, rate)) + stream.close()
+    audio_bytes = sum(len(p) for p in pages[2:])
+    assert audio_bytes / 4.0 < 4000  # about 3 KB/s for a voice, not FFmpeg's 64 kbps default

@@ -336,7 +336,7 @@ async def test_an_audio_request_from_the_client_turns_on_audio_mode(backend, pip
     The processor sits after the TTS; the request comes in at the transport, where Pipecat's RTVI
     processor turns it into an ``RTVIClientMessageFrame`` and pushes it downstream. If a Pipecat
     release stopped doing that (or consumed the frame on the way), a phone would never get the
-    bot's audio. Here the client sends the request over the WebSocket, as the mobile SDKs do,
+    bot's audio. Here the client sends the request over the WebSocket, as a mobile client would,
     and must get ``audio_mode`` and then the turn's ``audio`` back.
     """
     client = Client()

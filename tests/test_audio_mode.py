@@ -346,3 +346,95 @@ async def test_failing_open_ends_audio_mode_first(fake, monkeypatch, pipecat_log
     failures = [r for r in pipecat_log if "release failed" in r["message"]]
     assert len(failures) == 1
     pipecat_log[:] = [r for r in pipecat_log if r not in failures]  # expected, not a test error
+
+
+async def test_an_empty_turn_does_not_hold_back_the_next_turns_audio(fake):
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
+            audio_request(),
+            TTSStartedFrame(),
+            *[tone_frame(40) for _ in range(50)],  # two seconds, at TTS speed
+            TTSStoppedFrame(),
+            TTSStartedFrame(),  # a context that says nothing
+            TTSStoppedFrame(),
+            TTSStartedFrame(),
+            tone_frame(200),
+            TTSStoppedFrame(),
+            message_pushed(pushed, "turn_end", count=2),
+        ],
+    )
+    _, last = turn_ids(down)
+    times = {id(f): t for t, f in pushed}
+    first_audio_of_last = min(
+        times[id(f)]
+        for f in down
+        if isinstance(f, RTVIServerMessageFrame) and f.data.get("audio", {}).get("turn_id") == last
+    )
+    first_turn_end = times[
+        id(next(f for f in down if isinstance(f, RTVIServerMessageFrame) and "turn_end" in f.data))
+    ]
+    # The last turn's audio goes at TTS speed, long before the first turn has played out.
+    assert first_audio_of_last < first_turn_end - 1.0
+
+
+async def test_no_frames_follow_turn_audio_only(fake, monkeypatch):
+    fake.first_segment_ms = 120
+    fake.segment_ms = 120
+    animate = fake._animate
+
+    async def slow(ws, connection_id, req_id, *, end, with_animation):
+        await asyncio.sleep(0.15)  # segments trickle back: some come after the loss
+        await animate(ws, connection_id, req_id, end=end, with_animation=with_animation)
+
+    monkeypatch.setattr(fake, "_animate", slow)
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+
+    def lose_after_announcement():
+        (turn,) = list(proc._turns)
+        proc._lose_turn(turn)  # as a write backlog or an unexpected write failure does
+
+    down, _ = await play(
+        proc,
+        [
+            link_up(proc),
+            TTSStartedFrame(),
+            tone_frame(1200),  # all of it reaches driveningress at once
+            message_pushed(pushed, "turn_start"),
+            Do(lose_after_announcement),
+            message_pushed(pushed, "turn_audio_only"),
+            SleepFrame(1.0),  # the segments for that audio keep coming back meanwhile
+            TTSStoppedFrame(),
+            message_pushed(pushed, "turn_end"),
+        ],
+    )
+    k = kinds(down)
+    assert ("rtvi", "frames") not in k[k.index(("rtvi", "turn_audio_only")) :]
+
+
+async def test_a_request_pending_when_failing_open_is_answered(fake, monkeypatch, pipecat_log):
+    async def fault(self, turn):
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(SpatialRealAvatarProcessor, "_forward_segments", fault)
+    proc = make_proc(fake)
+    pushed = record_pushes(proc)
+    down, _ = await play(
+        proc,
+        [
+            TTSStartedFrame(),
+            tone_frame(300),
+            audio_at_driveningress(fake),
+            audio_request(),  # pending: this turn is already playing
+            TTSStoppedFrame(),
+            message_pushed(pushed, "state"),
+        ],
+    )
+    assert messages(down, "audio_mode") == [
+        {"active": False, "first_turn_id": "", "sample_rate": 0}
+    ]
+    failures = [r for r in pipecat_log if "release failed" in r["message"]]
+    pipecat_log[:] = [r for r in pipecat_log if r not in failures]

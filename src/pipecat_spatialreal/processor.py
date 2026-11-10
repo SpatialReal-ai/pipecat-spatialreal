@@ -982,8 +982,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         self._open = self._chain = None
         for turn in turns:
             turn.sends = False
-        if self._audio_on and not self._finished:
-            # First, so the client is back on the bot's audio track before the held audio plays.
+        if (self._audio_on or self._audio_pending) and not self._finished:
+            # First, so the client is back on the bot's audio track before the held audio plays;
+            # a request still waiting for its turn is answered the same way.
             await self._push_message(envelope.audio_mode(active=False))
         self._audio_on = self._audio_pending = False
         if not self._finished and self._status_sent != _STATUS_DEGRADED:
@@ -1174,6 +1175,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         return (self._fill_bytes // 2) * 1000 / self._out_rate
 
     async def _forward_segments(self, turn: _Turn) -> None:
+        if turn.audio_only_due or turn.audio_only_sent:
+            turn.segments.clear()  # turn_audio_only promised the client that no more frames come
+            return
         while turn.segments:
             segment = turn.segments.popleft()
             seq = turn.segment_count
@@ -1396,6 +1400,9 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         for turn in list(self._turns):
             if turn.audio is None or turn.audio_done:
                 continue
+            if turn.stopped and not turn.pcm_bytes:
+                turn.audio_done = True  # it said nothing: no stream, and it gets no id to wait for
+                continue
             if not turn.turn_id:
                 return
             await self._send_turn_audio(turn)
@@ -1412,9 +1419,12 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 pcm = await turn.audio_resampler.resample(pcm, self._out_rate, self._audio_rate)
             if last:
                 pcm += await turn.audio_resampler.flush()
-        pages = turn.audio.feed(pcm) if pcm else []
+        # Encoding takes about 1 ms per packet: off the event loop, so a long run (audio that piled
+        # up while the turn waited for its id) holds up neither the release nor other bots.
+        stream = turn.audio
+        pages = await asyncio.to_thread(stream.feed, pcm) if pcm else []
         if last:
-            pages += turn.audio.close()
+            pages += await asyncio.to_thread(stream.close)
             turn.audio_done = True
         if not pages:
             return
@@ -1438,7 +1448,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
 
     async def _push_audio_only(self) -> None:
         """Tell the client about each turn that lost its animation after its ``turn_start``."""
-        for turn in self._turns:
+        for turn in list(self._turns):
             if turn.audio_only_due and not turn.audio_only_sent:
                 turn.audio_only_due, turn.audio_only_sent = False, True
                 await self._push_message(envelope.turn_audio_only(turn.turn_id))

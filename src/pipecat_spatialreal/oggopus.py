@@ -22,6 +22,9 @@ MAX_PAGE_BYTES = 2400
 # Length of each Opus packet.
 PACKET_MS = 40
 
+# Opus bitrate: a voice at this rate is about 3 KB/s on the wire (FFmpeg's default is 64 kbps).
+BITRATE = 24000
+
 # Ogg Opus counts granule positions in 48 kHz samples whatever the input rate (RFC 7845, 4).
 _GRANULE_RATE = 48000
 
@@ -142,6 +145,7 @@ class OggOpusStream:
         codec.sample_rate = self._rate
         codec.layout = "mono"
         codec.format = "s16"
+        codec.bit_rate = BITRATE
         codec.options = {"frame_duration": str(PACKET_MS), "application": "voip"}
         codec.open()
         head = bytes(codec.extradata or b"")
@@ -207,13 +211,16 @@ class OggOpusStream:
         end = self._pre_skip + self._fed_samples * _GRANULE_RATE // self._rate
         group: list[bytes] = []
         size = 27
+        entries = 0  # segment table entries of the page being filled; a page holds 255 at most
         for index, packet in enumerate(packets):
-            cost = len(_lacing(len(packet))) + len(packet)
-            if group and (size + cost > MAX_PAGE_BYTES or len(group) >= 255):
+            lacing = len(_lacing(len(packet)))
+            cost = lacing + len(packet)
+            if group and (size + cost > MAX_PAGE_BYTES or entries + lacing > 255):
                 pages.append(self._page(group, min(self._packets * per_packet, end), 0))
-                group, size = [], 27
+                group, size, entries = [], 27, 0
             group.append(packet)
             size += cost
+            entries += lacing
             self._packets += 1
             if index == len(packets) - 1:
                 flags = _EOS if last else 0
