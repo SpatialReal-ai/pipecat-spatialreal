@@ -1,3 +1,0 @@
-# make_speech.sh output and simulation pickles (tens of MB)
-clean/
-*.pkl

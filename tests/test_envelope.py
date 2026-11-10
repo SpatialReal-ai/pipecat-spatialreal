@@ -56,7 +56,7 @@ def test_dicts_parse_back_into_proto():
         ParseDict(d, avatar_pb2.AvatarMessage())  # raises on a wrong shape
 
 
-# --- Beyond the brief: contract rules its three tests leave unpinned. ---
+# --- Contract rules the tests above leave unpinned. ---
 
 
 def test_constants():

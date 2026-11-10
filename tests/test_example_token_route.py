@@ -366,7 +366,7 @@ def test_the_pages_are_served_from_the_runner_app(bot):
 
     mounted = {route.path for route in app.routes if type(route).__name__ == "Mount"}
 
-    assert {"/avatar", "/probe"} <= mounted
+    assert "/avatar" in mounted
 
 
 # --- the file as a program
@@ -394,7 +394,7 @@ def test_the_bot_starts_and_prints_its_help_without_any_keys():
 
 
 def test_a_copy_of_bot_py_alone_still_starts_and_says_which_pages_it_does_not_serve(tmp_path):
-    alone = tmp_path / "bot.py"  # no client/ or probe/ beside it
+    alone = tmp_path / "bot.py"  # no client/ beside it
     shutil.copy(BOT_PATH, alone)
 
     done = _run_help(alone)
@@ -402,4 +402,3 @@ def test_a_copy_of_bot_py_alone_still_starts_and_says_which_pages_it_does_not_se
     assert done.returncode == 0, done.stderr
     assert "--transport" in done.stdout
     assert "Not serving /avatar/" in done.stderr
-    assert "Not serving /probe/" in done.stderr

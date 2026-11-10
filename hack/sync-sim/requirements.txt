@@ -1,3 +1,0 @@
-# Dev-only: the simulation and the oracle. The pipecat-spatialreal package itself does not need
-# numpy. Run the simulation with ffmpeg (libopus) and libopus on the machine (see README.md).
-numpy>=2.0

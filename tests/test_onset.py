@@ -53,7 +53,7 @@ def test_chunked_feed_matches_whole():
     assert found == whole and t.fed_ms == 2200.0
 
 
-# --- Beyond the brief: rule details its four tests leave unpinned. The browser applies the same
+# --- Rule details the tests above leave unpinned. The browser applies the same
 # --- rule to the same audio, so each boundary here is part of the contract.
 
 

@@ -1,4 +1,4 @@
-"""The smoke test of design §3.6: with RTVI on, the avatar messages reach the client.
+"""The smoke test: with RTVI on, the avatar messages reach the client.
 
 Everywhere else the processor runs with RTVI off, and the tests stop at the
 ``RTVIServerMessageFrame``s it pushes. In a bot RTVI is on: ``PipelineWorker`` adds it unless told
@@ -200,11 +200,11 @@ async def test_avatar_messages_reach_the_client_through_rtvi_ahead_of_queued_aud
     that queue would reach the client after the first turn's last audio; one that is sent urgently,
     as the design relies on, reaches it within that audio.
 
-    A turn that is not chained is announced as its release starts (R21), and Pipecat 1.15 hands its
+    A turn that is not chained is announced as its release starts, and Pipecat 1.15 hands its
     ``turn_start`` to the transport just after the turn's first audio, not before it: the RTVI
     observer runs in a task of its own and its urgent frame sets off again from the head of the
     pipeline, while the audio goes straight on to the transport (here the first two 40 ms chunks
-    reach the client first). The design allows for that (§3.4, R21): the web SDK accepts an onset
+    reach the client first). That is allowed for: the web SDK accepts an onset
     up to 100 ms before the message arrives and otherwise looks back through its last second of
     audio. For that turn the test therefore asks only that the message did not wait behind the
     turn's audio. A chained turn is announced while the previous one plays, so its ``turn_start``

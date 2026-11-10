@@ -17,8 +17,6 @@ session and returns the room the browser joins. This file adds three things to t
   serves such a route too, behind its login and with the same origin rule.
 * ``/avatar/``: the example web page, ``examples/client``. Open it from here: the token route
   answers no other origin.
-* ``/probe/``: the probe page, ``examples/probe``: the silent receiver that measures how the
-  envelope and the bot's audio line up in a Daily room. A developer tool for this package.
 
 Settings come from the environment or a ``.env`` file; ``env.example`` lists them. The runner
 reads the transport's own (``DAILY_API_KEY``, ``LIVEKIT_URL`` and the like).
@@ -68,7 +66,7 @@ load_dotenv(override=True)
 ENVIRONMENT = "us-west"
 
 # How long the bot waits for the browser's RTVI client-ready before it greets anyway: a participant
-# with no RTVI client (the probe page, a scripted caller) never sends it.
+# with no RTVI client (a scripted caller, say) never sends it.
 GREETING_FALLBACK_S = 5.0
 
 # A Cartesia voice that Pipecat's own documentation uses; CARTESIA_VOICE_ID replaces it.
@@ -277,7 +275,7 @@ def _serve_page(route: str, directory: Path) -> None:
 
     Args:
         route: The URL path to serve the page at, for example ``/avatar``.
-        directory: The directory beside this file that holds the page.
+        directory: The directory that holds the page.
     """
     if directory.is_dir():
         app.mount(route, StaticFiles(directory=directory, html=True), name=route.strip("/"))
@@ -288,7 +286,6 @@ def _serve_page(route: str, directory: Path) -> None:
 # The pages, served by this process so that one command is enough. Register them before main().
 _EXAMPLES = Path(__file__).resolve().parent
 _serve_page("/avatar", _EXAMPLES / "client")
-_serve_page("/probe", _EXAMPLES / "probe")
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> None:

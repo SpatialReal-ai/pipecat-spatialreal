@@ -6,7 +6,6 @@ Written for Pipecat v1.15.0.
 |---|---|
 | `bot.py` | The bot: Pipecat's `06-voice-agent` shape (Deepgram, Gemini, Cartesia) with `SpatialRealAvatarProcessor` after the TTS. One file, run by Pipecat's development runner on Daily or LiveKit. |
 | `client/` | The web page: `pipecat-client-js` plus the SpatialReal web SDK. See [client/README.md](client/README.md). |
-| `probe/` | A silent receiver that measures how the avatar messages and the bot's audio line up in a Daily room, including the browser's alignment against the server's envelope, and saves paired captures. A developer tool for this package. See [probe/README.md](probe/README.md). |
 
 ## Run it
 
@@ -57,7 +56,7 @@ true}`, unless `DAILY_ROOM_URL` is set; the example pages do. `bot.py` adds:
   browser. `endpoints` is what the page passes to `new SpatialReal()`: empty for production, and
   `{"api": <console root>}` when `SPATIALREAL_CONSOLE_ENDPOINT` points the bot at another
   deployment, so that the page loads the avatar from the deployment that issued the token.
-* `/avatar/` and `/probe/`: the two pages above, so that one process is enough.
+* `/avatar/`: the page above, so that one process is enough.
 
 The token route has no authentication, and it is same-origin only: it answers the pages this
 server serves (and callers that are not web pages, such as `curl`) and refuses, with 403, a request
@@ -69,6 +68,3 @@ gets no token. Your own app's token route needs a login, and the same origin rul
 
 The avatar needs RTVI, which Pipecat's `PipelineWorker` enables by default: the animation reaches
 the browser as RTVI server messages, and the bot's audio keeps playing through the transport.
-
-To measure how the avatar lines up with the bot's audio on a Daily room, use the probe, a developer
-tool for this package: [probe/README.md](probe/README.md) says how.

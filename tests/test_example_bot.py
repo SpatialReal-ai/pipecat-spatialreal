@@ -326,7 +326,7 @@ async def test_every_page_the_documentation_names_is_served():
     from pipecat.runner.run import app
 
     paths = _documented_pages()
-    assert {"/avatar/", "/probe/"} <= paths, paths
+    assert "/avatar/" in paths, paths
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost:7860") as client:

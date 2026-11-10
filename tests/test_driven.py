@@ -67,7 +67,7 @@ async def test_server_close_marks_down(fake):
         await d.send(b"\x00\x00")
 
 
-# --- Beyond the brief: contract details its four tests leave open. The processor leans on each of
+# --- Contract details the tests above leave open. The processor leans on each of
 # --- them: what a segment is, when the link counts as lost, and what a lost or closed link does
 # --- to the calls that follow.
 

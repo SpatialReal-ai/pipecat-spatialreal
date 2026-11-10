@@ -47,7 +47,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      # tests/probe_check.mjs runs the probe page's analysis under Node.
+      # tests/client_page_check.mjs runs the example page's code under Node.
       - uses: actions/setup-node@v7
         with:
           node-version: lts/*

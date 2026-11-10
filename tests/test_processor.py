@@ -610,7 +610,7 @@ async def test_driven_down_passes_audio_through(fake):
     assert ("rtvi", "state") in k and k.count("TTSAudioRawFrame") == chunks(200)
 
 
-# --- Beyond the brief: the contract rulings and the Pipecat duties its seven tests leave open.
+# --- The message contract in detail, and the Pipecat duties the tests above leave open.
 
 
 def avatar_messages(frames):

@@ -229,7 +229,7 @@ await test('Daily: only the bot\'s audio reaches the SDK; every server message d
   onTrackStarted({ kind: 'audio', id: 'other' }, { id: 'u2', name: 'Someone else', local: false })
   onTrackStarted({ kind: 'audio', id: 'mic' }, { id: 'me', name: '', local: true })
   onTrackStarted({ kind: 'video', id: 'bot-video' }, DAILY_BOT)
-  onTrackStarted({ kind: 'audio', id: 'probe' }, { id: 'p', name: 'SpatialReal probe', local: false })
+  onTrackStarted({ kind: 'audio', id: 'viewer' }, { id: 'p', name: 'Another viewer', local: false })
   assert.deepEqual(session.tracks, [])
   onTrackStarted(botAudio, DAILY_BOT)
   assert.deepEqual(session.tracks, [botAudio])

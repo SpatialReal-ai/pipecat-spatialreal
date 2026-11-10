@@ -15,5 +15,3 @@ uv.lock
 # workflow refuses any committed .proto, this keeps one from being added by accident.
 *.proto
 
-# hack/sync-sim/thrsearch_stall.py's data cache, if one is pointed into the repo.
-hack/sync-sim/*.pkl
