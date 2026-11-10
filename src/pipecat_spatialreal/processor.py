@@ -42,6 +42,13 @@ aggregator therefore run up to ``lead_ms`` (200 ms by default) ahead of the spee
 A released audio chunk keeps that clock too: its presentation time is the time of the TTS frame
 its first sample came from, plus that sample's offset in the frame.
 
+A client that cannot tap the bot's audio track (a phone on Daily) asks for audio mode with an
+``audio_request`` client message. From the first turn that starts after the request while the room
+is quiet, every turn's audio also goes to the client as ``audio`` messages: the same samples
+inference sees, encoded as one Ogg Opus stream per turn and sent as soon as they are in hand, at
+TTS speed, not paced. The track is untouched: it plays on, and Pipecat's own state keeps following
+it. ``audio_mode`` answers every request, and tells the client when audio mode stops.
+
 Without an animation source (driveningress unreachable, or too slow) the audio still plays,
 unanimated. Nothing that plays audio ever waits for the driveningress socket: what goes to
 inference is handed to a writer task, which performs one bounded write at a time, and a write
@@ -70,11 +77,12 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor, FrameProcessorSetup
-from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
+from pipecat.processors.frameworks.rtvi import RTVIClientMessageFrame, RTVIServerMessageFrame
 
 from pipecat_spatialreal import envelope
 from pipecat_spatialreal.driven import DrivenIngress, Segment, _describe, close_code
 from pipecat_spatialreal.fingerprint import Envelope
+from pipecat_spatialreal.oggopus import OPUS_RATES, OggOpusStream
 from pipecat_spatialreal.onset import OnsetTracker
 from pipecat_spatialreal.proto.generated import avatar_pb2
 
@@ -214,6 +222,15 @@ class _Turn:
         self.unsent_chunks = 0  # the chunks of the hold those values describe
         self.described = 0  # chunks at the front of the hold already sent in the envelope
         self.gap_ms = 0.0  # the fill between the previous turn's last sample and its first
+        # Audio mode: the turn's stream for the client, when the mode was on as it opened.
+        self.audio: OggOpusStream | None = None
+        self.audio_pcm = bytearray()  # samples counted into the turn and not encoded yet
+        self.audio_resampler: BaseAudioResampler | None = None  # when Opus cannot take the rate
+        self.audio_closed = False  # every sample of the turn is in audio_pcm (or encoded)
+        self.audio_seq = 0  # audio messages sent
+        self.audio_done = False  # the stream's last page went out
+        self.audio_only_due = False  # it lost its animation after turn_start: say so once
+        self.audio_only_sent = False
 
     @property
     def interruptible(self) -> bool:
@@ -448,6 +465,12 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         self._fed = False  # the room has played without a break since _sound_end
         self._wake = asyncio.Event()  # something changed for the release task
 
+        # Audio mode (see the module docstring).
+        self._audio_rate = 24000  # Opus input rate: the output rate, or 48 kHz if Opus lacks it
+        self._audio_pending = False  # requested, and waiting for a turn to start in quiet
+        self._audio_on = False  # every turn opened from now on gets a stream
+        self._audio_notice_due = False  # an audio_mode goes before the next turn's first audio
+
     # --- Pipecat
 
     async def setup(self, setup: FrameProcessorSetup):
@@ -466,6 +489,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         # A stall is bridged one chunk ahead, not the lead ahead: the audio that ends it must not
         # queue behind more silence than keeps the transport fed. Never more than the lead.
         self._stall_ahead_s = min(self._lead_s, len(self._silence) / (2 * self._out_rate))
+        self._audio_rate = self._out_rate if self._out_rate in OPUS_RATES else 48000
         if not _rtvi_enabled(setup.pipeline_worker):
             logger.error(
                 f"{self}: RTVI is disabled in this pipeline, so no animation can reach the "
@@ -503,12 +527,17 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         if self._broken:
             if isinstance(frame, (EndFrame, CancelFrame)):
                 await self._finish()
+            elif self._audio_requested(frame) and not self._finished:
+                # Failed open: no audio mode any more; the client stays on the bot's audio track.
+                await self._push_message(envelope.audio_mode(active=False))
             await self.push_frame(frame, direction)
         elif isinstance(frame, InterruptionFrame):  # either way: Pipecat treats both as one
             await self._interrupt(frame, direction)
         elif direction == FrameDirection.UPSTREAM:
             await self.push_frame(frame, direction)
         elif isinstance(frame, SystemFrame):
+            if self._audio_requested(frame):
+                self._request_audio()
             if isinstance(frame, CancelFrame):
                 await self._stop_driver()
                 await self._finish()
@@ -554,6 +583,13 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             ),
             sends=not self._degraded,
         )
+        if self._audio_pending and self._room_quiet():
+            self._audio_pending = False
+            self._audio_on = True
+            self._audio_notice_due = True
+            logger.info(f"{self}: audio mode on")
+        if self._audio_on:
+            turn.audio = OggOpusStream(self._audio_rate)
         self._turns.append(turn)
         self._open = turn
         self._track = frame.transport_destination
@@ -617,6 +653,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             await self._keep(turn, frame)
         await self._keep(turn, _END_OF_AUDIO)
         turn.stopped = True
+        turn.audio_closed = True
         if turn.sent:
             self._queue_write(turn, b"", end=True)  # the end flush returns the last animation
 
@@ -660,6 +697,8 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         turn.unsent += turn.envelope.feed(pcm)
         turn.unsent_chunks += 1
         turn.pcm_bytes += len(pcm)
+        if turn.audio is not None:
+            turn.audio_pcm += pcm
         if turn.first_audio_at is None:
             turn.first_audio_at = self._now()
         self._wake.set()
@@ -777,6 +816,8 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         if turn.sends:
             turn.sends = False
             turn.degraded = True
+            if turn.announced and not turn.silent and not turn.end_pushed:
+                turn.audio_only_due = True  # its turn_start promised frames that will not come
         self._wake.set()
 
     async def _keep_linked(self) -> None:
@@ -869,7 +910,7 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             self._writes.append(_INTERRUPT)
             self._writes_ready.set()
         for turn in victims:
-            if turn.announced and not turn.silent:
+            if (turn.announced and not turn.silent) or turn.audio_seq:
                 await self._push_message(envelope.turn_abort(turn.turn_id))
         await self.push_frame(frame, direction)
         for item in unplaced:
@@ -916,6 +957,8 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 deadlines: list[float] = []
                 await self._push_status()
                 await self._announce_and_forward(deadlines)
+                await self._send_audio()
+                await self._push_audio_only()
                 await self._release(deadlines)
                 await self._close(deadlines)
                 await self._fill(deadlines)
@@ -939,13 +982,17 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         self._open = self._chain = None
         for turn in turns:
             turn.sends = False
+        if self._audio_on and not self._finished:
+            # First, so the client is back on the bot's audio track before the held audio plays.
+            await self._push_message(envelope.audio_mode(active=False))
+        self._audio_on = self._audio_pending = False
         if not self._finished and self._status_sent != _STATUS_DEGRADED:
             self._status_sent = _STATUS_DEGRADED
             await self._push_message(envelope.state(_STATUS_DEGRADED, "processor error"))
         for turn in turns:
             # No playout end can be timed any more: the client is told to stop animating now,
             # which every announced turn needs, exactly once, to end.
-            if turn.announced and not turn.silent:
+            if (turn.announced and not turn.silent) or turn.audio_seq:
                 await self._push_message(envelope.turn_abort(turn.turn_id))
             for item in turn.hold:
                 if isinstance(item, Frame):
@@ -1221,6 +1268,8 @@ class SpatialRealAvatarProcessor(FrameProcessor):
         pcm = self._silence
         turn.onsets.extend(turn.tracker.feed(pcm))
         turn.pcm_bytes += len(pcm)
+        if turn.audio is not None:
+            turn.audio_pcm += pcm
         # Described before it plays, as any of its audio. The hold is empty, so every chunk fed
         # before it has been released, and sent: the run is this chunk's values alone.
         turn.unsent += turn.envelope.feed(pcm)
@@ -1295,6 +1344,8 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                         deadlines.append(give_up)
                         continue
                     logger.debug(f"{self}: turn {turn.turn_id} ends without its last segment")
+            if turn.audio is not None and not turn.audio_done and turn.turn_id:
+                await self._send_turn_audio(turn)  # the client has all of it before turn_end
             self._turns.remove(turn)
             if not turn.silent:
                 await self._push_message(
@@ -1306,6 +1357,91 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             frame, self._end_frame = self._end_frame, None
             await self._finish()
             await self.push_frame(frame)
+
+    # --- audio mode
+
+    @staticmethod
+    def _audio_requested(frame: Frame) -> bool:
+        """Whether ``frame`` is a client's request for audio mode."""
+        if not isinstance(frame, RTVIClientMessageFrame):
+            return False
+        msg = envelope.client_message(frame.type, frame.data)
+        return msg is not None and msg.WhichOneof("payload") == "audio_request"
+
+    def _request_audio(self) -> None:
+        """Take a client's request for audio mode: start it at the next turn, or answer again."""
+        if self._audio_on:
+            self._audio_notice_due = True  # the next turn's audio_mode answers this request
+        else:
+            self._audio_pending = True
+        self._wake.set()
+
+    def _room_quiet(self) -> bool:
+        """Whether no turn is releasing or waiting, and the last sound has finished playing.
+
+        Audio mode starts only at a turn that begins in such a quiet, so that the client can leave
+        the bot's audio track without cutting off what it still plays (the fill is silence, and
+        does not count).
+        """
+        busy = any(not turn.drained for turn in self._turns)
+        return not busy and self._sound_end <= self._now() + _TOLERANCE_S
+
+    async def _send_audio(self) -> None:
+        """Send the turns' audio that is in hand, turn after turn, as ``audio`` messages.
+
+        A turn's audio goes once the turn has its id (its request's, or the one it was announced
+        with). Turns send in order: one that has no id yet holds back the turns after it, so the
+        client never gets a turn's audio before the ``audio_mode`` that names the first turn.
+        """
+        for turn in list(self._turns):
+            if turn.audio is None or turn.audio_done:
+                continue
+            if not turn.turn_id:
+                return
+            await self._send_turn_audio(turn)
+
+    async def _send_turn_audio(self, turn: _Turn) -> None:
+        """Encode what the turn has of its audio and send it in messages of whole Ogg pages."""
+        assert turn.audio is not None
+        pcm, turn.audio_pcm = bytes(turn.audio_pcm), bytearray()
+        last = turn.audio_closed
+        if self._audio_rate != self._out_rate:
+            if turn.audio_resampler is None:
+                turn.audio_resampler = create_stream_resampler(clear_after_secs=None)
+            if pcm:
+                pcm = await turn.audio_resampler.resample(pcm, self._out_rate, self._audio_rate)
+            if last:
+                pcm += await turn.audio_resampler.flush()
+        pages = turn.audio.feed(pcm) if pcm else []
+        if last:
+            pages += turn.audio.close()
+            turn.audio_done = True
+        if not pages:
+            return
+        if not turn.audio_seq and self._audio_notice_due:
+            self._audio_notice_due = False
+            await self._push_message(
+                envelope.audio_mode(
+                    active=True, first_turn_id=turn.turn_id, sample_rate=self._audio_rate
+                )
+            )
+        batches: list[bytes] = []
+        for page in pages:
+            if batches and len(batches[-1]) + len(page) <= envelope.MAX_CHUNK_BYTES:
+                batches[-1] += page
+            else:
+                batches.append(page)
+        for index, data in enumerate(batches):
+            end = last and index == len(batches) - 1
+            await self._push_message(envelope.audio(turn.turn_id, turn.audio_seq, data, end=end))
+            turn.audio_seq += 1
+
+    async def _push_audio_only(self) -> None:
+        """Tell the client about each turn that lost its animation after its ``turn_start``."""
+        for turn in self._turns:
+            if turn.audio_only_due and not turn.audio_only_sent:
+                turn.audio_only_due, turn.audio_only_sent = False, True
+                await self._push_message(envelope.turn_audio_only(turn.turn_id))
 
     # --- helpers
 
