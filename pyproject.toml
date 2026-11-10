@@ -28,6 +28,9 @@ dependencies = [
     "spatialreal>=0.2.2,<0.4",
     # The generated code is stamped 6.31.1; an older runtime refuses to import it.
     "protobuf>=6.31.1,<8",
+    # Encodes the bot's audio as Ogg Opus for clients that cannot tap the audio track (audio
+    # mode). Its wheels bundle libopus, so nothing has to be installed on the system.
+    "av>=14,<20",
 ]
 
 [project.optional-dependencies]
