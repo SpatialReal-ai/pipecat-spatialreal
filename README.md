@@ -8,7 +8,8 @@ SpatialReal web SDK, so the pipeline never carries video frames.
 
 Built and maintained by [SpatialReal](https://www.spatialreal.ai/).
 
-Tested with Pipecat v1.15.0 and run live on Daily and LiveKit on 2026-11-03. CI runs the tests
+Tested with Pipecat v1.15.0, the SpatialReal Python SDK 0.3.0 and web SDK 1.0.0-beta.6, and run live
+on Daily and LiveKit, locally and on Pipecat Cloud (2026-11-03 to 2026-11-09). CI runs the tests
 against that declared floor and against the newest Pipecat release the package allows
 (`pipecat-ai>=1.15.0,<2`), with a fake SpatialReal backend. A weekly job runs the tests against the
 newest release and opens a pull request that moves this line when they pass on a newer one.
@@ -156,11 +157,14 @@ the Pipecat kind, and hands it the bot's audio track and the bot's RTVI server m
 draws the avatar and plays the bot's voice in step with it; the page must not play the bot's track
 itself.
 
-That session kind is not released on npm yet. It is added by
-[web-sdk#28](https://github.com/SpatialReal-ai/web-sdk/pull/28), a pull request in SpatialReal's web
-SDK repository, which is not public yet.
+The Pipecat session is in the SpatialReal web SDK from 1.0.0-beta.6:
+
+```bash
+npm install @spatialreal/web-sdk@^1.0.0-beta.6
+```
+
 [`examples/client`](https://github.com/SpatialReal-ai/pipecat-spatialreal/tree/main/examples/client)
-is a page that uses it, and its README says how to wire the session in until the release.
+is a page that uses it.
 
 The animation is aligned to the audio by content. The processor sends `turn_envelope` messages, the
 envelope of the exact audio it released (one byte per 5 ms, see [How it works](#how-it-works)),
@@ -193,9 +197,7 @@ cp env.example .env        # fill it in
 uv run python examples/bot.py -t daily
 ```
 
-Then open <http://localhost:7860/avatar/> and press Start. The page needs the web SDK's Pipecat
-session, which is not on npm yet: until it is, setting the page up needs access to SpatialReal's
-web SDK repository.
+Then open <http://localhost:7860/avatar/> and press Start. The page loads the web SDK from a CDN.
 [`examples/README.md`](https://github.com/SpatialReal-ai/pipecat-spatialreal/blob/main/examples/README.md)
 has the steps, the LiveKit variant and the settings, and describes the probe, a developer tool that
 measures how the avatar lines up with the bot's audio in a Daily room.

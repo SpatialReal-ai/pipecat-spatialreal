@@ -21,8 +21,8 @@ cp env.example .env        # fill it in: env.example lists every variable
 uv run python examples/bot.py -t daily
 ```
 
-Then open <http://localhost:7860/avatar/> and press Start. The page needs the web SDK's Pipecat
-session, which is not on npm yet: copy it in first as [client/README.md](client/README.md) says.
+Then open <http://localhost:7860/avatar/> and press Start. The page loads the SpatialReal web SDK
+from a CDN; [client/README.md](client/README.md) has the details.
 
 `-t livekit` runs the same bot in a LiveKit room (set `LIVEKIT_URL`, `LIVEKIT_API_KEY` and
 `LIVEKIT_API_SECRET`); open `http://localhost:7860/avatar/?transport=livekit`. Without `-t` the

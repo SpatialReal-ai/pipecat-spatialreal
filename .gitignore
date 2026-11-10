@@ -15,9 +15,5 @@ uv.lock
 # workflow refuses any committed .proto, this keeps one from being added by accident.
 *.proto
 
-# The example page imports the web SDK's Pipecat session from here; copy it in as
-# examples/client/README.md describes (the session is not on npm yet).
-examples/client/vendor/
-
 # hack/sync-sim/thrsearch_stall.py's data cache, if one is pointed into the repo.
 hack/sync-sim/*.pkl

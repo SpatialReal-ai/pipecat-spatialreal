@@ -61,13 +61,15 @@ const say = text => {
   $('log').scrollTop = $('log').scrollHeight
 }
 
-// The web SDK's Pipecat session is not on npm yet: examples/client/README.md says how to put it in vendor/.
+// The SpatialReal web SDK (npm @spatialreal/web-sdk; 1.0.0-beta.6 is the first with the Pipecat
+// session), from a CDN so this page needs no build step. An app installs it and imports it through
+// its bundler instead.
 let sdk = null
 try {
-  sdk = await import('./vendor/spatialreal-web-sdk.js')
+  sdk = await import('https://cdn.jsdelivr.net/npm/@spatialreal/web-sdk@1.0.0-beta.6/dist/index.js')
 } catch (e) {
   $('start').disabled = true
-  say(`vendor/spatialreal-web-sdk.js could not be loaded (${e.message}); see examples/client/README.md`)
+  say(`the SpatialReal web SDK could not be loaded (${e.message})`)
 }
 
 // The run that Start began and Stop ends: what it has made so far, and the signal Stop aborts.
