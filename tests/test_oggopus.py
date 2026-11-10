@@ -161,4 +161,7 @@ def test_speech_is_encoded_at_a_voice_bitrate():
     stream = OggOpusStream(rate)
     pages = stream.feed(tone(4.0, rate)) + stream.close()
     audio_bytes = sum(len(p) for p in pages[2:])
-    assert audio_bytes / 4.0 < 4000  # about 3 KB/s for a voice, not FFmpeg's 64 kbps default
+    # Set to 24 kbps (3 KB/s), where FFmpeg's default of 64 kbps gives about 8 KB/s. Opus is
+    # variable-rate and libopus versions differ on a pure tone (PyAV 14's runs near 4.4 KB/s), so
+    # the bound only tells the two settings apart.
+    assert audio_bytes / 4.0 < 6000
