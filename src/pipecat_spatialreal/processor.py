@@ -101,6 +101,9 @@ _FILL_CAP_S = 1.0
 # link; a backlog this long means it is stuck, and the write it is stuck on is about to time out.
 _WRITE_BACKLOG = 1024
 
+# Audio mode encodes at most this many 40 ms packets before it gives the event loop back.
+_ENCODE_SLICE_PACKETS = 10
+
 _STATUS_OK = avatar_pb2.State.STATUS_OK
 _STATUS_DEGRADED = avatar_pb2.State.STATUS_DEGRADED
 
@@ -1408,24 +1411,40 @@ class SpatialRealAvatarProcessor(FrameProcessor):
             await self._send_turn_audio(turn)
 
     async def _send_turn_audio(self, turn: _Turn) -> None:
-        """Encode what the turn has of its audio and send it in messages of whole Ogg pages."""
+        """Encode what the turn has of its audio and send it in messages of whole Ogg pages.
+
+        Encoding takes about 1 ms per packet. A long run (audio that piled up while the turn
+        waited for its id) is encoded and sent a slice at a time, giving the loop back in between,
+        so it holds up neither the release nor other bots for long; what is not encoded yet stays
+        in the turn's buffer, so nothing is lost if the release task is stopped meanwhile. (Not in
+        a thread: beside a transport's native threads, the encoder's calls there were seen to keep
+        the awaiting task waiting for many seconds.)
+        """
         assert turn.audio is not None
-        pcm, turn.audio_pcm = bytes(turn.audio_pcm), bytearray()
-        last = turn.audio_closed
-        if self._audio_rate != self._out_rate:
-            if turn.audio_resampler is None:
-                turn.audio_resampler = create_stream_resampler(clear_after_secs=None)
-            if pcm:
-                pcm = await turn.audio_resampler.resample(pcm, self._out_rate, self._audio_rate)
+        step = _ENCODE_SLICE_PACKETS * 2 * self._out_rate * 40 // 1000
+        first = True
+        while turn.audio_pcm or (turn.audio_closed and not turn.audio_done):
+            if not first:
+                await asyncio.sleep(0)
+            first = False
+            pcm = bytes(turn.audio_pcm[:step])
+            del turn.audio_pcm[:step]
+            last = turn.audio_closed and not turn.audio_pcm
+            if self._audio_rate != self._out_rate:
+                if turn.audio_resampler is None:
+                    turn.audio_resampler = create_stream_resampler(clear_after_secs=None)
+                if pcm:
+                    pcm = await turn.audio_resampler.resample(pcm, self._out_rate, self._audio_rate)
+                if last:
+                    pcm += await turn.audio_resampler.flush()
+            pages = turn.audio.feed(pcm) if pcm else []
             if last:
-                pcm += await turn.audio_resampler.flush()
-        # Encoding takes about 1 ms per packet: off the event loop, so a long run (audio that piled
-        # up while the turn waited for its id) holds up neither the release nor other bots.
-        stream = turn.audio
-        pages = await asyncio.to_thread(stream.feed, pcm) if pcm else []
-        if last:
-            pages += await asyncio.to_thread(stream.close)
-            turn.audio_done = True
+                pages += turn.audio.close()
+                turn.audio_done = True
+            await self._push_audio_pages(turn, pages, last=last)
+
+    async def _push_audio_pages(self, turn: _Turn, pages: list[bytes], *, last: bool) -> None:
+        """Send ``pages`` as ``audio`` messages of at most ``MAX_CHUNK_BYTES`` of whole pages."""
         if not pages:
             return
         if not turn.audio_seq and self._audio_notice_due:

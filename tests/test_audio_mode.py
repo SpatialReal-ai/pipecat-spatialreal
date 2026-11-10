@@ -13,7 +13,7 @@ import io
 import av
 import numpy as np
 import pytest
-from conftest import Do, audio_at_driveningress, link_up, message_pushed, play
+from conftest import Do, Until, audio_at_driveningress, link_up, message_pushed, play
 from pipecat.frames.frames import InterruptionFrame, TTSStartedFrame, TTSStoppedFrame
 from pipecat.pipeline.worker import PipelineParams
 from pipecat.processors.frameworks.rtvi import RTVIClientMessageFrame, RTVIServerMessageFrame
@@ -331,7 +331,7 @@ async def test_failing_open_ends_audio_mode_first(fake, monkeypatch, pipecat_log
             TTSStartedFrame(),
             tone_frame(300),
             TTSStoppedFrame(),
-            SleepFrame(0.5),
+            Until("the release to fail", lambda: proc._broken),
             audio_request(),  # after failing open: refused, the client stays on the track
             SleepFrame(0.2),
         ],
