@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # A run takes about two minutes; a hung one is cut off here instead of at GitHub's six hours.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor (pipecat-ai >= 1.0 requires it); 3.12 is what the codegen workflow runs.
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # tests/client_page_check.mjs runs the example page's code under Node, so the test that calls
+      # it needs one; the runner image's own Node is not something to count on.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      # The example extra brings FastAPI and the Pipecat runner, which the token-route tests of
+      # examples/bot.py import: without it they are skipped.
+      - name: Install (dev and example extras)
+        run: uv sync --extra dev --extra example
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Test
+        run: uv run pytest
+
+      - name: Build
+        run: uv build
+
+  # The test job resolves the newest versions on every run. This one resolves the lowest that
+  # pyproject.toml declares for every direct dependency, so that the floors users can install
+  # (pipecat-ai, spatialreal and protobuf above all) stay tested once newer releases come out.
+  floors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # For every uv command of the job: `uv run` locks and syncs again before it runs, and with
+      # the default resolution it would bring the newest versions back.
+      UV_RESOLUTION: lowest-direct
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      - name: Install the lowest declared versions (dev and example extras)
+        run: uv sync --resolution lowest-direct --extra dev --extra example
+
+      # The resolver moves past a floor that cannot be installed (one that conflicts with another
+      # requirement, say) without a word. Fail instead, so that such a floor is raised on purpose.
+      - name: Check that every runtime floor is what got installed
+        run: |
+          uv run python - <<'EOF'
+          import importlib.metadata
+          import tomllib
+
+          from packaging.requirements import Requirement
+          from packaging.version import Version
+
+          with open("pyproject.toml", "rb") as file:
+              dependencies = tomllib.load(file)["project"]["dependencies"]
+          wrong = []
+          for line in dependencies:
+              requirement = Requirement(line)
+              floors = [spec.version for spec in requirement.specifier if spec.operator == ">="]
+              installed = importlib.metadata.version(requirement.name)
+              print(f"{requirement.name}: declared {requirement.specifier}, installed {installed}")
+              if floors and Version(installed) != Version(floors[0]):
+                  wrong.append(requirement.name)
+          if wrong:
+              raise SystemExit(f"Not installed at the declared floor: {', '.join(wrong)}")
+          EOF
+
+      - name: Test
+        run: uv run pytest
