@@ -1,4 +1,4 @@
-"""Builders for the JSON envelope the processor sends to the SpatialReal web SDK.
+"""Builders for the JSON envelope the processor sends to the SpatialReal client SDKs.
 
 Every builder returns the dict to pass as ``RTVIServerMessageFrame(data=...)``. The dict is an
 ``AvatarMessage`` from ``pipecat/v1/avatar.proto`` rendered under the contract's JSON rules: wire
@@ -11,11 +11,14 @@ The builders fill a generated ``AvatarMessage`` and convert it with :func:`to_di
 alone decides the shape and no builder spells a wire key by hand. The builders only serialize: when
 to send a message (never an empty ``turn_onsets``, never ``STATUS_UNSPECIFIED``) is the caller's
 rule.
+
+:func:`client_message` reads the other direction: an ``AvatarClientMessage`` a client sends in an
+RTVI client message.
 """
 
 from typing import Any
 
-from google.protobuf.json_format import MessageToDict
+from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
 
 from pipecat_spatialreal.proto.generated import avatar_pb2
 
@@ -255,3 +258,85 @@ def state(status: int, reason: str = "") -> dict[str, Any]:
     return to_dict(
         avatar_pb2.AvatarMessage(tag=TAG, state=avatar_pb2.State(status=status, reason=reason))
     )
+
+
+# RTVI client-message type (``data.t``) under which a client sends an ``AvatarClientMessage``.
+CLIENT_MESSAGE_TYPE = "spatialreal-avatar"
+
+
+def audio(turn_id: str, seq: int, data: bytes, *, end: bool) -> dict[str, Any]:
+    """Build one piece of a turn's audio, for clients that cannot tap the bot's audio track.
+
+    Args:
+        turn_id: The turn the audio belongs to.
+        seq: 0-based position of this piece within the turn.
+        data: Whole Ogg pages of the turn's Ogg Opus stream, at most ``MAX_CHUNK_BYTES``.
+        end: True on the turn's last piece.
+
+    Returns:
+        The ``audio`` envelope.
+    """
+    return to_dict(
+        avatar_pb2.AvatarMessage(
+            tag=TAG, audio=avatar_pb2.Audio(turn_id=turn_id, seq=seq, data=data, end=end)
+        )
+    )
+
+
+def audio_mode(*, active: bool, first_turn_id: str = "", sample_rate: int = 0) -> dict[str, Any]:
+    """Build the answer to an audio request, or the notice that audio mode stopped.
+
+    Args:
+        active: True while ``audio`` messages are sent; False once no more follow.
+        first_turn_id: The first turn whose audio comes as ``audio`` messages; ``""`` when
+            ``active`` is False.
+        sample_rate: Opus input rate of the streams in Hz; 0 when ``active`` is False.
+
+    Returns:
+        The ``audio_mode`` envelope.
+    """
+    return to_dict(
+        avatar_pb2.AvatarMessage(
+            tag=TAG,
+            audio_mode=avatar_pb2.AudioMode(
+                active=active, first_turn_id=first_turn_id, sample_rate=sample_rate
+            ),
+        )
+    )
+
+
+def turn_audio_only(turn_id: str) -> dict[str, Any]:
+    """Build the message that says a turn lost its animation after its ``turn_start``.
+
+    Args:
+        turn_id: The turn that gets no more frames.
+
+    Returns:
+        The ``turn_audio_only`` envelope.
+    """
+    return to_dict(
+        avatar_pb2.AvatarMessage(tag=TAG, turn_audio_only=avatar_pb2.TurnAudioOnly(turn_id=turn_id))
+    )
+
+
+def client_message(type_: str, data: object) -> avatar_pb2.AvatarClientMessage | None:
+    """Read an ``AvatarClientMessage`` from an RTVI client message, if it is one.
+
+    Args:
+        type_: The client message's type (``data.t`` on the wire).
+        data: Its payload (``data.d``), as Pipecat hands it over.
+
+    Returns:
+        The message, or None when the type is not ``CLIENT_MESSAGE_TYPE``, the payload does not
+        parse, its tag is not ``TAG``, or it carries no payload this version knows.
+    """
+    if type_ != CLIENT_MESSAGE_TYPE or not isinstance(data, dict):
+        return None
+    try:
+        msg = ParseDict(data, avatar_pb2.AvatarClientMessage(), ignore_unknown_fields=True)
+    except (ParseError, TypeError, ValueError):
+        return None
+    member = msg.WhichOneof("payload")
+    if msg.tag != TAG or member is None or not isinstance(data.get(member), dict):
+        return None  # protobuf's JSON parser would also take a non-object for an empty message
+    return msg
