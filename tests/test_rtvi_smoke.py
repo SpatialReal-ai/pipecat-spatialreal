@@ -328,3 +328,96 @@ def _turn_of(envelope: dict) -> str:
     """The ``turn_id`` an envelope belongs to, or ``""`` for a ``state`` message."""
     (member,) = set(envelope) - {"tag"}
     return envelope[member].get("turn_id", "")
+
+
+async def test_an_audio_request_from_the_client_turns_on_audio_mode(backend, pipecat_log):
+    """A client's ``audio_request``, sent as an RTVI client message, reaches the processor.
+
+    The processor sits after the TTS; the request comes in at the transport, where Pipecat's RTVI
+    processor turns it into an ``RTVIClientMessageFrame`` and pushes it downstream. If a Pipecat
+    release stopped doing that (or consumed the frame on the way), a phone would never get the
+    bot's audio. Here the client sends the request over the WebSocket, as a mobile client would,
+    and must get ``audio_mode`` and then the turn's ``audio`` back.
+    """
+    client = Client()
+    websocket = WebSocket(SCOPE, client.receive, client.send)
+    await websocket.accept()
+    transport = EvalFastAPIWebsocketTransport(
+        websocket,
+        EvalTransportParams(
+            audio_out_enabled=True, serializer=EvalSerializer(), allowed_origins=[]
+        ),
+        EvalConnectionFlags(capture_bot_audio=False),
+    )
+    proc = SpatialRealAvatarProcessor(
+        api_key="k",
+        app_id="a",
+        avatar_id="av",
+        console_endpoint_url=backend.console_url,
+        ingress_endpoint_url=backend.ingress_url,
+    )
+    worker = PipelineWorker(
+        Pipeline([transport.input(), ToneTTS((400,)), proc, transport.output()]),
+        params=PipelineParams(audio_out_sample_rate=RATE),
+        cancel_on_idle_timeout=False,
+    )
+    connected = asyncio.Event()
+
+    @transport.event_handler("on_client_connected")
+    async def _on_client_connected(transport, websocket):
+        connected.set()
+
+    def say(message: dict) -> None:
+        client._inbox.put_nowait({"type": "websocket.receive", "text": json.dumps(message)})
+
+    def kinds() -> list[str]:
+        return [next(iter(set(e) - {"tag"})) for _, e in client.avatar_messages()]
+
+    runner = WorkerRunner()
+    await runner.add_workers(worker)
+    running = asyncio.create_task(runner.run())
+    try:
+        await reach(Until("the client to connect", connected.is_set))
+        await reach(link_up(proc))
+        say({"label": RTVI_LABEL, "type": "client-ready", "id": "r1", "data": {"version": "1.0.0"}})
+        say(
+            {
+                "label": RTVI_LABEL,
+                "type": "client-message",
+                "id": "m1",
+                "data": {"t": "spatialreal-avatar", "d": {"tag": TAG, "audio_request": {}}},
+            }
+        )
+        await reach(Until("the request to reach the processor", lambda: proc._audio_pending))
+        await worker.queue_frames([TTSSpeakFrame("One.")])
+        await reach(Until("the turn to end", lambda: "turn_end" in kinds()))
+        await worker.queue_frame(EndFrame())
+        done, _ = await asyncio.wait({running}, timeout=WAIT_S)
+        assert done, f"the pipeline did not end within {WAIT_S:g} s of its EndFrame"
+        running.result()
+    except BaseException:
+        for _ in range(2):
+            running.cancel()
+            await asyncio.wait({running}, timeout=0.5)
+            if running.done():
+                break
+        if running.done() and not running.cancelled():
+            running.exception()
+        raise
+    finally:
+        client.leave()
+
+    envelopes = [e for _, e in client.avatar_messages()]
+    (mode,) = [e["audio_mode"] for e in envelopes if "audio_mode" in e]
+    (start,) = [e["turn_start"] for e in envelopes if "turn_start" in e]
+    assert mode == {"active": True, "first_turn_id": start["turn_id"], "sample_rate": RATE}
+    audio = [e["audio"] for e in envelopes if "audio" in e]
+    assert audio and audio[-1]["end"] and all(a["turn_id"] == start["turn_id"] for a in audio)
+    assert kinds().index("audio_mode") < kinds().index("audio")
+    assert base64.b64decode(audio[0]["data"])[:4] == b"OggS"
+    problems = [
+        record["message"]
+        for record in pipecat_log
+        if record["level"].no >= 40 or "dangling" in record["message"]
+    ]
+    assert problems == []

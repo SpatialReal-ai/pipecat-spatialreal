@@ -5,13 +5,18 @@ import pytest
 from google.protobuf.json_format import ParseDict
 
 from pipecat_spatialreal.envelope import (
+    CLIENT_MESSAGE_TYPE,
     FPS,
     MAX_CHUNK_BYTES,
     TAG,
+    audio,
+    audio_mode,
+    client_message,
     frames,
     state,
     to_dict,
     turn_abort,
+    turn_audio_only,
     turn_end,
     turn_envelope,
     turn_onsets,
@@ -240,3 +245,59 @@ def test_turn_envelope_round_trips_through_the_generated_message():
     assert all(p.turn_envelope.turn_id == "r1" for p in parsed)
     assert all((p.turn_envelope.hop_ms, p.turn_envelope.window_ms) == (5, 10) for p in parsed)
     assert b"".join(p.turn_envelope.values for p in parsed) == values
+
+
+def test_audio_shape():
+    d = audio("r1", 3, b"OggS\x00", end=True)
+    assert d == {
+        "tag": TAG,
+        "audio": {
+            "turn_id": "r1",
+            "seq": 3,
+            "data": base64.b64encode(b"OggS\x00").decode(),
+            "end": True,
+        },
+    }
+    assert audio("r1", 0, b"x", end=False)["audio"]["end"] is False
+
+
+def test_audio_mode_shape():
+    assert audio_mode(active=True, first_turn_id="r2", sample_rate=24000) == {
+        "tag": TAG,
+        "audio_mode": {"active": True, "first_turn_id": "r2", "sample_rate": 24000},
+    }
+    # Every key is present when the mode stops, unset ones as "" and 0.
+    assert audio_mode(active=False) == {
+        "tag": TAG,
+        "audio_mode": {"active": False, "first_turn_id": "", "sample_rate": 0},
+    }
+
+
+def test_turn_audio_only_shape():
+    assert turn_audio_only("r1") == {"tag": TAG, "turn_audio_only": {"turn_id": "r1"}}
+
+
+def test_client_message_reads_an_audio_request():
+    msg = client_message(CLIENT_MESSAGE_TYPE, {"tag": TAG, "audio_request": {}})
+    assert msg is not None and msg.WhichOneof("payload") == "audio_request"
+
+
+def test_client_message_ignores_unknown_keys():
+    msg = client_message(CLIENT_MESSAGE_TYPE, {"tag": TAG, "audio_request": {}, "later": 1})
+    assert msg is not None and msg.WhichOneof("payload") == "audio_request"
+
+
+@pytest.mark.parametrize(
+    "type_, data",
+    [
+        ("something-else", {"tag": TAG, "audio_request": {}}),  # another client message
+        (CLIENT_MESSAGE_TYPE, {"tag": "other", "audio_request": {}}),  # wrong tag
+        (CLIENT_MESSAGE_TYPE, {"tag": TAG}),  # no payload
+        (CLIENT_MESSAGE_TYPE, {"tag": TAG, "later_payload": {}}),  # a payload this version lacks
+        (CLIENT_MESSAGE_TYPE, "audio_request"),  # not an object
+        (CLIENT_MESSAGE_TYPE, None),
+        (CLIENT_MESSAGE_TYPE, {"tag": TAG, "audio_request": "yes"}),  # malformed member
+    ],
+)
+def test_client_message_returns_none_for_anything_else(type_, data):
+    assert client_message(type_, data) is None
