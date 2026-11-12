@@ -229,6 +229,8 @@ class _Turn:
         self.audio: OggOpusStream | None = None
         self.audio_pcm = bytearray()  # samples counted into the turn and not encoded yet
         self.audio_resampler: BaseAudioResampler | None = None  # when Opus cannot take the rate
+        self.audio_resampled_in = 0  # samples handed to audio_resampler, at the output rate
+        self.audio_resampled_out = 0  # samples it gave back and that were encoded
         self.audio_closed = False  # every sample of the turn is in audio_pcm (or encoded)
         self.audio_seq = 0  # audio messages sent
         self.audio_done = False  # the stream's last page went out
@@ -1434,9 +1436,15 @@ class SpatialRealAvatarProcessor(FrameProcessor):
                 if turn.audio_resampler is None:
                     turn.audio_resampler = create_stream_resampler(clear_after_secs=None)
                 if pcm:
+                    turn.audio_resampled_in += len(pcm) // 2
                     pcm = await turn.audio_resampler.resample(pcm, self._out_rate, self._audio_rate)
                 if last:
                     pcm += await turn.audio_resampler.flush()
+                    # A resampler's flush can give back a little more than the input lasted (the
+                    # tail of its filter); cut the stream to the turn's length, as the track has it.
+                    exact = round(turn.audio_resampled_in * self._audio_rate / self._out_rate)
+                    pcm = pcm[: 2 * max(0, exact - turn.audio_resampled_out)]
+                turn.audio_resampled_out += len(pcm) // 2
             pages = turn.audio.feed(pcm) if pcm else []
             if last:
                 pages += turn.audio.close()

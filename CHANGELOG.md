@@ -21,6 +21,7 @@ Tested with the SpatialReal iOS SDK 1.0.0-beta.8 and Android SDK 1.0.0-beta8 on 
 ### Changed
 
 - New dependency: `av` (PyAV), whose wheels bundle the Opus encoder.
+- Tests pass with Pipecat 1.16, whose default resampler changed.
 
 ## [0.1.1] - 2026-11-09
 

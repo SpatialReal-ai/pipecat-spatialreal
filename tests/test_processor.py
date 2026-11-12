@@ -787,7 +787,7 @@ async def test_other_audio_in_a_turn_is_sent_and_counted_and_keeps_its_class(fak
     # comes out before the next tone), are in the room whole and in their place.
     resampler = create_stream_resampler(clear_after_secs=None)
     chime_pcm = await resampler.resample(chime.audio, 16000, 24000) + await resampler.flush()
-    assert abs(len(chime_pcm) * 1000 / (2 * 24000) - 100) <= 1
+    assert abs(len(chime_pcm) * 1000 / (2 * 24000) - 100) <= 5  # resamplers differ in their tail
     assert released.index(chime_pcm) == 2 * 24000 * 200 // 1000  # right after the first tone
     # A released chunk keeps the class of the audio its first sample came from: the chime's
     # chunks are not counted as the bot speaking, the tones' are.
