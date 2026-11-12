@@ -148,9 +148,9 @@ In the app, the Pipecat module of the SpatialReal mobile SDK plays the voice and
 in sync with it:
 
 * **iOS:** the `SpatialRealPipecat` product of the
-  [iOS SDK](https://github.com/SpatialReal-ai/ios-sdk) (1.0.0-beta.8 or newer), iOS 16 or newer.
+  [iOS SDK](https://github.com/SpatialReal-ai/ios-sdk-release) (1.0.0-beta.8 or newer, Swift Package Manager), iOS 16 or newer.
 * **Android:** `implementation("ai.spatialreal:android-pipecat:1.0.0-beta8")`, Android 7.0
-  (API 24) or newer. See the [Android SDK](https://github.com/SpatialReal-ai/android-sdk).
+  (API 24) or newer. See the [Android SDK](https://docs.spatialreal.ai/sdk-reference/android-sdk/introduction).
 
 ## Run the example
 
