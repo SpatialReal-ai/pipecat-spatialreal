@@ -5,13 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-11
+
+Tested with the SpatialReal iOS SDK 1.0.0-beta.8 and Android SDK 1.0.0-beta8 on Daily.
 
 ### Added
 
-- Audio mode, for clients that cannot tap the bot's audio track, such as mobile apps. When the
-  client asks for it, each turn's audio is also sent to it as RTVI server
-  messages, Ogg Opus at TTS speed, alongside the animation. Nothing changes for browser clients.
+- Mobile apps: audio mode, for clients that cannot tap the bot's audio track. When the client asks
+  for it, each turn's audio is also sent to it as RTVI server messages, Ogg Opus at TTS speed,
+  alongside the animation. The Pipecat modules of the SpatialReal iOS and Android SDKs ask for it
+  on their own; the bot needs no change. Nothing changes for browser clients.
 - A `turn_audio_only` message when a turn loses its animation after it started. Clients that do
   not know it ignore it.
 

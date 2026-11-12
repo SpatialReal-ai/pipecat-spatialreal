@@ -13,7 +13,7 @@ Complete example (bot and web client):
 [spatialreal-examples](https://github.com/SpatialReal-ai/spatialreal-examples/tree/main/avatar-integration/pipecat).
 
 Tested with Pipecat v1.15.0, the SpatialReal Python SDK 0.3.0 and web SDK 1.0.0-beta.6, on Daily and
-LiveKit.
+LiveKit; mobile apps with the iOS SDK 1.0.0-beta.8 and Android SDK 1.0.0-beta8, on Daily.
 
 ## How it works
 
@@ -139,6 +139,18 @@ track, not another participant's.
 
 [`examples/client`](https://github.com/SpatialReal-ai/pipecat-spatialreal/tree/main/examples/client) is a complete page, and the
 [web client guide](https://docs.spatialreal.ai/avatar-integration/pipecat/web-client) builds one step by step.
+
+## Mobile apps
+
+A phone app on Daily cannot tap the bot's audio track, so the app asks the bot to send each turn's
+audio over RTVI as well. The processor answers that request on its own: the bot needs no change.
+In the app, the Pipecat module of the SpatialReal mobile SDK plays the voice and draws the avatar
+in sync with it:
+
+* **iOS:** the `SpatialRealPipecat` product of the
+  [iOS SDK](https://github.com/SpatialReal-ai/ios-sdk) (1.0.0-beta.8 or newer), iOS 16 or newer.
+* **Android:** `implementation("ai.spatialreal:android-pipecat:1.0.0-beta8")`, Android 7.0
+  (API 24) or newer. See the [Android SDK](https://github.com/SpatialReal-ai/android-sdk).
 
 ## Run the example
 
