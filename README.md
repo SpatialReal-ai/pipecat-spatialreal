@@ -12,7 +12,7 @@ Guide: [Pipecat on docs.spatialreal.ai](https://docs.spatialreal.ai/avatar-integ
 Complete example (bot and web client):
 [spatialreal-examples](https://github.com/SpatialReal-ai/spatialreal-examples/tree/main/avatar-integration/pipecat).
 
-Tested with Pipecat v1.15.0, the SpatialReal Python SDK 0.3.0 and web SDK 1.0.0-beta.6, on Daily and
+Tested with Pipecat v1.17.0, the SpatialReal Python SDK 0.3.0 and web SDK 1.0.0-beta.6, on Daily and
 LiveKit; mobile apps with the iOS SDK 1.0.0-beta.8 and Android SDK 1.0.0-beta8, on Daily.
 
 ## How it works
